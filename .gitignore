@@ -1,0 +1,44 @@
+# Synthesis outputs
+*.bit
+*.svf
+*.jed
+*.sof
+*.rbf
+*.pof
+
+# Quartus
+db/
+incremental_db/
+output_files/
+*.qws
+*.bak
+*.done
+*.summary
+*.jdi
+*.pin
+*.sld
+
+# Yosys / nextpnr
+*.json
+*.asc
+*.config
+*.log
+
+# Simulation
+*.vcd
+*.fst
+*.wlf
+work/
+transcript
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+*.swp
+*~
+
+# Claude Code
+.claude/

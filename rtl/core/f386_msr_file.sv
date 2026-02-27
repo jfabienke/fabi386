@@ -1,0 +1,98 @@
+/*
+ * fabi386: Model Specific Register (MSR) File
+ * Phase 5: The Runtime Bridge
+ * Provides the software interface to the OOB Debugger, HGU, and AAR Engine.
+ * Accessed via RDMSR (0F 32) and WRMSR (0F 30).
+ */
+
+import f386_pkg::*;
+
+module f386_msr_file (
+    input  logic         clk,
+    input  logic         reset_n,
+
+    // Interface to Execution Unit (RDMSR / WRMSR)
+    input  logic [31:0]  msr_idx,
+    input  logic [63:0]  msr_din,
+    input  logic         msr_we,
+    input  logic         msr_re,
+    output logic [63:0]  msr_dout,
+    output logic         msr_ack,
+
+    // Hardware Control Outputs
+    output logic [31:0]  guard_start,
+    output logic [31:0]  guard_end,
+    output logic         guard_en,
+
+    output logic [31:0]  thermal_base,
+    output logic         telemetry_en,
+
+    output logic [31:0]  host_debug_pc [4],
+    output logic [3:0]   host_debug_en,
+    output logic         host_debug_unlock
+);
+
+    // Internal Register Storage
+    logic [31:0] reg_guard_start;
+    logic [31:0] reg_guard_end;
+    logic        reg_guard_en;
+    logic [31:0] reg_thermal_base;
+    logic        reg_telemetry_en;
+    logic [31:0] reg_debug_pc [4];
+    logic [3:0]  reg_debug_en;
+    logic        reg_debug_unlock;
+
+    // Output assignments
+    assign guard_start  = reg_guard_start;
+    assign guard_end    = reg_guard_end;
+    assign guard_en     = reg_guard_en;
+    assign thermal_base = reg_thermal_base;
+    assign telemetry_en = reg_telemetry_en;
+    assign host_debug_en = reg_debug_en;
+    assign host_debug_unlock = reg_debug_unlock;
+    genvar i;
+    generate
+        for (i = 0; i < 4; i++) assign host_debug_pc[i] = reg_debug_pc[i];
+    endgenerate
+
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
+            reg_guard_start  <= 32'h0;
+            reg_guard_end    <= 32'h0;
+            reg_guard_en     <= 1'b0;
+            reg_thermal_base <= 32'h0F000000; // Default mapping
+            reg_telemetry_en <= 1'b0;
+            reg_debug_unlock <= 1'b0;
+            for(int j=0; j<4; j++) reg_debug_en[j] <= 1'b0;
+            msr_ack <= 0;
+        end else begin
+            msr_ack <= 0;
+            msr_dout <= 64'h0;
+
+            if (msr_we) begin
+                msr_ack <= 1;
+                case (msr_idx)
+                    32'hC000_1000: {reg_guard_en, reg_guard_start} <= {msr_din[32], msr_din[31:0]};
+                    32'hC000_1001: reg_guard_end <= msr_din[31:0];
+                    32'hC000_1002: {reg_telemetry_en, reg_thermal_base} <= {msr_din[32], msr_din[31:0]};
+                    32'hC000_1010: reg_debug_unlock <= (msr_din[31:0] == 32'hDEADBEEF); // Unlock Key
+                    32'hC000_1011: reg_debug_pc[0] <= msr_din[31:0];
+                    32'hC000_1012: reg_debug_pc[1] <= msr_din[31:0];
+                    32'hC000_1015: reg_debug_en <= msr_din[3:0];
+                endcase
+            end
+            else if (msr_re) begin
+                msr_ack <= 1;
+                case (msr_idx)
+                    32'hC000_1000: msr_dout <= {31'h0, reg_guard_en, reg_guard_start};
+                    32'hC000_1001: msr_dout <= {32'h0, reg_guard_end};
+                    32'hC000_1002: msr_dout <= {31'h0, reg_telemetry_en, reg_thermal_base};
+                    32'hC000_1010: msr_dout <= {63'h0, reg_debug_unlock};
+                    32'hC000_1011: msr_dout <= {32'h0, reg_debug_pc[0]};
+                    32'hC000_1015: msr_dout <= {60'h0, reg_debug_en};
+                endcase
+            end
+        end
+    end
+
+endmodule

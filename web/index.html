@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The fabi386 Project: RE-Master Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        neo: {
+                            bg: '#020617',      // Near black
+                            card: '#0f172a',    // Slate 900
+                            text: '#f8fafc',
+                            sub: '#64748b',
+                            cyan: '#22d3ee',
+                            violet: '#a78bfa',
+                            pink: '#f472b6',
+                            emerald: '#10b981',
+                            amber: '#fbbf24'
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['Fira Code', 'monospace']
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .blueprint-grid {
+            background-size: 30px 30px;
+            background-image: linear-gradient(to right, #1e293b 1px, transparent 1px),
+                              linear-gradient(to bottom, #1e293b 1px, transparent 1px);
+        }
+        .thermal-hot { box-shadow: 0 0 20px rgba(34, 211, 238, 0.4); border-color: #22d3ee !important; }
+        .logic-gate { transition: all 0.2s ease; cursor: pointer; }
+        .logic-gate:hover { filter: brightness(1.2); transform: translateY(-2px); }
+    </style>
+</head>
+<body class="bg-neo-bg text-neo-text font-sans selection:bg-neo-cyan selection:text-neo-bg">
+
+    <header class="py-16 px-8 border-b border-white/5 bg-gradient-to-b from-neo-card to-neo-bg">
+        <div class="max-w-6xl mx-auto">
+            <div class="flex items-center gap-4 mb-4">
+                <span class="px-3 py-1 rounded-full bg-neo-cyan/10 border border-neo-cyan/20 text-neo-cyan text-[10px] font-bold uppercase tracking-widest">Ultra-RE Edition</span>
+                <span class="text-neo-sub text-xs font-mono">Build 2026.02.27</span>
+            </div>
+            <h1 class="text-5xl md:text-7xl font-black tracking-tighter mb-6 bg-clip-text text-transparent bg-gradient-to-r from-neo-cyan to-neo-violet">
+                Active Reconstruction
+            </h1>
+            <p class="text-xl text-neo-sub max-w-2xl leading-relaxed">
+                The first x86 processor that builds its own memory map. Witness functional hot-paths, timing deltas, and I/O sequences in real-time silicon.
+            </p>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-8 py-20 space-y-32">
+
+        <!-- SECTION: FUNCTIONAL PROFILING -->
+        <section class="grid grid-cols-1 lg:grid-cols-2 gap-16 items-center">
+            <div class="space-y-8">
+                <h2 class="text-4xl font-bold">Functional Profiling</h2>
+                <p class="text-neo-sub leading-relaxed text-lg">
+                    By "marrying" prologue detection with 150MHz cycle counting, the fabi386 doesn't just show which code is hot—it shows which functions are <span class="text-neo-cyan font-bold">expensive</span>.
+                </p>
+
+                <div class="space-y-4">
+                    <div class="p-6 bg-neo-card rounded-xl border border-white/5 flex gap-6 items-start">
+                        <div class="w-12 h-12 rounded-lg bg-neo-cyan/10 border border-neo-cyan/20 flex items-center justify-center shrink-0">
+                            <svg class="w-6 h-6 text-neo-cyan" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        </div>
+                        <div>
+                            <h4 class="font-bold text-white mb-1">Timing Deltas</h4>
+                            <p class="text-sm text-neo-sub">Calculates the exact duration between <code class="text-neo-violet">SEM_PROLOGUE</code> and <code class="text-neo-violet">SEM_EPILOGUE</code> at 6.67ns resolution.</p>
+                        </div>
+                    </div>
+
+                    <div class="p-6 bg-neo-card rounded-xl border border-white/5 flex gap-6 items-start">
+                        <div class="w-12 h-12 rounded-lg bg-neo-emerald/10 border border-neo-emerald/20 flex items-center justify-center shrink-0">
+                            <svg class="w-6 h-6 text-neo-emerald" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+                        </div>
+                        <div>
+                            <h4 class="font-bold text-white mb-1">Invocation Counters</h4>
+                            <p class="text-sm text-neo-sub">32-bit hardware registers track billions of function calls in the HyperRAM statistics bank.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- LIVE RECONSTRUCTION SIMULATOR -->
+            <div class="bg-neo-card rounded-2xl border border-white/10 p-8 shadow-2xl relative overflow-hidden">
+                <div class="absolute top-0 right-0 p-4 font-mono text-[10px] text-neo-sub opacity-30">AAR_RECON_V3.0</div>
+                <h3 class="font-mono text-xs text-neo-cyan uppercase tracking-widest mb-6">Real-Time Reconstruction View</h3>
+
+                <div class="space-y-6 font-mono">
+                    <!-- Function A -->
+                    <div class="border-l-2 border-neo-emerald pl-4 py-2 bg-neo-emerald/5 rounded-r-lg">
+                        <div class="flex justify-between items-center mb-2">
+                            <span class="text-xs text-neo-emerald font-bold">init_vga_controller()</span>
+                            <span class="text-[10px] bg-neo-emerald/20 px-2 py-0.5 rounded">Calls: 1</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div class="bg-neo-emerald h-full w-[100%]"></div>
+                        </div>
+                        <div class="mt-2 text-[9px] text-neo-sub">Avg Duration: 450.2 &mu;s</div>
+                    </div>
+
+                    <!-- Function B (Hot) -->
+                    <div class="border-l-2 border-neo-cyan pl-4 py-2 bg-neo-cyan/5 rounded-r-lg thermal-hot">
+                        <div class="flex justify-between items-center mb-2">
+                            <span class="text-xs text-neo-cyan font-bold italic">render_scanline_loop()</span>
+                            <span class="text-[10px] bg-neo-cyan/20 px-2 py-0.5 rounded">Calls: 12,452</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div class="bg-neo-cyan h-full w-[85%] animate-pulse"></div>
+                        </div>
+                        <div class="mt-2 text-[9px] text-neo-cyan">Avg Duration: 12.8 &mu;s <span class="ml-2 opacity-50">[HOT]</span></div>
+                    </div>
+
+                    <!-- Function C (Expensive) -->
+                    <div class="border-l-2 border-neo-violet pl-4 py-2 bg-neo-violet/5 rounded-r-lg">
+                        <div class="flex justify-between items-center mb-2">
+                            <span class="text-xs text-neo-violet font-bold">calculate_physics_delta()</span>
+                            <span class="text-[10px] bg-neo-violet/20 px-2 py-0.5 rounded">Calls: 60</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div class="bg-neo-violet h-full w-[40%]"></div>
+                        </div>
+                        <div class="mt-2 text-[9px] text-neo-sub">Avg Duration: 1,280.5 &mu;s <span class="ml-2 text-neo-pink">[EXPENSIVE]</span></div>
+                    </div>
+                </div>
+
+                <div class="mt-12 pt-6 border-t border-white/5 flex justify-between items-center">
+                    <div class="text-[10px] text-neo-sub uppercase font-bold tracking-tighter">HyperRAM Bandwidth</div>
+                    <div class="flex gap-1">
+                        <div class="w-1.5 h-1.5 rounded-full bg-neo-emerald"></div>
+                        <div class="w-1.5 h-1.5 rounded-full bg-neo-emerald"></div>
+                        <div class="w-1.5 h-1.5 rounded-full bg-neo-emerald/30"></div>
+                        <div class="w-1.5 h-1.5 rounded-full bg-neo-emerald/30"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- PERFORMANCE IMPACT CHART -->
+        <section class="space-y-12">
+            <div class="text-center">
+                <h2 class="text-3xl font-bold text-white">RE Analysis Throughput</h2>
+                <p class="text-neo-sub mt-2">Zero-cycle analysis means the research doesn't slow down the target.</p>
+            </div>
+
+            <div class="bg-neo-card p-10 rounded-2xl border border-white/5 shadow-inner">
+                <canvas id="reThroughputChart" height="100"></canvas>
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="py-20 text-center border-t border-white/5 bg-neo-bg">
+        <p class="text-neo-sub font-mono text-xs uppercase tracking-[0.5em]">Silicon Integrity Since 1985</p>
+    </footer>
+
+    <script>
+        const ctx = document.getElementById('reThroughputChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: ['1ms', '2ms', '3ms', '4ms', '5ms', '6ms'],
+                datasets: [
+                    {
+                        label: 'Instruction Retirement (MHz)',
+                        data: [150, 150, 150, 150, 150, 150],
+                        borderColor: '#22d3ee',
+                        borderWidth: 2,
+                        tension: 0.4,
+                        fill: false
+                    },
+                    {
+                        label: 'Telemetry Writeback (MB/s)',
+                        data: [12, 45, 110, 85, 92, 115],
+                        borderColor: '#a78bfa',
+                        borderWidth: 2,
+                        tension: 0.4,
+                        fill: true,
+                        backgroundColor: 'rgba(167, 139, 250, 0.05)'
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { display: false },
+                    x: { grid: { display: false }, ticks: { display: false } }
+                }
+            }
+        });
+    </script>
+</body>
+</html>

@@ -82,13 +82,12 @@ module f386_rob (
     assign free_slots = 5'd16 - count;
     assign full = (free_slots < {3'd0, dispatch_count});
 
-    // Assigned tags are simply the current tail positions
-    assign rob_tag_u = tail;
-    assign rob_tag_v = tail + 4'd1;
-
-    // V-pipe dispatch slot: next after U if U is also dispatching
+    // Assigned tags match the actual dispatch slots
+    // V-pipe slot: next after U if U is also dispatching, else same as U
     logic [3:0] v_slot;
-    assign v_slot = dispatch_u_valid ? (tail + 4'd1) : tail;
+    assign v_slot   = dispatch_u_valid ? (tail + 4'd1) : tail;
+    assign rob_tag_u = tail;
+    assign rob_tag_v = v_slot;
 
     // =========================================================
     // Dispatch (tail advances)
@@ -98,7 +97,7 @@ module f386_rob (
             tail <= 4'd0;
             entry_valid <= 16'd0;
         end else if (flush) begin
-            tail <= head;
+            tail <= 4'd0;
             entry_valid <= 16'd0;
         end else if (!full) begin
             if (dispatch_u_valid) begin
@@ -160,9 +159,10 @@ module f386_rob (
     // U-pipe: oldest instruction can retire if valid and complete
     assign can_retire_u = entry_valid[head] && entry_complete[head];
 
-    // V-pipe: next-oldest can retire only if U also retires this cycle
-    assign can_retire_v = can_retire_u &&
-                          entry_valid[head_plus1] && entry_complete[head_plus1];
+    // V-pipe: next-oldest can retire only if U also retires without exception
+    assign can_retire_v = can_retire_u && !entry_exception[head] &&
+                          entry_valid[head_plus1] && entry_complete[head_plus1] &&
+                          !entry_exception[head_plus1];
 
     // Build retirement outputs
     always_comb begin
@@ -180,8 +180,8 @@ module f386_rob (
             retire_u_valid = 1'b1;
             retire_count   = 2'd1;
 
-            // If U retires with an exception, don't retire V (precise exceptions)
-            if (!entry_exception[head] && can_retire_v) begin
+            // V retires only if both U and V are exception-free (precise exceptions)
+            if (can_retire_v) begin
                 retire_v.instr = entry_instr[head_plus1];
                 retire_v.data  = entry_data[head_plus1];
                 retire_v.ready = 1'b1;

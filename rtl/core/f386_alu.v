@@ -92,6 +92,8 @@ module f386_alu (
     // --- ALU Core ---
     reg [31:0] raw_result;
     reg [32:0] shl_wide;   // 33-bit shift result for SHL carry capture
+    reg [4:0]  rol_count;  // Size-masked rotate count
+    reg [4:0]  ror_count;
     reg        cf_raw;
     reg        af_raw;
     reg        of_raw;
@@ -99,6 +101,8 @@ module f386_alu (
     always @(*) begin
         raw_result = 32'd0;
         shl_wide   = 33'd0;
+        rol_count  = 5'd0;
+        ror_count  = 5'd0;
         cf_raw     = 1'b0;
         af_raw     = 1'b0;
         of_raw     = 1'b0;
@@ -195,17 +199,53 @@ module f386_alu (
                 of_raw     = 1'b0;  // Always 0 for SAR
             end
 
-            // ---- Rotates ----
+            // ---- Rotates (size-aware) ----
+            // x86 masks rotate count: mod 8 for 8-bit, mod 16 for 16-bit, mod 32 for 32-bit
             OP_ROL: begin
-                raw_result = (a << shamt) | (a >> (6'd32 - {1'b0, shamt}));
-                cf_raw     = raw_result[0];
-                of_raw     = (shamt == 5'd1) ? (raw_result[msb] ^ raw_result[0]) : 1'b0;
+                case (opsz)
+                    2'b10: begin  // 8-bit
+                        rol_count  = {2'd0, shamt[2:0]};  // mod 8
+                        raw_result = {24'd0,
+                                      a[7:0] << rol_count[2:0] |
+                                      a[7:0] >> (3'd8 - rol_count[2:0])};
+                    end
+                    2'b01: begin  // 16-bit
+                        rol_count  = {1'd0, shamt[3:0]};  // mod 16
+                        raw_result = {16'd0,
+                                      a[15:0] << rol_count[3:0] |
+                                      a[15:0] >> (4'd16 - rol_count[3:0])};
+                    end
+                    default: begin  // 32-bit
+                        rol_count  = shamt;
+                        raw_result = (a << shamt) | (a >> (6'd32 - {1'b0, shamt}));
+                    end
+                endcase
+                cf_raw = (shamt != 5'd0) ? raw_result[0] : cin;
+                of_raw = (shamt == 5'd1) ? (raw_result[msb] ^ raw_result[0]) : 1'b0;
             end
 
             OP_ROR: begin
-                raw_result = (a >> shamt) | (a << (6'd32 - {1'b0, shamt}));
-                cf_raw     = raw_result[msb];
-                of_raw     = (shamt == 5'd1) ? (raw_result[msb] ^ raw_result[msb - 1]) : 1'b0;
+                case (opsz)
+                    2'b10: begin  // 8-bit
+                        ror_count  = {2'd0, shamt[2:0]};
+                        raw_result = {24'd0,
+                                      a[7:0] >> ror_count[2:0] |
+                                      a[7:0] << (3'd8 - ror_count[2:0])};
+                    end
+                    2'b01: begin  // 16-bit
+                        ror_count  = {1'd0, shamt[3:0]};
+                        raw_result = {16'd0,
+                                      a[15:0] >> ror_count[3:0] |
+                                      a[15:0] << (4'd16 - ror_count[3:0])};
+                    end
+                    default: begin  // 32-bit
+                        ror_count  = shamt;
+                        raw_result = (a >> shamt) | (a << (6'd32 - {1'b0, shamt}));
+                    end
+                endcase
+                cf_raw = (shamt != 5'd0) ? raw_result[msb] : cin;
+                // OF for ROR count=1: old MSB XOR new MSB
+                of_raw = (shamt == 5'd1) ? (a[msb] ^ raw_result[msb]) : 1'b0;
             end
 
             default: begin

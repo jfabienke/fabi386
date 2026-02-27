@@ -45,6 +45,7 @@ module f386_fpu_spatial (
 
     output reg [31:0] fp_res,
     output reg        fp_done,
+    output wire       fp_busy,    // High while FPU is processing (not idle)
     output reg [3:0]  fp_status   // {C3, C2, C1, C0}
 );
 
@@ -106,29 +107,57 @@ module f386_fpu_spatial (
     // =================================================================
     // Integer-to-Float Conversion (combinational)
     // =================================================================
-    // Reference: mor1kx pfpu32_i2f.v — leading-zero-count + shift + pack
+    // Reference: mor1kx pfpu32_i2f.v — casez priority encoder for LZC
     reg [31:0] i2f_result;
     reg [31:0] i2f_abs;
     reg        i2f_sign_r;
     reg [4:0]  i2f_lzc;
     reg [31:0] i2f_shifted;
     reg [7:0]  i2f_exp;
-    integer    lz_i;
 
     always @(*) begin
         i2f_sign_r = fp_b[31];
         i2f_abs    = i2f_sign_r ? (~fp_b + 32'd1) : fp_b;
 
-        // Leading zero count on magnitude
-        i2f_lzc = 5'd31;
-        for (lz_i = 31; lz_i >= 0; lz_i = lz_i - 1) begin
-            if (i2f_abs[lz_i])
-                i2f_lzc = 5'd31 - lz_i[4:0];
-        end
+        // Leading zero count via priority encoder (finds MSB position)
+        casez (i2f_abs)
+            32'b1???????????????????????????????: i2f_lzc = 5'd0;
+            32'b01??????????????????????????????: i2f_lzc = 5'd1;
+            32'b001?????????????????????????????: i2f_lzc = 5'd2;
+            32'b0001????????????????????????????: i2f_lzc = 5'd3;
+            32'b00001???????????????????????????: i2f_lzc = 5'd4;
+            32'b000001??????????????????????????: i2f_lzc = 5'd5;
+            32'b0000001?????????????????????????: i2f_lzc = 5'd6;
+            32'b00000001????????????????????????: i2f_lzc = 5'd7;
+            32'b000000001???????????????????????: i2f_lzc = 5'd8;
+            32'b0000000001??????????????????????: i2f_lzc = 5'd9;
+            32'b00000000001?????????????????????: i2f_lzc = 5'd10;
+            32'b000000000001????????????????????: i2f_lzc = 5'd11;
+            32'b0000000000001???????????????????: i2f_lzc = 5'd12;
+            32'b00000000000001??????????????????: i2f_lzc = 5'd13;
+            32'b000000000000001?????????????????: i2f_lzc = 5'd14;
+            32'b0000000000000001????????????????: i2f_lzc = 5'd15;
+            32'b00000000000000001???????????????: i2f_lzc = 5'd16;
+            32'b000000000000000001??????????????: i2f_lzc = 5'd17;
+            32'b0000000000000000001?????????????: i2f_lzc = 5'd18;
+            32'b00000000000000000001????????????: i2f_lzc = 5'd19;
+            32'b000000000000000000001???????????: i2f_lzc = 5'd20;
+            32'b0000000000000000000001??????????: i2f_lzc = 5'd21;
+            32'b00000000000000000000001?????????: i2f_lzc = 5'd22;
+            32'b000000000000000000000001????????: i2f_lzc = 5'd23;
+            32'b0000000000000000000000001???????: i2f_lzc = 5'd24;
+            32'b00000000000000000000000001??????: i2f_lzc = 5'd25;
+            32'b000000000000000000000000001?????: i2f_lzc = 5'd26;
+            32'b0000000000000000000000000001????: i2f_lzc = 5'd27;
+            32'b00000000000000000000000000001???: i2f_lzc = 5'd28;
+            32'b000000000000000000000000000001??: i2f_lzc = 5'd29;
+            32'b0000000000000000000000000000001?: i2f_lzc = 5'd30;
+            32'b00000000000000000000000000000001: i2f_lzc = 5'd31;
+            default:                              i2f_lzc = 5'd0;
+        endcase
 
         // Shift MSB to bit 31, then drop it (implicit 1)
         i2f_shifted = i2f_abs << i2f_lzc;
-        // Exponent: bias(127) + 31 - leading_zeros
         i2f_exp     = 8'd158 - {3'd0, i2f_lzc};
 
         if (fp_b == 32'd0)
@@ -210,9 +239,12 @@ module f386_fpu_spatial (
     localparam [2:0] S_ADDSUB_3 = 3'd2;  // ADD/SUB stage 3: normalize+round
     localparam [2:0] S_MUL_NORM = 3'd3;  // MUL: normalize+round
     localparam [2:0] S_DIV_ITER = 3'd4;  // DIV: iterative division
-    localparam [2:0] S_DONE     = 3'd5;  // Write result
+    localparam [2:0] S_DIV_NORM = 3'd5;  // DIV: normalize quotient
+    localparam [2:0] S_DONE     = 3'd6;  // Write result
 
     reg [2:0] state;
+
+    assign fp_busy = (state != S_IDLE);
 
     // =================================================================
     // Pipeline Registers
@@ -275,17 +307,15 @@ module f386_fpu_spatial (
                 end
                 norm_sign_in = p_sign;
             end
-            S_DIV_ITER: begin
-                if (p_div_count == 5'd0) begin
-                    if (!p_quotient[23] && |p_quotient) begin
-                        norm_mant_in = {p_quotient[22:0], |p_remainder, 4'd0};
-                        norm_exp_in  = p_exp - 10'd1;
-                    end else begin
-                        norm_mant_in = {p_quotient, 4'd0};
-                        norm_exp_in  = p_exp;
-                    end
-                    norm_sign_in = p_sign;
+            S_DIV_NORM: begin
+                if (!p_quotient[23] && |p_quotient) begin
+                    norm_mant_in = {p_quotient[22:0], |p_remainder, 4'd0};
+                    norm_exp_in  = p_exp - 10'd1;
+                end else begin
+                    norm_mant_in = {p_quotient, 4'd0};
+                    norm_exp_in  = p_exp;
                 end
+                norm_sign_in = p_sign;
             end
             default: ;
         endcase
@@ -294,7 +324,6 @@ module f386_fpu_spatial (
     reg [27:0] n_mant;
     reg [9:0]  n_exp;
     reg [4:0]  n_lzc;
-    integer    ni;
 
     always @(*) begin
         n_mant = norm_mant_in;
@@ -310,15 +339,38 @@ module f386_fpu_spatial (
                 n_mant = {n_mant[27:1], n_mant[0]};  // Sticky OR into LSB
                 n_exp  = n_exp + 10'd1;
             end else begin
-                // Leading zero count for normalization
-                // Reference: mor1kx pfpu32_addsub.v — priority encoder for LZC
-                n_lzc = 5'd0;
-                for (ni = 26; ni >= 0; ni = ni - 1) begin
-                    if (n_mant[ni])
-                        n_lzc = 5'd0;
-                    else if (ni == 26 || n_lzc == (5'd26 - ni[4:0]))
-                        n_lzc = 5'd27 - ni[4:0];
-                end
+                // Leading zero count via priority encoder on bits [26:0]
+                // Finds position of highest set bit; LZC = distance from bit 26
+                casez (n_mant[26:0])
+                    27'b1??????????????????????????: n_lzc = 5'd0;
+                    27'b01?????????????????????????: n_lzc = 5'd1;
+                    27'b001????????????????????????: n_lzc = 5'd2;
+                    27'b0001???????????????????????: n_lzc = 5'd3;
+                    27'b00001??????????????????????: n_lzc = 5'd4;
+                    27'b000001?????????????????????: n_lzc = 5'd5;
+                    27'b0000001????????????????????: n_lzc = 5'd6;
+                    27'b00000001???????????????????: n_lzc = 5'd7;
+                    27'b000000001??????????????????: n_lzc = 5'd8;
+                    27'b0000000001?????????????????: n_lzc = 5'd9;
+                    27'b00000000001????????????????: n_lzc = 5'd10;
+                    27'b000000000001???????????????: n_lzc = 5'd11;
+                    27'b0000000000001??????????????: n_lzc = 5'd12;
+                    27'b00000000000001?????????????: n_lzc = 5'd13;
+                    27'b000000000000001????????????: n_lzc = 5'd14;
+                    27'b0000000000000001???????????: n_lzc = 5'd15;
+                    27'b00000000000000001??????????: n_lzc = 5'd16;
+                    27'b000000000000000001?????????: n_lzc = 5'd17;
+                    27'b0000000000000000001????????: n_lzc = 5'd18;
+                    27'b00000000000000000001???????: n_lzc = 5'd19;
+                    27'b000000000000000000001??????: n_lzc = 5'd20;
+                    27'b0000000000000000000001?????: n_lzc = 5'd21;
+                    27'b00000000000000000000001????: n_lzc = 5'd22;
+                    27'b000000000000000000000001???: n_lzc = 5'd23;
+                    27'b0000000000000000000000001??: n_lzc = 5'd24;
+                    27'b00000000000000000000000001?: n_lzc = 5'd25;
+                    27'b000000000000000000000000001: n_lzc = 5'd26;
+                    default:                         n_lzc = 5'd27;
+                endcase
 
                 // Shift left to normalize, but don't underflow exponent
                 if ({5'd0, n_lzc} < n_exp) begin
@@ -664,9 +716,8 @@ module f386_fpu_spatial (
             // =========================================================
             S_DIV_ITER: begin
                 if (p_div_count == 5'd0) begin
-                    // Division complete — normalize via combinational helper
-                    p_result <= norm_result;
-                    state    <= S_DONE;
+                    // Division complete — latch quotient, then normalize next cycle
+                    state <= S_DIV_NORM;
                 end else begin
                     // One bit of quotient per cycle
                     if (p_remainder >= {1'b0, p_divisor}) begin
@@ -678,6 +729,14 @@ module f386_fpu_spatial (
                     end
                     p_div_count <= p_div_count - 5'd1;
                 end
+            end
+
+            // =========================================================
+            // DIV: Normalize quotient (1 cycle after iteration completes)
+            // =========================================================
+            S_DIV_NORM: begin
+                p_result <= norm_result;
+                state    <= S_DONE;
             end
 
             // =========================================================

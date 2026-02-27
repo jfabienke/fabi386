@@ -58,6 +58,7 @@ module f386_execute_stage (
     // Spatial FPU (Shared/U-Pipe)
     logic [31:0] fpu_res;
     logic        fpu_done;
+    logic        fpu_busy;
     logic [3:0]  fpu_status;
     f386_fpu_spatial fpu_inst (
         .clk(clk), .reset_n(reset_n),
@@ -66,6 +67,7 @@ module f386_execute_stage (
         .fp_req(u_valid && u_instr.op_category == OP_FLOAT),
         .fp_res(fpu_res),
         .fp_done(fpu_done),
+        .fp_busy(fpu_busy),
         .fp_status(fpu_status)
     );
 
@@ -90,8 +92,8 @@ module f386_execute_stage (
                     wb_we_u   = 1'b1;
                 end
                 OP_FLOAT: begin
-                    if (!fpu_done) begin
-                        u_ready = 1'b0; // Stall pipeline for FPU
+                    if (fpu_busy || !fpu_done) begin
+                        u_ready = 1'b0; // Stall pipeline while FPU is busy
                     end else begin
                         wb_data_u = fpu_res;
                         wb_we_u   = 1'b1;

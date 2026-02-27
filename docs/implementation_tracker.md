@@ -1,8 +1,8 @@
 # fabi386 Implementation Tracker
 
 **Last updated:** 2026-02-27
-**Total RTL:** 5,938 lines across 30 files
-**Overall completion:** ~65%
+**Total RTL:** 6,433 lines across 35 files
+**Overall completion:** ~70%
 
 ---
 
@@ -56,7 +56,7 @@
 | 29 | Audio DSP (OPL3) | *not created* | — | MISSING | 0 | LOW | Planned for 48 DSP slices |
 | 30 | FPGA top-level (`fabi386_top.sv`) | *not created* | — | MISSING | 0 | HIGH | Clock/reset, pin mux, bus arbitration |
 
-## Instrumentation / HARE Suite (~90%)
+## Instrumentation / HARE Suite (~100%)
 
 | # | Feature | Module | Lines | Status | % | Priority | Notes |
 |---|---------|--------|-------|--------|---|----------|-------|
@@ -66,7 +66,11 @@
 | 34 | Address classifier | `f386_address_classifier.sv` | 68 | DONE | 100 | — | Memory type identification by latency |
 | 35 | V86 mode monitor | `f386_v86_monitor.sv` | 49 | DONE | 100 | — | VM flag tracking + semantic tagging |
 | 36 | Stride prefetcher | `f386_prefetch_unit.sv` | 74 | DONE | 100 | — | Confidence-tracked stride detection |
-| 37 | AAR telemetry engine | *not created* | — | MISSING | 0 | MED | Shadow stack, thermal map, trace DMA |
+| 37 | AAR telemetry engine | `f386_aar_engine.sv` | 141 | DONE | 100 | — | Wrapper: tagger + shadow stack + stride + DMA |
+| 38 | Semantic tagger | `f386_semantic_tagger.sv` | 62 | DONE | 100 | — | 9-pattern prologue/epilogue/syscall/mode-switch |
+| 39 | Shadow stack (512-entry) | `f386_shadow_stack.sv` | 88 | DONE | 100 | — | CALL/RET tracking, stack_fault on mismatch |
+| 40 | Stride detector | `f386_stride_detector.sv` | 67 | DONE | 100 | — | Array/struct inference from bus address patterns |
+| 41 | Telemetry DMA | `f386_telemetry_dma.sv` | 137 | DONE | 100 | — | 4-word async packet writes to HyperRAM trace buffer |
 
 ## Verification & Infrastructure (~25%)
 
@@ -87,9 +91,9 @@
 | Branch Prediction | 4 | 4 | 0 | 0 | **96%** |
 | Memory Subsystem | 6 | 2 | 0 | 3 | **40%** |
 | SoC / Peripherals | 7 | 2 | 2 | 3 | **35%** |
-| Instrumentation | 7 | 6 | 0 | 1 | **90%** |
+| Instrumentation | 11 | 11 | 0 | 0 | **100%** |
 | Verification | 4 | 1 | 0 | 3 | **25%** |
-| **Overall** | **41** | **24** | **4** | **11** | **~65%** |
+| **Overall** | **45** | **29** | **4** | **7** | **~70%** |
 
 ---
 
@@ -120,7 +124,7 @@ After these 7 items, the design can synthesize for DE10-Nano and boot a DOS bina
 | L2 Cache (128KB) | 1,400 | 64 | 0 | Implemented |
 | BTB (4096-entry) | 600 | 12 | 0 | Not started |
 | Audio DSP (OPL3) | 850 | 4 | 48 | Not started |
-| Instrumentation (HARE) | 10,450 | 60 | 0 | Mostly implemented |
+| Instrumentation (HARE) | 10,450 | 60 | 0 | Complete |
 | SVGA & Accelerator | 11,550 | 6 | 8 | Partial (accel done, SVGA missing) |
 | PnR Buffer | ~5,500 | — | — | Headroom |
 | **Total** | **~63,000** | **170** | **60** | |
@@ -160,3 +164,5 @@ Target: Cyclone V 5CSEBA6U23I7 (DE10-Nano) — 41,910 ALMs / 166,036 LE equivale
 | 2026-02-27 | OoO core top rewritten: 74->410 lines, full pipeline integration |
 | 2026-02-27 | Package: added `instr_info_t` struct, resolved compile errors |
 | 2026-02-27 | Expert review fixes: LZC priority encoders, DIV normalization, rotate size-awareness |
+| 2026-02-27 | AAR engine created: semantic tagger, shadow stack, stride detector, telemetry DMA |
+| 2026-02-27 | Instrumentation suite now 100% complete (11/11 modules) |

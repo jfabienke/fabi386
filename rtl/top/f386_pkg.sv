@@ -50,6 +50,24 @@ package f386_pkg;
         CLASS_HOLE     = 3'd4  // Unmapped/Empty
     } mem_class_t;
 
+    // --- Dispatch/Execute Instruction Packet ---
+    // Used by f386_dispatch and f386_execute_stage for decoded instructions
+    // flowing from decode → dispatch → execute.
+    typedef struct packed {
+        logic           is_valid;
+        logic [31:0]    pc;
+        logic [7:0]     opcode;       // ALU: [5:0] = alu_op, FPU: [3:0] = fp_op
+        op_type_t       op_category;
+        logic [2:0]     reg_dest;     // Architectural GPR destination (0-7)
+        logic [2:0]     reg_src_a;
+        logic [2:0]     reg_src_b;
+        rob_id_t        rob_tag;      // ROB slot assigned at dispatch
+        logic [31:0]    imm_value;    // Immediate / branch displacement
+        logic [5:0]     flags_in;     // Incoming EFLAGS {OF,SF,ZF,AF,PF,CF}
+        logic           pred_taken;   // Branch prediction: taken?
+        logic [31:0]    pred_target;  // Branch prediction: predicted target
+    } instr_info_t;
+
     // --- Pipeline Packets ---
     typedef struct packed {
         logic           valid;

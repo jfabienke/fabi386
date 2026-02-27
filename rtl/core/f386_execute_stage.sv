@@ -47,7 +47,9 @@ module f386_execute_stage (
     // --- Writeback to Architectural State ---
     output logic [31:0]  wb_data_u,
     output logic [31:0]  wb_data_v,
-    output logic [5:0]   wb_flags,
+    output logic [5:0]   wb_flags,       // EFLAGS update {OF,SF,ZF,AF,PF,CF}
+    output logic [3:0]   wb_fpu_status,  // x87 condition codes {C3,C2,C1,C0}
+    output logic         wb_fpu_status_we, // FPU status valid
     output logic         wb_we_u,
     output logic         wb_we_v,
 
@@ -137,8 +139,8 @@ module f386_execute_stage (
     always_comb begin
         br_actual_taken = 1'b0;
         case (u_instr.opcode[3:0])
-            4'h0: br_actual_taken =  u_instr.flags_in[0];           // JO  (OF=1)... mapped to CF position for simplicity
-            4'h1: br_actual_taken = !u_instr.flags_in[0];           // JNO
+            4'h0: br_actual_taken =  u_instr.flags_in[5];           // JO  (OF=1)
+            4'h1: br_actual_taken = !u_instr.flags_in[5];           // JNO (OF=0)
             4'h2: br_actual_taken =  u_instr.flags_in[0];           // JB/JC   (CF=1)
             4'h3: br_actual_taken = !u_instr.flags_in[0];           // JNB/JNC (CF=0)
             4'h4: br_actual_taken =  u_instr.flags_in[3];           // JE/JZ   (ZF=1)
@@ -171,6 +173,8 @@ module f386_execute_stage (
         wb_data_u       = 32'd0;
         wb_data_v       = 32'd0;
         wb_flags        = 6'd0;
+        wb_fpu_status   = 4'd0;
+        wb_fpu_status_we = 1'b0;
 
         cdb0_valid      = 1'b0;
         cdb0_tag        = 4'd0;
@@ -212,12 +216,15 @@ module f386_execute_stage (
                     if (fpu_busy || !fpu_done) begin
                         u_ready = 1'b0;  // Stall U-pipe only
                     end else begin
-                        wb_data_u      = fpu_res;
-                        wb_we_u        = 1'b1;
-                        cdb0_valid     = 1'b1;
-                        cdb0_tag       = u_instr.rob_tag;
-                        cdb0_data      = fpu_res;
-                        cdb0_exception = 1'b0;
+                        wb_data_u        = fpu_res;
+                        wb_we_u          = 1'b1;
+                        wb_fpu_status    = fpu_status;
+                        wb_fpu_status_we = 1'b1;
+                        cdb0_valid       = 1'b1;
+                        cdb0_tag         = u_instr.rob_tag;
+                        cdb0_data        = fpu_res;
+                        // Exception: NaN or Inf result indicates FPU fault
+                        cdb0_exception   = (fpu_res[30:23] == 8'hFF);
                     end
                 end
 

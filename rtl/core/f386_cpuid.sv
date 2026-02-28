@@ -27,8 +27,11 @@ module f386_cpuid (
     localparam [31:0] VENDOR_EDX = {8'h20, 8'h36, 8'h38, 8'h33}; // " 683" → "386 " in little-endian
     localparam [31:0] VENDOR_ECX = {8'h20, 8'h55, 8'h50, 8'h43}; // " UPC" → "CPU " in little-endian
 
-    // Family 4 (486), Model 8 (fabi386), Stepping 1
-    localparam [31:0] CPUID_1_EAX = {20'h0, 4'h4, 4'h8, 4'h1};
+    // Family/Model/Stepping — conditional on Pentium extensions
+    // Pentium: Family 5, Model 2, Stepping 1 (classic Pentium P54C)
+    // 486:     Family 4, Model 8, Stepping 1 (fabi386 custom)
+    localparam [31:0] CPUID_1_EAX_486  = {20'h0, 4'h4, 4'h8, 4'h1};
+    localparam [31:0] CPUID_1_EAX_PENT = {20'h0, 4'h5, 4'h2, 4'h1};
 
     // Feature flags — EAX=1, EDX
     // Bit  0: FPU (x87)
@@ -36,8 +39,9 @@ module f386_cpuid (
     // Bit  5: MSR (RDMSR/WRMSR)
     // Bit 15: CMOVcc (conditional move) — Pentium extension
     // Bit 23: MMX — Pentium extension
+    // Bit 29: Performance Monitoring Counters (RDPMC) — Pentium extension
     localparam [31:0] BASE_EDX_FEATURES = 32'h0000_0031; // FPU + TSC + MSR
-    localparam [31:0] PENT_EDX_FEATURES = 32'h0080_8000; // CMOVcc (bit 15) + MMX (bit 23)
+    localparam [31:0] PENT_EDX_FEATURES = 32'h2080_8000; // CMOVcc (15) + MMX (23) + PMC (29)
 
     // Feature flags — EAX=1, ECX
     // Bit 23: POPCNT — Pentium extension
@@ -64,7 +68,7 @@ module f386_cpuid (
 
             32'h0000_0001: begin
                 // Family/Model/Stepping + Feature flags
-                eax_out = CPUID_1_EAX;
+                eax_out = CONF_ENABLE_PENTIUM_EXT ? CPUID_1_EAX_PENT : CPUID_1_EAX_486;
                 edx_out = CONF_ENABLE_PENTIUM_EXT ?
                           (BASE_EDX_FEATURES | PENT_EDX_FEATURES) :
                           BASE_EDX_FEATURES;

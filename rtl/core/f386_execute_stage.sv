@@ -106,11 +106,11 @@ module f386_execute_stage (
         .result   (simd_res)
     );
 
-    // --- Bit-Count Unit (U-Pipe, combinational, Pentium extensions) ---
+    // --- Bit-Count Unit (U-Pipe, combinational, Nehalem extensions) ---
     logic [31:0] bitcount_res;
     logic [5:0]  bitcount_flags;
     generate
-        if (CONF_ENABLE_PENTIUM_EXT) begin : gen_bitcount
+        if (CONF_ENABLE_NEHALEM_EXT) begin : gen_bitcount
             f386_alu_bitcount bitcount_inst (
                 .op_a       (u_op_a),
                 .bitcount_op(u_instr.opcode[1:0]),
@@ -416,6 +416,14 @@ module f386_execute_stage (
                     cdb0_data       = bitcount_res;
                     cdb0_flags      = bitcount_flags;
                     cdb0_flags_mask = 6'b001001;  // ZF, CF only
+                    cdb0_exception  = 1'b0;
+                end
+
+                OP_FENCE: begin
+                    // MFENCE/LFENCE/SFENCE — NOP completion (LSQ hook point)
+                    cdb0_valid      = 1'b1;
+                    cdb0_tag        = u_instr.rob_tag;
+                    cdb0_data       = 32'd0;
                     cdb0_exception  = 1'b0;
                 end
 

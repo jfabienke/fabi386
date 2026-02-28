@@ -1,7 +1,7 @@
 # fabi386 Implementation Tracker
 
 **Last updated:** 2026-02-28
-**Total RTL:** 18,216 lines across 79 files (+11,356 since initial audit)
+**Total RTL:** 18,521 lines across 80 files (+11,661 since initial audit)
 **Bench/Scripts:** 2,233 lines (formal, Verilator, Docker)
 **Microcode System:** 1,620 lines (compiler 439, defs 181, 7 `.us` files 983, defs.svh 124)
 **Overall completion:** ~82%
@@ -12,12 +12,12 @@
 
 | # | Feature | Module | Lines | Status | % | Priority | Notes |
 |---|---------|--------|-------|--------|---|----------|-------|
-| 1 | Superscalar decoder (dual-issue, 486DX) | `f386_decode.sv` | 2304 | DONE | 100 | — | Full 1-byte + 2-byte opcodes, ModRM/SIB, prefix, V86 |
+| 1 | Superscalar decoder (dual-issue, 486DX) | `f386_decode.sv` | 2399 | DONE | 100 | — | Full 1-byte + 2-byte opcodes, ModRM/SIB, prefix, V86, 3-tier Pentium ext decode |
 | 2 | Integer ALU (16 ops, 8/16/32-bit) | `f386_alu.v` | 295 | DONE | 100 | — | All EFLAGS, size-aware rotates, ADC/SBB carry-in |
 | 3 | x87 FPU (IEEE 754, pipelined) | `f386_fpu_spatial.v` | 767 | DONE | 85 | LOW | Missing: denormals, double-precision, transcendentals (FSIN/FCOS/FPTAN) |
 | 4 | SIMD byte-parallel unit | `f386_alu_simd.sv` | 49 | DONE | 100 | — | 4-lane saturating add/sub/min/max/blend |
 | 5 | Reorder buffer (16-entry, 2-wide) | `f386_rob.sv` | 318 | DONE | 98 | LOW | Per-entry flags+mask + specbits + ftq_idx storage. SpecBits resolve/squash logic. Missing: exception vector forwarding |
-| 6 | Execute stage (dual ALU, CDB, branch, MUL/DIV) | `f386_execute_stage.sv` | 392 | DONE | 98 | LOW | CDB carries flags+mask. Divider + multiplier integrated with OP_MUL_DIV routing. Missing: zero-latency bypass for back-to-back flag deps |
+| 6 | Execute stage (dual ALU, CDB, branch, MUL/DIV) | `f386_execute_stage.sv` | 471 | DONE | 98 | LOW | CDB carries flags+mask. Divider + multiplier integrated with OP_MUL_DIV routing. OP_FENCE NOP completion. Missing: zero-latency bypass for back-to-back flag deps |
 | 7 | Register rename (8→32, snapshots, pre-warm) | `f386_register_rename.sv` | 266 | DONE | 95 | — | Full V-pipe rename, 4 branch snapshots, busy table, freelist w/ checkpoint, context pre-warm port |
 | 7a | Rename map table (spec+com, 4 snapshots) | `f386_rename_maptable.sv` | 157 | DONE | 100 | — | Feature-gated by `CONF_ENABLE_RENAME_SNAP` |
 | 7b | Rename free list (bitmap + picker) | `f386_rename_freelist.sv` | 146 | DONE | 100 | — | Checkpoint-capable, full-flush rebuild from com_map |
@@ -33,7 +33,7 @@
 | 12a | Microcode sequencer (FSM, v2.0) | `f386_microcode_sequencer.sv` | 218 | DONE | 100 | — | Group opcode remap, REP prefix (REPE/REPNE), REP_YIELD interrupt-safe loops |
 | 12b | Microcode ROM generator | `f386_microcode_rom_gen.sv` | 556 | DONE | 100 | — | 142 mnemonics, 311 micro-ops, 28 group remap entries. Auto-generated. |
 | 12c | Microcode defs | `f386_microcode_defs.svh` | 124 | DONE | 100 | — | 71 `UCMD_*` special command constants |
-| 13 | Package / types | `f386_pkg.sv` | 343 | DONE | 100 | — | MicroArchConf, feature gating, all typedefs, `instr_info_t` w/ flags_mask + sem_tag, specbits_t, ftq_entry_t, micro_op_t, exc_info_t, OP_MUL_DIV |
+| 13 | Package / types | `f386_pkg.sv` | 349 | DONE | 100 | — | MicroArchConf, 3-tier feature gating, all typedefs, `instr_info_t` w/ flags_mask + sem_tag, specbits_t, ftq_entry_t, micro_op_t, exc_info_t, OP_MUL_DIV/BITCOUNT/CMOV/FENCE |
 | 14 | SpecBits (4-tag speculation) | `f386_specbits.sv` | 140 | DONE | 100 | — | Per-branch speculation bitmask. Feature-gated by `CONF_ENABLE_SPECBITS` |
 | 15 | Fetch Target Queue (8-entry) | `f386_ftq.sv` | 181 | DONE | 100 | — | Circular buffer decoupling fetch from decode. GHR snapshot for branch repair. |
 | 16 | Non-restoring divider (8/16/32-bit) | `f386_divider.sv` | 233 | DONE | 100 | — | DIV/IDIV, #DE on overflow/div-by-zero. Multi-cycle FSM. |
@@ -166,7 +166,7 @@
 | 89 | Verilator: Branch tests | `bench/verilator/test_branch.cpp` | 170 | DONE | 100 | — | Branch prediction/recovery |
 | 90 | Memory model | `bench/verilator/memory_model.h` | 132 | DONE | 100 | — | Flat 4GB memory model with binary image loading |
 | 91 | Docker (Verilator + Yosys + SymbiYosys) | `docker/Dockerfile` | 78 | DONE | 100 | — | Reproducible verification environment |
-| 92 | Quartus project / constraints | *not created* | — | MISSING | 0 | HIGH | `f386.qpf`, `f386.qsf`, `f386.sdc` for DE10-Nano |
+| 92 | Quartus project / constraints | `f386.qpf`, `f386.qsf` | 134 | PARTIAL | 70 | MED | QSF complete (91 source files, pin/synth settings). Missing: `f386.sdc` timing constraints |
 
 ---
 
@@ -207,9 +207,10 @@
 | L2 Cache (128KB) | ~300 | 64 | 0 | Implemented |
 | FPGA Primitives (RAM, picker, freelist) | ~280 | 0 | 0 | Implemented |
 | Instrumentation (HARE, 11 modules) | ~1,500 | 4 | 0 | Implemented |
-| **Estimated Total** | **~23,630** | **~93** | **4** | |
+| Pentium Extensions (CMOVcc, bitcount, MMX, fences) | ~320 | 0 | 0 | 3-tier feature-gated (all off by default) |
+| **Estimated Total** | **~25,050** | **~95** | **4** | |
 | **Cyclone V Budget** | **41,910** | **553** | **112** | |
-| **Utilization** | **~56%** | **~17%** | **~4%** | Comfortable headroom |
+| **Utilization** | **~60%** | **~17%** | **~4%** | Comfortable headroom |
 
 ---
 
@@ -224,7 +225,9 @@
 | P1.5 Supporting | Prefetch FIFO, divider, multiplier, shadow stack, seg bypass | DONE | 4 new + 2 modified | ~860 |
 | P1.6 Neo-386 Pro | V86 safe-trap, semantic logger, rename pre-warm, wiring | DONE | 2 new + 3 modified | ~560 |
 | P1.7 Microcode ISA | 142 mnemonics (6 new `.us` files), compiler v2 (group remap), sequencer v2 (REP), 71 special cmds | DONE | 6 new `.us` + 4 modified | ~1,620 |
-| **P1 Total** | | **ALL DONE** | **23 new + 15 modified** | **~5,767** |
+| P1.8 Pentium Ext | CMOVcc, POPCNT/LZCNT/TZCNT, basic MMX, PREFETCH, RDPMC, CPUID | DONE | 2 new + 4 modified | ~350 |
+| P1.8b Gate Restructure | 3-tier gates (P5/P3/Nehalem), MFENCE/LFENCE/SFENCE, QSF sync | DONE | 1 new + 6 modified | ~305 |
+| **P1 Total** | | **ALL DONE** | **26 new + 21 modified** | **~6,422** |
 
 ---
 
@@ -322,3 +325,6 @@
 | 2026-02-28 | Full project sv2v clean: 78 files, 17,579 lines, zero errors, zero warnings |
 | 2026-02-28 | Phase P1.7: Microcode ISA expansion — 6 new `.us` files (string_ops 131, arith_ops 131, bcd_ops 50, bit_ops 107, seg_ops 135, misc_ops 301). Compiler v2.0 (group opcode remap, 71 special cmds). Sequencer v2.0 (REP prefix, REPE/REPNE, REP_YIELD). Generated ROM: 556 lines, 142 mnemonics, 311 micro-ops, 28 group remap entries. ISA coverage 58%→85%. |
 | 2026-02-28 | Full project sv2v clean: 79 files, 18,216 lines, zero errors |
+| 2026-02-28 | Phase P1.8b: 3-tier feature gate restructure (PENTIUM/P3/NEHALEM). OP_FENCE for MFENCE/LFENCE/SFENCE. CPUID reports per-tier family/model + feature bits. Decode re-gated: PREFETCH→P3, POPCNT/LZCNT/TZCNT→NEHALEM. Bitcount generate block→NEHALEM. |
+| 2026-02-28 | QSF updated: 91 source files (was ~45). Added all P1.1-P1.8b modules + HARE suite + memory subsystem. `quartus_synth_check.sh` script created. `fpga_resource_budget.md` rewritten for Cyclone V ALM/M10K/DSP. |
+| 2026-02-28 | Full project sv2v clean: 80 files, 18,521 lines, zero errors |

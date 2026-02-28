@@ -31,30 +31,51 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_branch_predict_hybr
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_branch_predict.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_decode.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_dispatch.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_uv_pipe_if.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_register_rename.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_rename_maptable.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_rename_freelist.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_rename_busytable.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_issue_queue.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_wakeup_select.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_producer_matrix.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_ready_bit_table.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_specbits.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_ftq.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_rob.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_execute_stage.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_agu.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_lsq.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_mem_dep_predictor.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_fetch_fifo.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_exception_unit.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_microcode_sequencer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_microcode_rom.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_microcode_rom_gen.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_sys_regs.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_seg_cache.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_prefetch_unit.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_ras_unit.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_msr_file.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_cpuid.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_divider.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_multiplier.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_shadow_stack.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_v86_safe_trap.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_semantic_logger.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_ooo_core_top.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_pipeline_top.sv
 set_global_assignment -name VERILOG_FILE       rtl/core/f386_alu.v
 set_global_assignment -name VERILOG_FILE       rtl/core/f386_fpu_spatial.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_alu_simd.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_alu_bitcount.sv
 
 # Memory subsystem
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_tlb.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_page_walker.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_tlb_flush.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_dcache.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_dcache_mshr.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_l2_cache.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_mmu_remap.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_mmu_remap_gates.sv
@@ -64,9 +85,24 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_pic.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_pit.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_ps2.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_vga.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_vbe_accel.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_rtc_stub.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_dma_stub.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_ide_dma.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_iobus.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_debug_unit.sv
+
+# Instrumentation (HARE suite)
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_guard_unit.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_snoop_engine.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_pasc_classifier.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_address_classifier.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_v86_monitor.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_semantic_tagger.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_shadow_stack.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_stride_detector.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_aar_engine.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_telemetry_dma.sv
 
 # Top-level
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/top/f386_pll.sv

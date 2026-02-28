@@ -855,18 +855,23 @@ module f386_decode (
             if (CONF_ENABLE_PENTIUM_EXT && pd.opcode[7:4] == 4'h4)
                 return (pd.mod != 2'b11) ? OP_LOAD : OP_CMOV;
 
-            // POPCNT (0F B8 with F3 prefix)
-            if (CONF_ENABLE_PENTIUM_EXT && pd.opcode == 8'hB8 && pd.pref_rep == 2'b10)
+            // POPCNT (0F B8 with F3 prefix) — Nehalem
+            if (CONF_ENABLE_NEHALEM_EXT && pd.opcode == 8'hB8 && pd.pref_rep == 2'b10)
                 return (pd.mod != 2'b11) ? OP_LOAD : OP_BITCOUNT;
 
-            // LZCNT (0F BD with F3 prefix) / TZCNT (0F BC with F3 prefix)
-            if (CONF_ENABLE_PENTIUM_EXT && pd.pref_rep == 2'b10 &&
+            // LZCNT (0F BD with F3 prefix) / TZCNT (0F BC with F3 prefix) — Nehalem
+            if (CONF_ENABLE_NEHALEM_EXT && pd.pref_rep == 2'b10 &&
                 (pd.opcode == 8'hBD || pd.opcode == 8'hBC))
                 return (pd.mod != 2'b11) ? OP_LOAD : OP_BITCOUNT;
 
-            // PREFETCH (0F 18) — hint, NOP completion
-            if (CONF_ENABLE_PENTIUM_EXT && pd.opcode == 8'h18)
+            // PREFETCH (0F 18) — hint, NOP completion — PIII/P4
+            if (CONF_ENABLE_P3_EXT && pd.opcode == 8'h18)
                 return OP_ALU_REG;
+
+            // MFENCE/LFENCE/SFENCE (0F AE /5,/6,/7 with mod=11) — PIII/P4
+            if (CONF_ENABLE_P3_EXT && pd.opcode == 8'hAE && pd.mod == 2'b11 &&
+                pd.reg_field >= 3'd5)
+                return OP_FENCE;
 
             // RDPMC (0F 33)
             if (CONF_ENABLE_PENTIUM_EXT && pd.opcode == 8'h33)
@@ -885,7 +890,8 @@ module f386_decode (
                 8'h00, 8'h01:
                     return OP_SYS_CALL;
 
-                // Grp15 (0F AE): CLFLUSH /7 — cache line flush
+                // Grp15 (0F AE): FXSAVE/FXRSTOR/CLFLUSH fallback
+                // Fence forms (mod=11, reg>=5) caught above when P3 enabled
                 8'hAE:
                     return OP_SYS_CALL;
 
@@ -2261,7 +2267,7 @@ module f386_decode (
     logic [7:0] u_encoded_opcode;
     always_comb begin
         u_encoded_opcode = pd_u.opcode;
-        if (CONF_ENABLE_PENTIUM_EXT && pd_u.is_0f) begin
+        if (CONF_ENABLE_NEHALEM_EXT && pd_u.is_0f) begin
             // POPCNT (0F B8 with F3): bitcount_op=00, opsz from prefix
             if (pd_u.opcode == 8'hB8 && pd_u.pref_rep == 2'b10)
                 u_encoded_opcode = {4'd0, pd_u.pref_66 ? 2'b01 : 2'b10, 2'b00};

@@ -1,0 +1,107 @@
+# fabi386: Bit Manipulation Microcode
+# --------------------------------------
+# BT/BTS/BTR/BTC (memory operands), BSF/BSR, SHLD/SHRD.
+# Register variants of BT* and BSF/BSR are single-cycle ALU ops
+# handled by decode. Memory variants need read-modify-write.
+
+# =========================================================
+# BT r/m, r — Bit Test (0F A3)
+# =========================================================
+# CF = bit[src] of dest. Memory variant: address adjusted by bit offset.
+@BT 0xA3 prefix_0f
+0: LOAD eax                   # Load r/m operand
+1: BIT_TEST eax               # Test bit, set CF
+
+# =========================================================
+# BTS r/m, r — Bit Test and Set (0F AB)
+# =========================================================
+@BTS 0xAB prefix_0f
+0: LOAD eax
+1: BIT_SET eax                # Test bit (→CF), then set it
+2: STORE eax                  # Write back
+
+# =========================================================
+# BTR r/m, r — Bit Test and Reset (0F B3)
+# =========================================================
+@BTR 0xB3 prefix_0f
+0: LOAD eax
+1: BIT_RESET eax              # Test bit (→CF), then clear it
+2: STORE eax
+
+# =========================================================
+# BTC r/m, r — Bit Test and Complement (0F BB)
+# =========================================================
+@BTC 0xBB prefix_0f
+0: LOAD eax
+1: BIT_COMP eax               # Test bit (→CF), then flip it
+2: STORE eax
+
+# =========================================================
+# BT r/m, imm8 — Bit Test Immediate (0F BA /4)
+# =========================================================
+@BT_IMM 0xBA prefix_0f group 4
+0: LOAD eax
+1: BIT_TEST eax
+
+# =========================================================
+# BTS r/m, imm8  (0F BA /5)
+# =========================================================
+@BTS_IMM 0xBA prefix_0f group 5
+0: LOAD eax
+1: BIT_SET eax
+2: STORE eax
+
+# =========================================================
+# BTR r/m, imm8  (0F BA /6)
+# =========================================================
+@BTR_IMM 0xBA prefix_0f group 6
+0: LOAD eax
+1: BIT_RESET eax
+2: STORE eax
+
+# =========================================================
+# BTC r/m, imm8  (0F BA /7)
+# =========================================================
+@BTC_IMM 0xBA prefix_0f group 7
+0: LOAD eax
+1: BIT_COMP eax
+2: STORE eax
+
+# =========================================================
+# BSF — Bit Scan Forward (0F BC)
+# =========================================================
+# Scan source from bit 0 → MSB, store index of first set bit.
+# ZF=1 if source is zero.
+@BSF 0xBC prefix_0f
+0: BIT_SCAN_FWD eax
+
+# =========================================================
+# BSR — Bit Scan Reverse (0F BD)
+# =========================================================
+@BSR 0xBD prefix_0f
+0: BIT_SCAN_REV eax
+
+# =========================================================
+# SHLD r/m, r, imm8 — Double-Precision Shift Left (0F A4)
+# =========================================================
+# Shift dest left by imm8, filling vacated bits from src.
+@SHLD_IMM 0xA4 prefix_0f
+0: SHLD_OP eax
+
+# =========================================================
+# SHLD r/m, r, CL (0F A5)
+# =========================================================
+@SHLD_CL 0xA5 prefix_0f
+0: SHLD_OP eax
+
+# =========================================================
+# SHRD r/m, r, imm8 — Double-Precision Shift Right (0F AC)
+# =========================================================
+@SHRD_IMM 0xAC prefix_0f
+0: SHRD_OP eax
+
+# =========================================================
+# SHRD r/m, r, CL (0F AD)
+# =========================================================
+@SHRD_CL 0xAD prefix_0f
+0: SHRD_OP eax

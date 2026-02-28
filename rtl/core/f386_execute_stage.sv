@@ -37,11 +37,15 @@ module f386_execute_stage (
     output logic         cdb0_valid,
     output rob_id_t      cdb0_tag,
     output logic [31:0]  cdb0_data,
+    output logic [5:0]   cdb0_flags,       // ALU flags result {OF,SF,ZF,AF,PF,CF}
+    output logic [5:0]   cdb0_flags_mask,  // Which flags this instruction writes
     output logic         cdb0_exception,
 
     output logic         cdb1_valid,
     output rob_id_t      cdb1_tag,
     output logic [31:0]  cdb1_data,
+    output logic [5:0]   cdb1_flags,
+    output logic [5:0]   cdb1_flags_mask,
     output logic         cdb1_exception,
 
     // --- Writeback to Architectural State ---
@@ -120,6 +124,54 @@ module f386_execute_stage (
         .fp_status(fpu_status)
     );
 
+    // --- Divider (U-Pipe, multi-cycle, non-restoring) ---
+    logic [31:0] div_quotient;
+    logic [31:0] div_remainder;
+    logic        div_busy;
+    logic        div_done;
+    logic        div_error;
+    wire         div_is_signed = u_instr.opcode[0];    // opcode[0] = signed flag
+    wire  [1:0]  div_op_size   = u_instr.opcode[2:1];  // opcode[2:1] = size
+    wire         div_start     = u_valid && u_instr.op_category == OP_MUL_DIV &&
+                                 u_instr.opcode[3] && !div_busy;  // opcode[3] = DIV vs MUL
+
+    f386_divider divider_inst (
+        .clk          (clk),
+        .rst_n        (reset_n),
+        .start        (div_start),
+        .op_size      (div_op_size),
+        .is_signed    (div_is_signed),
+        .dividend     ({u_op_a, u_op_b}),   // {high, low}
+        .divisor      (u_op_b),
+        .quotient     (div_quotient),
+        .remainder    (div_remainder),
+        .busy         (div_busy),
+        .done         (div_done),
+        .divide_error (div_error)
+    );
+
+    // --- Multiplier (U-Pipe, 2-cycle DSP pipeline) ---
+    logic [63:0] mul_result;
+    logic        mul_done;
+    logic        mul_overflow;
+    wire         mul_is_signed = u_instr.opcode[0];
+    wire  [1:0]  mul_op_size   = u_instr.opcode[2:1];
+    wire         mul_start     = u_valid && u_instr.op_category == OP_MUL_DIV &&
+                                 !u_instr.opcode[3] && !div_busy;  // opcode[3]=0 → MUL
+
+    f386_multiplier mul_inst (
+        .clk           (clk),
+        .rst_n         (reset_n),
+        .start         (mul_start),
+        .op_size       (mul_op_size),
+        .is_signed     (mul_is_signed),
+        .op_a          (u_op_a),
+        .op_b          (u_op_b),
+        .result        (mul_result),
+        .done          (mul_done),
+        .overflow_flag (mul_overflow)
+    );
+
     // =================================================================
     // 2. Branch Resolution (U-Pipe only)
     // =================================================================
@@ -179,11 +231,15 @@ module f386_execute_stage (
         cdb0_valid      = 1'b0;
         cdb0_tag        = 4'd0;
         cdb0_data       = 32'd0;
+        cdb0_flags      = 6'd0;
+        cdb0_flags_mask = 6'd0;
         cdb0_exception  = 1'b0;
 
         cdb1_valid      = 1'b0;
         cdb1_tag        = 4'd0;
         cdb1_data       = 32'd0;
+        cdb1_flags      = 6'd0;
+        cdb1_flags_mask = 6'd0;
         cdb1_exception  = 1'b0;
 
         branch_resolved  = 1'b0;
@@ -202,14 +258,16 @@ module f386_execute_stage (
             case (u_instr.op_category)
 
                 OP_ALU_REG, OP_ALU_IMM: begin
-                    wb_data_u      = alu_u_res;
-                    wb_flags       = alu_u_flags;
-                    wb_we_u        = 1'b1;
-                    // CDB writeback to ROB
-                    cdb0_valid     = 1'b1;
-                    cdb0_tag       = u_instr.rob_tag;
-                    cdb0_data      = alu_u_res;
-                    cdb0_exception = 1'b0;
+                    wb_data_u       = alu_u_res;
+                    wb_flags        = alu_u_flags;
+                    wb_we_u         = 1'b1;
+                    // CDB writeback to ROB (flags travel with data)
+                    cdb0_valid      = 1'b1;
+                    cdb0_tag        = u_instr.rob_tag;
+                    cdb0_data       = alu_u_res;
+                    cdb0_flags      = alu_u_flags;
+                    cdb0_flags_mask = u_instr.flags_mask;
+                    cdb0_exception  = 1'b0;
                 end
 
                 OP_FLOAT: begin
@@ -250,6 +308,37 @@ module f386_execute_stage (
                     u_ready          = 1'b0;  // Stall until microcode finishes
                 end
 
+                OP_MUL_DIV: begin
+                    if (u_instr.opcode[3]) begin
+                        // DIV/IDIV — multi-cycle
+                        if (div_busy || !div_done) begin
+                            u_ready = 1'b0;  // Stall U-pipe
+                        end else begin
+                            wb_data_u       = div_quotient;
+                            wb_we_u         = 1'b1;
+                            cdb0_valid      = 1'b1;
+                            cdb0_tag        = u_instr.rob_tag;
+                            cdb0_data       = div_quotient;
+                            cdb0_exception  = div_error;  // #DE
+                        end
+                    end else begin
+                        // MUL/IMUL — 2-cycle pipeline
+                        if (!mul_done) begin
+                            u_ready = 1'b0;
+                        end else begin
+                            wb_data_u       = mul_result[31:0];
+                            wb_we_u         = 1'b1;
+                            // CF=OF set if upper half significant
+                            cdb0_flags      = {mul_overflow, 4'b0000, mul_overflow};
+                            cdb0_flags_mask = 6'b100001;  // OF, CF only
+                            cdb0_valid      = 1'b1;
+                            cdb0_tag        = u_instr.rob_tag;
+                            cdb0_data       = mul_result[31:0];
+                            cdb0_exception  = 1'b0;
+                        end
+                    end
+                end
+
                 OP_LOAD, OP_STORE: begin
                     // Load/Store handled by BIU/LSU — signal ROB completion
                     // with address as data (LSU will update with real data)
@@ -280,9 +369,12 @@ module f386_execute_stage (
                     // V-pipe SIMD ops use opcode[7:4]==4'hF prefix
                     if (v_instr.opcode[7:4] == 4'hF) begin
                         wb_data_v  = simd_res;
+                        // SIMD ops don't produce ALU flags
                     end else begin
-                        wb_data_v  = alu_v_res;
-                        wb_flags   = alu_v_flags;  // V-pipe flags (last writer wins)
+                        wb_data_v       = alu_v_res;
+                        wb_flags        = alu_v_flags;
+                        cdb1_flags      = alu_v_flags;
+                        cdb1_flags_mask = v_instr.flags_mask;
                     end
                     wb_we_v        = 1'b1;
                     cdb1_valid     = 1'b1;

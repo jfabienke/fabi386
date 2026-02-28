@@ -1,0 +1,20 @@
+[tasks]
+bmc
+
+[options]
+bmc: mode bmc
+bmc: depth 10
+
+[engines]
+smtbmc z3
+
+[script]
+read -sv ../../rtl/top/f386_pkg.sv
+read -sv ../../rtl/memory/f386_tlb.sv
+read -sv f386_tlb_props.sv
+prep -top f386_tlb_props
+
+[files]
+../../rtl/top/f386_pkg.sv
+../../rtl/memory/f386_tlb.sv
+f386_tlb_props.sv

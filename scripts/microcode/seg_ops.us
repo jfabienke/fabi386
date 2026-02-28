@@ -1,0 +1,135 @@
+# fabi386: Segment Operation Microcode
+# ----------------------------------------
+# Segment register loads, far pointer loads (LES/LDS/LFS/LGS/LSS),
+# descriptor access checks (LAR/LSL/VERR/VERW/ARPL).
+
+# =========================================================
+# MOV seg, r/m16 — Load Segment Register  (0x8E)
+# =========================================================
+# Validates selector, loads descriptor cache. Inhibits interrupts
+# for the following instruction (MOV SS,xx safety).
+@MOV_SEG 0x8E atomic
+0: LOAD eax                   # Load selector from r/m
+1: LOAD_SEG                   # Validate + load into segment register
+
+# =========================================================
+# MOV r/m16, seg — Store Segment Register  (0x8C)
+# =========================================================
+@MOV_FROM_SEG 0x8C
+0: STORE_SEG eax              # Read segment selector → r/m
+
+# =========================================================
+# LES r, m16:16/32 — Load Far Pointer to ES  (0xC4)
+# =========================================================
+# Loads 32/48-bit far pointer: offset → reg, selector → ES.
+@LES 0xC4 atomic
+0: LOAD eax                   # Load offset from [m]
+1: LOAD eax                   # Load selector from [m+2/4]
+2: LOAD_FAR_PTR es            # Validate selector, load ES + offset
+
+# =========================================================
+# LDS r, m16:16/32 — Load Far Pointer to DS  (0xC5)
+# =========================================================
+@LDS 0xC5 atomic
+0: LOAD eax
+1: LOAD eax
+2: LOAD_FAR_PTR ds
+
+# =========================================================
+# LFS r, m16:16/32  (0F B4)
+# =========================================================
+@LFS 0xB4 prefix_0f atomic
+0: LOAD eax
+1: LOAD eax
+2: LOAD_FAR_PTR
+
+# =========================================================
+# LGS r, m16:16/32  (0F B5)
+# =========================================================
+@LGS 0xB5 prefix_0f atomic
+0: LOAD eax
+1: LOAD eax
+2: LOAD_FAR_PTR
+
+# =========================================================
+# LSS r, m16:16/32  (0F B2)
+# =========================================================
+@LSS 0xB2 prefix_0f atomic
+0: LOAD eax
+1: LOAD eax
+2: LOAD_FAR_PTR
+
+# =========================================================
+# ARPL r/m16, r16 — Adjust RPL Field  (0x63)
+# =========================================================
+# If RPL of dest < RPL of source, set dest RPL = source RPL, ZF=1.
+@ARPL 0x63
+0: LOAD eax                   # Load r/m operand
+1: ARPL_CHK eax               # Check/adjust RPL, set ZF
+2: STORE eax                  # Store adjusted value
+
+# =========================================================
+# LAR r, r/m16 — Load Access Rights  (0F 02)
+# =========================================================
+# Load descriptor access rights byte into register. ZF=1 if valid.
+@LAR 0x02 prefix_0f
+0: LOAD eax                   # Load selector
+1: LAR_CHK eax                # Read descriptor, check access, set ZF
+
+# =========================================================
+# LSL r, r/m16 — Load Segment Limit  (0F 03)
+# =========================================================
+@LSL 0x03 prefix_0f
+0: LOAD eax
+1: LSL_CHK eax                # Read descriptor limit, set ZF
+
+# =========================================================
+# VERR r/m16 — Verify Segment for Reading  (0F 00 /4)
+# =========================================================
+@VERR 0x00 prefix_0f group 4
+0: LOAD eax
+1: VERR_CHK eax               # Check read permission, set ZF
+
+# =========================================================
+# VERW r/m16 — Verify Segment for Writing  (0F 00 /5)
+# =========================================================
+@VERW 0x00 prefix_0f group 5
+0: LOAD eax
+1: VERW_CHK eax
+
+# =========================================================
+# SGDT m — Store GDTR  (0F 01 /0)
+# =========================================================
+@SGDT 0x01 prefix_0f group 0
+0: STORE_DTR                  # Store GDTR limit + base to memory
+
+# =========================================================
+# SIDT m — Store IDTR  (0F 01 /1)
+# =========================================================
+@SIDT 0x01 prefix_0f group 1
+0: STORE_DTR
+
+# =========================================================
+# SLDT r/m16 — Store LDTR  (0F 00 /0)
+# =========================================================
+@SLDT 0x00 prefix_0f group 0
+0: STORE_SEG eax              # Store LDTR selector
+
+# =========================================================
+# STR r/m16 — Store Task Register  (0F 00 /1)
+# =========================================================
+@STR 0x00 prefix_0f group 1
+0: STORE_SEG eax              # Store TR selector
+
+# =========================================================
+# SMSW r/m16 — Store Machine Status Word  (0F 01 /4)
+# =========================================================
+@SMSW 0x01 prefix_0f group 4
+0: STORE_CR eax               # Store CR0[15:0]
+
+# =========================================================
+# LMSW r/m16 — Load Machine Status Word  (0F 01 /6)
+# =========================================================
+@LMSW 0x01 prefix_0f group 6 atomic
+0: LOAD eax                   # Load new MSW value
+1: LOAD_CR eax                # Write CR0[15:0] (cannot clear PE)

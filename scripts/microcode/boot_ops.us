@@ -1,0 +1,128 @@
+# fabi386: Boot-Critical Microcode Definitions
+# -----------------------------------------------
+# ~15 mnemonics needed for FreeDOS to boot.
+# Format: @MNEMONIC opcode [atomic] [prefix_0f]
+#         step_num: micro_op operands...
+#
+# These are processed by microcode_compiler.py to generate ROM.
+
+# =========================================================
+# System Register Instructions (critical for protected mode entry)
+# =========================================================
+
+# MOV CRn, reg — Write to control register
+@MOV_CR_REG 0x22 prefix_0f atomic
+0: STORE_CR eax         # CR number from ModRM.reg, src from ModRM.rm
+
+# MOV reg, CRn — Read from control register
+@MOV_REG_CR 0x20 prefix_0f atomic
+0: LOAD_CR eax          # CR number from ModRM.reg, dest to ModRM.rm
+
+# LGDT m48 — Load Global Descriptor Table Register
+@LGDT 0x01 prefix_0f atomic
+0: LOAD eax             # Load 6-byte GDT pointer from memory
+1: LOAD_DTR             # Write to GDTR (limit[15:0] + base[31:0])
+
+# LIDT m48 — Load Interrupt Descriptor Table Register
+@LIDT 0x01 prefix_0f atomic
+0: LOAD eax             # Load 6-byte IDT pointer from memory
+1: LOAD_DTR             # Write to IDTR
+
+# LLDT r/m16 — Load Local Descriptor Table Register
+@LLDT 0x00 prefix_0f atomic
+0: LOAD eax             # Load selector
+1: LOAD_SEG             # Validate and load into LDTR
+
+# LTR r/m16 — Load Task Register
+@LTR 0x00 prefix_0f atomic
+0: LOAD eax             # Load selector
+1: LOAD_SEG             # Validate and load into TR
+
+# =========================================================
+# Interrupt / Exception Handling
+# =========================================================
+
+# INT imm8 — Software interrupt
+@INT 0xCD atomic
+0: PUSH_FLAGS           # Push EFLAGS
+1: CLI                  # Clear IF
+2: PUSH cs              # Push CS
+3: PUSH eax             # Push EIP (return address)
+4: INT_ENTER            # Read IDT, load new CS:EIP
+
+# IRET — Return from interrupt
+@IRET 0xCF atomic
+0: POP eax              # Pop EIP
+1: POP eax              # Pop CS
+2: POP_FLAGS            # Pop EFLAGS
+3: INT_EXIT             # Restore context, possibly change privilege
+
+# =========================================================
+# Flag Manipulation
+# =========================================================
+
+# CLI — Clear Interrupt Flag
+@CLI 0xFA
+0: CLI
+
+# STI — Set Interrupt Flag
+@STI 0xFB
+0: STI
+
+# PUSHF/PUSHFD — Push EFLAGS onto stack
+@PUSHF 0x9C
+0: PUSH_FLAGS
+
+# POPF/POPFD — Pop EFLAGS from stack
+@POPF 0x9D atomic
+0: POP_FLAGS
+
+# =========================================================
+# Far Call/Return (needed for protected mode transitions)
+# =========================================================
+
+# Far CALL ptr16:16/32
+@FAR_CALL 0x9A atomic
+0: PUSH cs              # Save current CS
+1: PUSH eax             # Save return EIP
+2: FAR_CALL             # Load new CS:EIP, privilege check
+
+# Far RET
+@FAR_RET 0xCB atomic
+0: POP eax              # Pop EIP
+1: POP eax              # Pop CS
+2: FAR_RET              # Restore CS:EIP, privilege check
+
+# =========================================================
+# Stack Block Operations (common in boot sequences)
+# =========================================================
+
+# PUSHA/PUSHAD — Push All General Registers
+@PUSHA 0x60 atomic
+0: PUSH eax
+1: PUSH ecx
+2: PUSH edx
+3: PUSH ebx
+4: PUSH esp             # Original ESP value (before PUSHA)
+5: PUSH ebp
+6: PUSH esi
+7: PUSH edi
+
+# POPA/POPAD — Pop All General Registers
+@POPA 0x61 atomic
+0: POP edi
+1: POP esi
+2: POP ebp
+3: NOP                  # Skip ESP (not restored by POPA)
+4: POP ebx
+5: POP edx
+6: POP ecx
+7: POP eax
+
+# =========================================================
+# Halt (used by boot loaders to wait for interrupts)
+# =========================================================
+
+# HLT — Halt processor until interrupt
+@HLT 0xF4 atomic
+0: HALT

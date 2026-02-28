@@ -1,0 +1,50 @@
+# fabi386: BCD / ASCII Adjust Microcode
+# ----------------------------------------
+# DAA, DAS, AAA, AAS, AAM, AAD
+# These are all single/dual-step operations that adjust
+# the accumulator for packed/unpacked BCD arithmetic.
+
+# =========================================================
+# DAA — Decimal Adjust AL After Addition  (0x27)
+# =========================================================
+# If lower nibble > 9 or AF set: AL += 6, set AF
+# If AL > 0x9F or CF set: AL += 0x60, set CF
+@DAA 0x27
+0: BCD_DAA eax
+
+# =========================================================
+# DAS — Decimal Adjust AL After Subtraction  (0x2F)
+# =========================================================
+# Reverse of DAA: subtract 6 / 0x60 as needed.
+@DAS 0x2F
+0: BCD_DAS eax
+
+# =========================================================
+# AAA — ASCII Adjust After Addition  (0x37)
+# =========================================================
+# If lower nibble > 9 or AF set: AL = (AL+6) & 0x0F, AH += 1
+@AAA 0x37
+0: BCD_AAA eax
+
+# =========================================================
+# AAS — ASCII Adjust After Subtraction  (0x3F)
+# =========================================================
+# If lower nibble > 9 or AF set: AL = (AL-6) & 0x0F, AH -= 1
+@AAS 0x3F
+0: BCD_AAS eax
+
+# =========================================================
+# AAM — ASCII Adjust After Multiplication  (0xD4)
+# =========================================================
+# AH = AL / 10, AL = AL mod 10
+# Uses divide hardware (div by imm8, default 0x0A).
+@AAM 0xD4
+0: BCD_AAM eax
+
+# =========================================================
+# AAD — ASCII Adjust Before Division  (0xD5)
+# =========================================================
+# AL = AH * 10 + AL, AH = 0
+# Uses multiply hardware (mul by imm8, default 0x0A).
+@AAD 0xD5
+0: BCD_AAD eax

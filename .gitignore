@@ -40,5 +40,9 @@ Thumbs.db
 *.swp
 *~
 
+# Reference repos
+reference/
+
 # Claude Code
 .claude/
+__pycache__/

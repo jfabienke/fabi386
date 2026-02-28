@@ -207,13 +207,13 @@ module f386_alu (
                         rol_count  = {2'd0, shamt[2:0]};  // mod 8
                         raw_result = {24'd0,
                                       a[7:0] << rol_count[2:0] |
-                                      a[7:0] >> (3'd8 - rol_count[2:0])};
+                                      a[7:0] >> (4'd8 - rol_count[2:0])};
                     end
                     2'b01: begin  // 16-bit
                         rol_count  = {1'd0, shamt[3:0]};  // mod 16
                         raw_result = {16'd0,
                                       a[15:0] << rol_count[3:0] |
-                                      a[15:0] >> (4'd16 - rol_count[3:0])};
+                                      a[15:0] >> (5'd16 - rol_count[3:0])};
                     end
                     default: begin  // 32-bit
                         rol_count  = shamt;
@@ -230,13 +230,13 @@ module f386_alu (
                         ror_count  = {2'd0, shamt[2:0]};
                         raw_result = {24'd0,
                                       a[7:0] >> ror_count[2:0] |
-                                      a[7:0] << (3'd8 - ror_count[2:0])};
+                                      a[7:0] << (4'd8 - ror_count[2:0])};
                     end
                     2'b01: begin  // 16-bit
                         ror_count  = {1'd0, shamt[3:0]};
                         raw_result = {16'd0,
                                       a[15:0] >> ror_count[3:0] |
-                                      a[15:0] << (4'd16 - ror_count[3:0])};
+                                      a[15:0] << (5'd16 - ror_count[3:0])};
                     end
                     default: begin  // 32-bit
                         ror_count  = shamt;

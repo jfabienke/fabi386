@@ -21,26 +21,30 @@ module f386_branch_predict_gshare (
     input  logic         res_actually_taken
 );
 
-    // 8-bit Global History Register
-    logic [7:0] ghr;
+    localparam int GHR_W = CONF_GHR_WIDTH;          // Parameterized GHR width
+    localparam int PHT_N = CONF_PHT_ENTRIES;        // Parameterized PHT depth
+    localparam int PHT_W = $clog2(PHT_N);           // PHT index width
+
+    // Global History Register
+    logic [GHR_W-1:0] ghr;
 
     // Pattern History Table (2-bit saturating counters)
-    logic [1:0] pht [255:0];
+    logic [1:0] pht [PHT_N];
 
     // XOR Indexing (Gshare)
-    wire [7:0] fetch_idx = fetch_pc[9:2] ^ ghr;
-    wire [7:0] res_idx   = res_pc[9:2] ^ ghr;
+    wire [PHT_W-1:0] fetch_idx = fetch_pc[PHT_W+1:2] ^ ghr[PHT_W-1:0];
+    wire [PHT_W-1:0] res_idx   = res_pc[PHT_W+1:2] ^ ghr[PHT_W-1:0];
 
     // Asynchronous Prediction
     assign predict_taken = pht[fetch_idx][1];
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
-            ghr <= 8'h00;
-            for (int i = 0; i < 256; i++) pht[i] <= 2'b01; // Weakly Not Taken
+            ghr <= '0;
+            for (int i = 0; i < PHT_N; i++) pht[i] <= 2'b01; // Weakly Not Taken
         end else if (res_valid) begin
             // Update Global History (Shift in the actual outcome)
-            ghr <= {ghr[6:0], res_actually_taken};
+            ghr <= {ghr[GHR_W-2:0], res_actually_taken};
 
             // Update Pattern History Table
             case (pht[res_idx])

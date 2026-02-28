@@ -1,0 +1,23 @@
+[tasks]
+bmc
+prove
+
+[options]
+bmc: mode bmc
+bmc: depth 10
+prove: mode prove
+prove: depth 10
+
+[engines]
+smtbmc z3
+
+[script]
+read -sv ../../rtl/top/f386_pkg.sv
+read -sv ../../rtl/core/f386_seg_cache.sv
+read -sv f386_seg_cache_props.sv
+prep -top f386_seg_cache_props
+
+[files]
+../../rtl/top/f386_pkg.sv
+../../rtl/core/f386_seg_cache.sv
+f386_seg_cache_props.sv

@@ -1,0 +1,131 @@
+# fabi386: String Operation Microcode
+# -------------------------------------
+# MOVS, STOS, LODS, CMPS, SCAS with REP prefix support.
+# REP loops use REP_SETUP/REP_STEP/REP_YIELD for proper
+# interrupt-safe iteration.
+#
+# DF (direction flag) handling: STRING_LOAD/STRING_STORE
+# auto-increment or decrement ESI/EDI based on DF.
+
+# =========================================================
+# MOVSB — Move byte string DS:[ESI] → ES:[EDI]
+# =========================================================
+@MOVSB 0xA4
+0: REP_SETUP ecx           # If REP: check ECX==0 → skip
+1: STRING_LOAD esi          # Load byte from DS:ESI, ESI += dir
+2: STRING_STORE edi         # Store byte to ES:EDI, EDI += dir
+3: REP_STEP ecx             # If REP: dec ECX, loop if != 0
+4: REP_YIELD                # Allow interrupts between iterations
+
+# MOVSW/MOVSD — Move word/dword string
+@MOVSD 0xA5
+0: REP_SETUP ecx
+1: STRING_LOAD esi
+2: STRING_STORE edi
+3: REP_STEP ecx
+4: REP_YIELD
+
+# =========================================================
+# STOSB — Store AL/AX/EAX to ES:[EDI]
+# =========================================================
+@STOSB 0xAA
+0: REP_SETUP ecx
+1: STRING_STORE edi          # Store EAX to ES:EDI, EDI += dir
+2: REP_STEP ecx
+3: REP_YIELD
+
+# STOSW/STOSD
+@STOSD 0xAB
+0: REP_SETUP ecx
+1: STRING_STORE edi
+2: REP_STEP ecx
+3: REP_YIELD
+
+# =========================================================
+# LODSB — Load DS:[ESI] into AL/AX/EAX
+# =========================================================
+@LODSB 0xAC
+0: REP_SETUP ecx
+1: STRING_LOAD esi           # Load from DS:ESI into EAX, ESI += dir
+2: REP_STEP ecx
+3: REP_YIELD
+
+# LODSW/LODSD
+@LODSD 0xAD
+0: REP_SETUP ecx
+1: STRING_LOAD esi
+2: REP_STEP ecx
+3: REP_YIELD
+
+# =========================================================
+# CMPSB — Compare byte DS:[ESI] with ES:[EDI]
+# =========================================================
+# REPE/REPNE variants: REP_STEP checks ZF for termination.
+@CMPSB 0xA6
+0: REP_SETUP ecx
+1: STRING_LOAD esi           # Load DS:ESI → temp1
+2: STRING_LOAD edi           # Load ES:EDI → temp2
+3: SUB eax, eax              # Compare: temp1 - temp2 (flags only)
+4: REP_STEP ecx              # Dec ECX; REPE stops if ZF=0, REPNE if ZF=1
+5: REP_YIELD
+
+# CMPSW/CMPSD
+@CMPSD 0xA7
+0: REP_SETUP ecx
+1: STRING_LOAD esi
+2: STRING_LOAD edi
+3: SUB eax, eax
+4: REP_STEP ecx
+5: REP_YIELD
+
+# =========================================================
+# SCASB — Scan byte: compare AL with ES:[EDI]
+# =========================================================
+@SCASB 0xAE
+0: REP_SETUP ecx
+1: STRING_LOAD edi           # Load ES:EDI → temp
+2: SUB eax, eax              # Compare: AL - temp (flags only)
+3: REP_STEP ecx
+4: REP_YIELD
+
+# SCASW/SCASD
+@SCASD 0xAF
+0: REP_SETUP ecx
+1: STRING_LOAD edi
+2: SUB eax, eax
+3: REP_STEP ecx
+4: REP_YIELD
+
+# =========================================================
+# INS — Input string from port DX to ES:[EDI]
+# =========================================================
+@INSB 0x6C
+0: REP_SETUP ecx
+1: IO_IN edx                 # Read port DX → temp
+2: STRING_STORE edi           # Store temp → ES:EDI
+3: REP_STEP ecx
+4: REP_YIELD
+
+@INSD 0x6D
+0: REP_SETUP ecx
+1: IO_IN edx
+2: STRING_STORE edi
+3: REP_STEP ecx
+4: REP_YIELD
+
+# =========================================================
+# OUTS — Output string from DS:[ESI] to port DX
+# =========================================================
+@OUTSB 0x6E
+0: REP_SETUP ecx
+1: STRING_LOAD esi            # Load DS:ESI → temp
+2: IO_OUT edx                 # Write temp → port DX
+3: REP_STEP ecx
+4: REP_YIELD
+
+@OUTSD 0x6F
+0: REP_SETUP ecx
+1: STRING_LOAD esi
+2: IO_OUT edx
+3: REP_STEP ecx
+4: REP_YIELD

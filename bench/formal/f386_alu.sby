@@ -1,0 +1,22 @@
+[tasks]
+bmc
+prove
+
+[options]
+bmc: mode bmc
+bmc: depth 5
+prove: mode prove
+
+[engines]
+smtbmc z3
+
+[script]
+read -sv ../../rtl/top/f386_pkg.sv
+read -sv ../../rtl/core/f386_alu.v
+read -sv f386_alu_props.sv
+prep -top f386_alu_props
+
+[files]
+../../rtl/top/f386_pkg.sv
+../../rtl/core/f386_alu.v
+f386_alu_props.sv

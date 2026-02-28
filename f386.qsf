@@ -1,0 +1,121 @@
+# fabi386: Quartus Settings File for DE10-Nano (MiSTer)
+# =====================================================
+# Device: Cyclone V 5CSEBA6U23I7N (DE10-Nano, industrial -I7 speed grade)
+# ALMs: 41,910 | M10K: 553 | DSP: 112
+
+set_global_assignment -name FAMILY "Cyclone V"
+set_global_assignment -name DEVICE 5CSEBA6U23I7N
+set_global_assignment -name TOP_LEVEL_ENTITY f386_emu
+set_global_assignment -name ORIGINAL_QUARTUS_VERSION "21.1"
+set_global_assignment -name PROJECT_CREATION_TIME_DATE "00:00:00  January 01, 2024"
+set_global_assignment -name LAST_QUARTUS_VERSION "21.1.0 Lite Edition"
+
+# =====================================================
+# Source Files
+# =====================================================
+# Package (must be first)
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/top/f386_pkg.sv
+
+# Configuration
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/top/f386_conf_str.sv
+
+# Primitives
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/primitives/f386_distributed_ram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/primitives/f386_block_ram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/primitives/f386_picker.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/primitives/f386_freelist_multiwidth.sv
+
+# Core pipeline
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_branch_predict_gshare.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_branch_predict_hybrid.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_branch_predict.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_decode.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_dispatch.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_register_rename.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_issue_queue.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_rob.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_execute_stage.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_agu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_lsq.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_exception_unit.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_microcode_sequencer.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_microcode_rom.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_sys_regs.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_seg_cache.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_prefetch_unit.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_ras_unit.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_msr_file.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_ooo_core_top.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_pipeline_top.sv
+set_global_assignment -name VERILOG_FILE       rtl/core/f386_alu.v
+set_global_assignment -name VERILOG_FILE       rtl/core/f386_fpu_spatial.v
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/core/f386_alu_simd.sv
+
+# Memory subsystem
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_tlb.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_page_walker.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_tlb_flush.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_l2_cache.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_mmu_remap.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory/f386_mmu_remap_gates.sv
+
+# SoC peripherals
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_pic.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_pit.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_ps2.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_vga.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_rtc_stub.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_dma_stub.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/soc/f386_iobus.sv
+
+# Top-level
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/top/f386_pll.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/top/f386_mem_ctrl.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/top/f386_emu.sv
+
+# Include paths
+set_global_assignment -name SEARCH_PATH rtl/core
+
+# Timing constraints
+set_global_assignment -name SDC_FILE f386.sdc
+
+# =====================================================
+# Synthesis Settings
+# =====================================================
+set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
+set_global_assignment -name ALLOW_REGISTER_RETIMING ON
+set_global_assignment -name ALLOW_REGISTER_DUPLICATION ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON
+set_global_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION ALWAYS
+set_global_assignment -name AUTO_RAM_RECOGNITION ON
+
+# Cyclone V M10K optimization
+set_global_assignment -name CYCLONEII_OPTIMIZATION_TECHNIQUE SPEED
+set_global_assignment -name MUX_RESTRUCTURE ON
+set_global_assignment -name ADV_NETLIST_OPT_SYNTH_WYSIWYG_REMAP ON
+
+# =====================================================
+# Pin Assignments (DE10-Nano — directly from MiSTer framework)
+# =====================================================
+# These are standard MiSTer DE10-Nano pin assignments.
+# The actual pin map is inherited from the MiSTer sys/ framework
+# top-level module, which wraps f386_emu.
+
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS_ACTIVE_LOW ON
+set_global_assignment -name STRATIX_DEVICE_IO_STANDARD "3.3-V LVTTL"
+set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
+set_global_assignment -name MAX_CORE_JUNCTION_TEMP 100
+
+# 50 MHz clock input
+set_location_assignment PIN_V11 -to CLK_50M
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to CLK_50M
+
+# =====================================================
+# Fitter Settings
+# =====================================================
+set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM
+set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
+set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
+set_global_assignment -name SEED 1

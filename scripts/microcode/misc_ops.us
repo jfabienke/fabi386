@@ -1,0 +1,301 @@
+# fabi386: Miscellaneous Instruction Microcode
+# ------------------------------------------------
+# ENTER, LEAVE, BOUND, XLAT, BSWAP, CMPXCHG, XADD,
+# XCHG, LOOP, LAHF, SAHF, flag ops, MOVZX/MOVSX,
+# SETcc, IN, OUT.
+
+# =========================================================
+# ENTER imm16, imm8 — Create Stack Frame  (0xC8)
+# =========================================================
+# Push EBP, copy ESP→EBP, allocate locals (ESP -= imm16).
+# Nesting level (imm8) > 0 copies additional frame pointers.
+@ENTER 0xC8 atomic
+0: PUSH ebp                   # Save old frame pointer
+1: MOV ebp, esp               # New frame pointer = ESP
+2: ENTER_FRAME ebp            # Handle nesting level, alloc locals
+
+# =========================================================
+# LEAVE — Destroy Stack Frame  (0xC9)
+# =========================================================
+# ESP = EBP, POP EBP.
+@LEAVE 0xC9
+0: MOV esp, ebp               # Undo local allocation
+1: POP ebp                    # Restore old frame pointer
+
+# =========================================================
+# BOUND r, m — Check Array Bounds  (0x62)
+# =========================================================
+# Check reg against lower/upper bounds in memory.
+# #BR exception if out of bounds.
+@BOUND 0x62
+0: LOAD eax                   # Load lower bound
+1: LOAD eax                   # Load upper bound
+2: BOUND_CHK eax              # Compare reg vs bounds, #BR if fail
+
+# =========================================================
+# XLAT/XLATB — Table Lookup  (0xD7)
+# =========================================================
+# AL = DS:[EBX + zero-extend(AL)]
+@XLAT 0xD7
+0: XLAT_OP eax                # AL = byte at DS:[EBX+AL]
+
+# =========================================================
+# BSWAP r32 — Byte Swap  (0F C8+rd)
+# =========================================================
+# Reverse byte order of 32-bit register.
+@BSWAP 0xC8 prefix_0f
+0: BSWAP_OP eax
+
+# =========================================================
+# CMPXCHG r/m, r — Compare and Exchange  (0F B0 = byte, 0F B1 = word/dword)
+# =========================================================
+# Compare EAX with dest. If equal: dest = src, ZF=1.
+# If not equal: EAX = dest, ZF=0.
+@CMPXCHG8 0xB0 prefix_0f atomic
+0: LOAD eax                   # Load dest (r/m)
+1: CMPXCHG_OP eax             # Compare EAX vs dest, exchange if equal
+2: STORE eax                  # Store result back
+
+@CMPXCHG 0xB1 prefix_0f atomic
+0: LOAD eax
+1: CMPXCHG_OP eax
+2: STORE eax
+
+# =========================================================
+# XADD r/m, r — Exchange and Add  (0F C0 = byte, 0F C1 = word/dword)
+# =========================================================
+# temp = dest + src; src = dest; dest = temp.
+@XADD8 0xC0 prefix_0f atomic
+0: LOAD eax                   # Load dest
+1: XADD_OP eax                # dest + src → temp, old dest → src
+2: STORE eax                  # Store sum back
+
+@XADD 0xC1 prefix_0f atomic
+0: LOAD eax
+1: XADD_OP eax
+2: STORE eax
+
+# =========================================================
+# XCHG r/m, r — Exchange  (0x86 = byte, 0x87 = word/dword)
+# =========================================================
+# Implicit LOCK when memory operand.
+@XCHG8 0x86 atomic
+0: LOAD eax                   # Load dest from memory
+1: XCHG_OP eax                # Exchange: old mem → reg, old reg → temp
+2: STORE eax                  # Store old reg value to memory
+
+@XCHG 0x87 atomic
+0: LOAD eax
+1: XCHG_OP eax
+2: STORE eax
+
+# =========================================================
+# LOOP/LOOPcc — Loop with Counter  (0xE2, 0xE1, 0xE0)
+# =========================================================
+# LOOP: dec ECX, jump if ECX != 0.
+@LOOP 0xE2
+0: LOOP_DEC ecx               # Decrement ECX, branch if != 0
+
+# LOOPE/LOOPZ: dec ECX, jump if ECX != 0 AND ZF=1.
+@LOOPE 0xE1
+0: LOOP_DEC ecx               # Dec ECX, branch if ECX!=0 && ZF=1
+
+# LOOPNE/LOOPNZ: dec ECX, jump if ECX != 0 AND ZF=0.
+@LOOPNE 0xE0
+0: LOOP_DEC ecx               # Dec ECX, branch if ECX!=0 && ZF=0
+
+# =========================================================
+# LAHF — Load AH from Flags  (0x9F)
+# =========================================================
+@LAHF 0x9F
+0: LAHF_OP eax                # AH = SF:ZF:0:AF:0:PF:1:CF
+
+# =========================================================
+# SAHF — Store AH to Flags  (0x9E)
+# =========================================================
+@SAHF 0x9E
+0: SAHF_OP eax                # SF:ZF:AF:PF:CF = AH bits
+
+# =========================================================
+# MOVZX — Zero-Extend  (0F B6 = byte→word/dword, 0F B7 = word→dword)
+# =========================================================
+@MOVZX8 0xB6 prefix_0f
+0: MOVZX_OP eax
+
+@MOVZX16 0xB7 prefix_0f
+0: MOVZX_OP eax
+
+# =========================================================
+# MOVSX — Sign-Extend  (0F BE = byte→word/dword, 0F BF = word→dword)
+# =========================================================
+@MOVSX8 0xBE prefix_0f
+0: MOVSX_OP eax
+
+@MOVSX16 0xBF prefix_0f
+0: MOVSX_OP eax
+
+# =========================================================
+# SETcc — Set Byte on Condition  (0F 90–9F)
+# =========================================================
+# Only the base opcode is here; condition code is in low nibble.
+# The execute stage decodes the cc from the opcode.
+@SETO  0x90 prefix_0f
+0: SETcc_OP eax
+@SETNO 0x91 prefix_0f
+0: SETcc_OP eax
+@SETB  0x92 prefix_0f
+0: SETcc_OP eax
+@SETNB 0x93 prefix_0f
+0: SETcc_OP eax
+@SETZ  0x94 prefix_0f
+0: SETcc_OP eax
+@SETNZ 0x95 prefix_0f
+0: SETcc_OP eax
+@SETBE 0x96 prefix_0f
+0: SETcc_OP eax
+@SETA  0x97 prefix_0f
+0: SETcc_OP eax
+@SETS  0x98 prefix_0f
+0: SETcc_OP eax
+@SETNS 0x99 prefix_0f
+0: SETcc_OP eax
+@SETP  0x9A prefix_0f
+0: SETcc_OP eax
+@SETNP 0x9B prefix_0f
+0: SETcc_OP eax
+@SETL  0x9C prefix_0f
+0: SETcc_OP eax
+@SETNL 0x9D prefix_0f
+0: SETcc_OP eax
+@SETLE 0x9E prefix_0f
+0: SETcc_OP eax
+@SETG  0x9F prefix_0f
+0: SETcc_OP eax
+
+# =========================================================
+# IN / OUT — I/O Port Access
+# =========================================================
+# IN AL, imm8  (0xE4)
+@IN_IMM8 0xE4
+0: IO_IN eax
+
+# IN AX/EAX, imm8  (0xE5)
+@IN_IMM 0xE5
+0: IO_IN eax
+
+# IN AL, DX  (0xEC)
+@IN_DX8 0xEC
+0: IO_IN edx
+
+# IN AX/EAX, DX  (0xED)
+@IN_DX 0xED
+0: IO_IN edx
+
+# OUT imm8, AL  (0xE6)
+@OUT_IMM8 0xE6
+0: IO_OUT eax
+
+# OUT imm8, AX/EAX  (0xE7)
+@OUT_IMM 0xE7
+0: IO_OUT eax
+
+# OUT DX, AL  (0xEE)
+@OUT_DX8 0xEE
+0: IO_OUT edx
+
+# OUT DX, AX/EAX  (0xEF)
+@OUT_DX 0xEF
+0: IO_OUT edx
+
+# =========================================================
+# Flag Manipulation (simple single-step)
+# =========================================================
+# CLC — Clear Carry Flag  (0xF8)
+@CLC 0xF8
+0: CLC_OP
+
+# STC — Set Carry Flag  (0xF9)
+@STC 0xF9
+0: STC_OP
+
+# CMC — Complement Carry Flag  (0xF5)
+@CMC 0xF5
+0: CMC_OP
+
+# CLD — Clear Direction Flag  (0xFC)
+@CLD 0xFC
+0: CLD_OP
+
+# STD — Set Direction Flag  (0xFD)
+@STD 0xFD
+0: STD_OP
+
+# =========================================================
+# NOP  (0x90)
+# =========================================================
+@NOP 0x90
+0: NOP
+
+# =========================================================
+# LEA r, m — Load Effective Address  (0x8D)
+# =========================================================
+# Single-cycle in hardware (AGU), but needs microcode entry
+# for complex addressing modes.
+@LEA 0x8D
+0: MOV eax, eax               # AGU calculates effective address
+
+# =========================================================
+# INC r/m  (FE /0)
+# =========================================================
+@INC_MEM8 0xFE group 0
+0: LOAD eax
+1: INC eax, eax
+2: STORE eax
+
+# =========================================================
+# DEC r/m  (FE /1)
+# =========================================================
+@DEC_MEM8 0xFE group 1
+0: LOAD eax
+1: DEC eax, eax
+2: STORE eax
+
+# =========================================================
+# CALL r/m indirect near  (FF /2)
+# =========================================================
+@CALL_IND 0xFF group 2
+0: LOAD eax                   # Load target address
+1: PUSH eax                   # Push return address
+2: MOV eax, eax               # Jump to target (EIP = loaded addr)
+
+# =========================================================
+# CALL m far indirect  (FF /3)
+# =========================================================
+@CALL_FAR_IND 0xFF group 3 atomic
+0: LOAD eax                   # Load offset
+1: LOAD eax                   # Load selector
+2: PUSH cs                    # Push current CS
+3: PUSH eax                   # Push return EIP
+4: FAR_CALL                   # Load new CS:EIP
+
+# =========================================================
+# JMP r/m indirect near  (FF /4)
+# =========================================================
+@JMP_IND 0xFF group 4
+0: LOAD eax                   # Load target address
+1: MOV eax, eax               # Jump (EIP = loaded addr)
+
+# =========================================================
+# JMP m far indirect  (FF /5)
+# =========================================================
+@JMP_FAR_IND 0xFF group 5 atomic
+0: LOAD eax                   # Load offset
+1: LOAD eax                   # Load selector
+2: FAR_CALL                   # Load new CS:EIP (reuses far call logic)
+
+# =========================================================
+# PUSH r/m  (FF /6)
+# =========================================================
+@PUSH_MEM 0xFF group 6
+0: LOAD eax                   # Load value from r/m
+1: PUSH eax                   # Push to stack

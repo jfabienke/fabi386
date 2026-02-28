@@ -345,6 +345,19 @@ module f386_decode (
             8'h31: return FMT_NONE;         // RDTSC
             8'h32: return FMT_NONE;         // RDMSR
 
+            // ----- Pentium extensions (feature-gated) -----
+            8'h33: return FMT_NONE;         // RDPMC
+            8'h18: return FMT_MODRM;        // PREFETCH (hint, NOP completion)
+
+            // ----- CMOVcc (Pentium Pro) -----
+            8'h40, 8'h41, 8'h42, 8'h43,
+            8'h44, 8'h45, 8'h46, 8'h47,
+            8'h48, 8'h49, 8'h4A, 8'h4B,
+            8'h4C, 8'h4D, 8'h4E, 8'h4F: return FMT_MODRM; // CMOVcc r, r/m
+
+            // ----- POPCNT (0F B8) -----
+            8'hB8: return FMT_MODRM;        // POPCNT r, r/m (F3 prefix distinguishes from JMPE)
+
             // ----- Near conditional jumps (long form) -----
             8'h80, 8'h81, 8'h82, 8'h83,
             8'h84, 8'h85, 8'h86, 8'h87,
@@ -837,6 +850,27 @@ module f386_decode (
             // Jcc near (0F 80-8F)
             if (pd.opcode[7:4] == 4'h8)
                 return OP_BRANCH;
+
+            // CMOVcc (0F 40-4F) — conditional move, Pentium extensions
+            if (CONF_ENABLE_PENTIUM_EXT && pd.opcode[7:4] == 4'h4)
+                return (pd.mod != 2'b11) ? OP_LOAD : OP_CMOV;
+
+            // POPCNT (0F B8 with F3 prefix)
+            if (CONF_ENABLE_PENTIUM_EXT && pd.opcode == 8'hB8 && pd.pref_rep == 2'b10)
+                return (pd.mod != 2'b11) ? OP_LOAD : OP_BITCOUNT;
+
+            // LZCNT (0F BD with F3 prefix) / TZCNT (0F BC with F3 prefix)
+            if (CONF_ENABLE_PENTIUM_EXT && pd.pref_rep == 2'b10 &&
+                (pd.opcode == 8'hBD || pd.opcode == 8'hBC))
+                return (pd.mod != 2'b11) ? OP_LOAD : OP_BITCOUNT;
+
+            // PREFETCH (0F 18) — hint, NOP completion
+            if (CONF_ENABLE_PENTIUM_EXT && pd.opcode == 8'h18)
+                return OP_ALU_REG;
+
+            // RDPMC (0F 33)
+            if (CONF_ENABLE_PENTIUM_EXT && pd.opcode == 8'h33)
+                return OP_SYS_CALL;
 
             // System: WRMSR/RDMSR/RDTSC, INVD/WBINVD, CLTS, CPUID
             case (pd.opcode)
@@ -1493,6 +1527,42 @@ module f386_decode (
                 end
                 8'h23: begin // MOV DRn, r32 — reads GPR, writes DRn
                     ru.src_a = pd.rm;
+                    ru.src_a_valid = 1;
+                end
+
+                // CMOVcc (0F 40-4F) — reads flags + source, writes dest
+                8'h40, 8'h41, 8'h42, 8'h43,
+                8'h44, 8'h45, 8'h46, 8'h47,
+                8'h48, 8'h49, 8'h4A, 8'h4B,
+                8'h4C, 8'h4D, 8'h4E, 8'h4F: begin
+                    ru.reads_flags = 1;
+                    ru.dest = pd.reg_field;
+                    ru.dest_valid = 1;
+                    ru.src_a = pd.reg_field;  // Original dest value (pass-through if cond false)
+                    ru.src_a_valid = 1;
+                    ru.src_b = pd.rm;
+                    ru.src_b_valid = (pd.mod == 2'b11);
+                end
+
+                // POPCNT (0F B8) — reads source, writes dest, writes flags
+                8'hB8: begin
+                    ru.dest = pd.reg_field;
+                    ru.dest_valid = 1;
+                    ru.src_a = pd.rm;
+                    ru.src_a_valid = (pd.mod == 2'b11);
+                    ru.writes_flags = 1;
+                end
+
+                // PREFETCH (0F 18) — reads address only, no register dest
+                8'h18: begin
+                    // Address registers handled by extract_addr_regs
+                end
+
+                // RDPMC (0F 33) — reads ECX, writes EAX (low 32 of counter)
+                8'h33: begin
+                    ru.dest = REG_EAX;
+                    ru.dest_valid = 1;
+                    ru.src_a = REG_ECX;
                     ru.src_a_valid = 1;
                 end
 
@@ -2185,6 +2255,25 @@ module f386_decode (
         ru_v = get_reg_usage(pd_v);
     end
 
+    // --- Pentium Extension Opcode Re-encoding ---
+    // For OP_BITCOUNT: encode {opsz[1:0], bitcount_op[1:0]} into opcode field
+    // so the execute stage can directly index the bitcount unit.
+    logic [7:0] u_encoded_opcode;
+    always_comb begin
+        u_encoded_opcode = pd_u.opcode;
+        if (CONF_ENABLE_PENTIUM_EXT && pd_u.is_0f) begin
+            // POPCNT (0F B8 with F3): bitcount_op=00, opsz from prefix
+            if (pd_u.opcode == 8'hB8 && pd_u.pref_rep == 2'b10)
+                u_encoded_opcode = {4'd0, pd_u.pref_66 ? 2'b01 : 2'b10, 2'b00};
+            // LZCNT (0F BD with F3): bitcount_op=01
+            else if (pd_u.opcode == 8'hBD && pd_u.pref_rep == 2'b10)
+                u_encoded_opcode = {4'd0, pd_u.pref_66 ? 2'b01 : 2'b10, 2'b01};
+            // TZCNT (0F BC with F3): bitcount_op=10
+            else if (pd_u.opcode == 8'hBC && pd_u.pref_rep == 2'b10)
+                u_encoded_opcode = {4'd0, pd_u.pref_66 ? 2'b01 : 2'b10, 2'b10};
+        end
+    end
+
     // --- Stage 2 Output Register ---
     // Both U and V pipe results are registered on the same clock edge.
     // s1_valid indicates the pipeline register has valid data for stage 2.
@@ -2221,7 +2310,7 @@ module f386_decode (
             instr_u.valid       <= !pd_u.is_prefix && !pd_u.invalid;
             instr_u.pc          <= u_pc_r;
             instr_u.raw_instr   <= u_raw_r;
-            instr_u.opcode      <= pd_u.opcode;
+            instr_u.opcode      <= u_encoded_opcode;
             instr_u.op_cat      <= classify_op(pd_u);
             instr_u.p_dest      <= {2'b0, ru_u.dest};
             instr_u.p_src_a     <= {2'b0, ru_u.src_a};

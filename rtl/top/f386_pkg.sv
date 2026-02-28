@@ -50,6 +50,7 @@ package f386_pkg;
     localparam bit CONF_ENABLE_TAGE          = 1'b0;  // Phase P2: TAGE predictor
     localparam bit CONF_ENABLE_V86           = 1'b1;  // V86 mode support (boot-critical)
     localparam bit CONF_ENABLE_PSE           = 1'b0;  // 4MB pages (deferred)
+    localparam bit CONF_ENABLE_PENTIUM_EXT  = 1'b0;  // Pentium-era ISA extensions (CMOVcc, POPCNT, MMX)
 
     // --- Derived Type Widths ---
     localparam int PHYS_REG_WIDTH = $clog2(CONF_PHYS_REG_NUM);  // 5 for 32
@@ -116,7 +117,9 @@ package f386_pkg;
         OP_DATA_READ = 4'h8,
         OP_IO_READ   = 4'h9,
         OP_IO_WRITE  = 4'hA,
-        OP_MUL_DIV   = 4'hB     // MUL/IMUL/DIV/IDIV (multi-cycle)
+        OP_MUL_DIV   = 4'hB,    // MUL/IMUL/DIV/IDIV (multi-cycle)
+        OP_BITCOUNT  = 4'hC,    // POPCNT, LZCNT, TZCNT (Pentium extensions)
+        OP_CMOV      = 4'hD     // CMOVcc — conditional move (Pentium extensions)
     } op_type_t;
 
     // --- Semantic RE Tags ---

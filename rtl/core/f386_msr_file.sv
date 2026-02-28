@@ -29,8 +29,19 @@ module f386_msr_file (
 
     output logic [31:0]  host_debug_pc [4],
     output logic [3:0]   host_debug_en,
-    output logic         host_debug_unlock
+    output logic         host_debug_unlock,
+
+    // Performance Counter Interface (Pentium extensions)
+    input  logic         rob_commit_pulse,  // Pulse from ROB on each retired instruction
+    output logic [63:0]  perfctr0_out,      // Cycle counter (for RDPMC ECX=0)
+    output logic [63:0]  perfctr1_out       // Retired insn counter (for RDPMC ECX=1)
 );
+
+    // Performance Counter Registers (Intel standard MSR addresses)
+    logic [63:0] reg_perfctr0;   // 0x000000C1 — free-running cycle counter
+    logic [63:0] reg_perfctr1;   // 0x000000C2 — retired instruction counter
+    assign perfctr0_out = reg_perfctr0;
+    assign perfctr1_out = reg_perfctr1;
 
     // Internal Register Storage
     logic [31:0] reg_guard_start;
@@ -64,8 +75,15 @@ module f386_msr_file (
             reg_telemetry_en <= 1'b0;
             reg_debug_unlock <= 1'b0;
             for(int j=0; j<4; j++) reg_debug_en[j] <= 1'b0;
+            reg_perfctr0     <= 64'h0;
+            reg_perfctr1     <= 64'h0;
             msr_ack <= 0;
         end else begin
+            // Free-running performance counters
+            reg_perfctr0 <= reg_perfctr0 + 64'd1;
+            if (rob_commit_pulse)
+                reg_perfctr1 <= reg_perfctr1 + 64'd1;
+
             msr_ack <= 0;
             msr_dout <= 64'h0;
 
@@ -79,6 +97,9 @@ module f386_msr_file (
                     32'hC000_1011: reg_debug_pc[0] <= msr_din[31:0];
                     32'hC000_1012: reg_debug_pc[1] <= msr_din[31:0];
                     32'hC000_1015: reg_debug_en <= msr_din[3:0];
+                    // Performance counters (Intel standard addresses)
+                    32'h0000_00C1: reg_perfctr0 <= msr_din;
+                    32'h0000_00C2: reg_perfctr1 <= msr_din;
                 endcase
             end
             else if (msr_re) begin
@@ -90,6 +111,9 @@ module f386_msr_file (
                     32'hC000_1010: msr_dout <= {63'h0, reg_debug_unlock};
                     32'hC000_1011: msr_dout <= {32'h0, reg_debug_pc[0]};
                     32'hC000_1015: msr_dout <= {60'h0, reg_debug_en};
+                    // Performance counters (Intel standard addresses, RDMSR/RDPMC)
+                    32'h0000_00C1: msr_dout <= reg_perfctr0;
+                    32'h0000_00C2: msr_dout <= reg_perfctr1;
                 endcase
             end
         end

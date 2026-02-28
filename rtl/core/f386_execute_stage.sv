@@ -106,6 +106,52 @@ module f386_execute_stage (
         .result   (simd_res)
     );
 
+    // --- Bit-Count Unit (U-Pipe, combinational, Pentium extensions) ---
+    logic [31:0] bitcount_res;
+    logic [5:0]  bitcount_flags;
+    generate
+        if (CONF_ENABLE_PENTIUM_EXT) begin : gen_bitcount
+            f386_alu_bitcount bitcount_inst (
+                .op_a       (u_op_a),
+                .bitcount_op(u_instr.opcode[1:0]),
+                .opsz       (u_instr.opcode[3:2]),  // Operand size from decoder
+                .result     (bitcount_res),
+                .flags_out  (bitcount_flags)
+            );
+        end else begin : gen_no_bitcount
+            assign bitcount_res   = 32'd0;
+            assign bitcount_flags = 6'd0;
+        end
+    endgenerate
+
+    // --- CMOVcc Condition Evaluator (reuses branch condition logic) ---
+    logic cmov_condition_met;
+    always_comb begin
+        cmov_condition_met = 1'b0;
+        if (CONF_ENABLE_PENTIUM_EXT) begin
+            case (u_instr.opcode[3:0])
+                4'h0: cmov_condition_met =  u_instr.flags_in[5];           // CMOVO  (OF=1)
+                4'h1: cmov_condition_met = !u_instr.flags_in[5];           // CMOVNO (OF=0)
+                4'h2: cmov_condition_met =  u_instr.flags_in[0];           // CMOVB  (CF=1)
+                4'h3: cmov_condition_met = !u_instr.flags_in[0];           // CMOVNB (CF=0)
+                4'h4: cmov_condition_met =  u_instr.flags_in[3];           // CMOVE  (ZF=1)
+                4'h5: cmov_condition_met = !u_instr.flags_in[3];           // CMOVNE (ZF=0)
+                4'h6: cmov_condition_met =  u_instr.flags_in[0] | u_instr.flags_in[3]; // CMOVBE
+                4'h7: cmov_condition_met = !u_instr.flags_in[0] & !u_instr.flags_in[3]; // CMOVA
+                4'h8: cmov_condition_met =  u_instr.flags_in[4];           // CMOVS  (SF=1)
+                4'h9: cmov_condition_met = !u_instr.flags_in[4];           // CMOVNS (SF=0)
+                4'hA: cmov_condition_met =  u_instr.flags_in[1];           // CMOVP  (PF=1)
+                4'hB: cmov_condition_met = !u_instr.flags_in[1];           // CMOVNP (PF=0)
+                4'hC: cmov_condition_met =  u_instr.flags_in[4] != u_instr.flags_in[5]; // CMOVL
+                4'hD: cmov_condition_met =  u_instr.flags_in[4] == u_instr.flags_in[5]; // CMOVGE
+                4'hE: cmov_condition_met =  u_instr.flags_in[3] |
+                                           (u_instr.flags_in[4] != u_instr.flags_in[5]); // CMOVLE
+                4'hF: cmov_condition_met = !u_instr.flags_in[3] &
+                                           (u_instr.flags_in[4] == u_instr.flags_in[5]); // CMOVG
+            endcase
+        end
+    end
+
     // --- Spatial FPU (U-Pipe, multi-cycle) ---
     logic [31:0] fpu_res;
     logic        fpu_done;
@@ -346,6 +392,31 @@ module f386_execute_stage (
                     cdb0_tag       = u_instr.rob_tag;
                     cdb0_data      = alu_u_res;  // Effective address
                     cdb0_exception = 1'b0;
+                end
+
+                OP_CMOV: begin
+                    // CMOVcc: if condition met, write source; else keep dest unchanged
+                    wb_data_u       = cmov_condition_met ? u_op_b : u_op_a;
+                    wb_we_u         = 1'b1;
+                    cdb0_valid      = 1'b1;
+                    cdb0_tag        = u_instr.rob_tag;
+                    cdb0_data       = cmov_condition_met ? u_op_b : u_op_a;
+                    cdb0_flags      = 6'd0;
+                    cdb0_flags_mask = 6'b000000;  // CMOVcc modifies no flags
+                    cdb0_exception  = 1'b0;
+                end
+
+                OP_BITCOUNT: begin
+                    // POPCNT / LZCNT / TZCNT
+                    wb_data_u       = bitcount_res;
+                    wb_flags        = bitcount_flags;
+                    wb_we_u         = 1'b1;
+                    cdb0_valid      = 1'b1;
+                    cdb0_tag        = u_instr.rob_tag;
+                    cdb0_data       = bitcount_res;
+                    cdb0_flags      = bitcount_flags;
+                    cdb0_flags_mask = 6'b001001;  // ZF, CF only
+                    cdb0_exception  = 1'b0;
                 end
 
                 default: begin

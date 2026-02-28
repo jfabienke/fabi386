@@ -38,12 +38,27 @@ module f386_alu_simd (
                     4'd4: res_bytes[i] = (a_bytes[i] > b_bytes[i]) ? a_bytes[i] : b_bytes[i]; // MAX
                     4'd5: res_bytes[i] = (a_bytes[i] < b_bytes[i]) ? a_bytes[i] : b_bytes[i]; // MIN
                     4'd6: res_bytes[i] = (a_bytes[i] >> 1) + (b_bytes[i] >> 1); // Alpha Blend (50/50)
+                    // --- MMX Operations (Pentium extensions) ---
+                    4'd7:  res_bytes[i] = a_bytes[i] & b_bytes[i];  // PAND
+                    4'd8:  res_bytes[i] = a_bytes[i] | b_bytes[i];  // POR
+                    4'd9:  res_bytes[i] = a_bytes[i] ^ b_bytes[i];  // PXOR
+                    4'd10: res_bytes[i] = ~a_bytes[i] & b_bytes[i]; // PANDN
                     default: res_bytes[i] = a_bytes[i];
                 endcase
             end
         end
     endgenerate
 
-    assign result = {res_bytes[3], res_bytes[2], res_bytes[1], res_bytes[0]};
+    // --- PADDW: Packed Word Add (2 × 16-bit lanes) ---
+    logic [15:0] paddw_lo, paddw_hi;
+    assign paddw_lo = op_a[15:0]  + op_b[15:0];
+    assign paddw_hi = op_a[31:16] + op_b[31:16];
+
+    // --- PADDB: Packed Byte Add (already handled as simd_ctrl 4'd0) ---
+    // PADDB is identical to the existing wrapped ADD (4'd0).
+
+    // Result mux: PADDW uses word lanes; all others use byte lanes
+    assign result = (simd_ctrl == 4'd11) ? {paddw_hi, paddw_lo}
+                                         : {res_bytes[3], res_bytes[2], res_bytes[1], res_bytes[0]};
 
 endmodule

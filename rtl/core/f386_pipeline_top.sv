@@ -24,7 +24,7 @@ module f386_pipeline_top (
     logic        g_en;
     logic [31:0] t_base;
     logic        t_en;
-    logic [31:0] d_pc [4];
+    logic [31:0] d_pc_0, d_pc_1, d_pc_2, d_pc_3;
     logic [3:0]  d_en;
     logic        d_unlock;
 
@@ -40,7 +40,11 @@ module f386_pipeline_top (
         .msr_dout(alu_msr_dout), .msr_ack(alu_msr_ack),
         .guard_start(g_start), .guard_end(g_end), .guard_en(g_en),
         .thermal_base(t_base), .telemetry_en(t_en),
-        .host_debug_pc(d_pc), .host_debug_en(d_en), .host_debug_unlock(d_unlock)
+        .host_debug_pc_0(d_pc_0), .host_debug_pc_1(d_pc_1),
+        .host_debug_pc_2(d_pc_2), .host_debug_pc_3(d_pc_3),
+        .host_debug_en(d_en), .host_debug_unlock(d_unlock),
+        .rob_commit_pulse(1'b0),
+        .perfctr0_out(), .perfctr1_out()
     );
 
     // --- 2. Hardware Guard Unit (HGU) ---
@@ -66,7 +70,9 @@ module f386_pipeline_top (
     f386_debug_unit hdu_inst (
         .clk(clk), .reset_n(reset_n),
         .curr_pc(addr), .pc_valid(req && !we),
-        .host_trig_pc(d_pc), .host_trig_en(d_en),
+        .host_trig_pc_0(d_pc_0), .host_trig_pc_1(d_pc_1),
+        .host_trig_pc_2(d_pc_2), .host_trig_pc_3(d_pc_3),
+        .host_trig_en(d_en),
         .host_unlock(d_unlock), .debug_halt(dbg_halt), .debug_irq(dbg_irq)
     );
 

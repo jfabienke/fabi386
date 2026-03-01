@@ -134,96 +134,7 @@ module f386_rob (
     assign rob_tag_v = v_slot;
 
     // =========================================================
-    // Dispatch (tail advances)
-    // =========================================================
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            tail <= '0;
-            entry_valid <= '0;
-        end else if (flush) begin
-            tail <= '0;
-            entry_valid <= '0;
-        end else if (!full) begin
-            if (dispatch_u_valid) begin
-                entry_instr[tail]      <= dispatch_u;
-                entry_data[tail]       <= 32'd0;
-                entry_flags[tail]      <= 6'd0;
-                entry_flags_mask[tail] <= 6'd0;
-                entry_lq_idx[tail]     <= dispatch_u_lq_idx;
-                entry_sq_idx[tail]     <= dispatch_u_sq_idx;
-                entry_specbits[tail]   <= dispatch_u_specbits;
-                entry_ftq_idx[tail]    <= dispatch_u_ftq_idx;
-                entry_valid[tail]      <= 1'b1;
-                entry_complete[tail]   <= 1'b0;
-                entry_exception[tail]  <= 1'b0;
-            end
-            if (dispatch_v_valid) begin
-                entry_instr[v_slot]      <= dispatch_v;
-                entry_data[v_slot]       <= 32'd0;
-                entry_flags[v_slot]      <= 6'd0;
-                entry_flags_mask[v_slot] <= 6'd0;
-                entry_lq_idx[v_slot]     <= dispatch_v_lq_idx;
-                entry_sq_idx[v_slot]     <= dispatch_v_sq_idx;
-                entry_specbits[v_slot]   <= dispatch_v_specbits;
-                entry_ftq_idx[v_slot]    <= dispatch_v_ftq_idx;
-                entry_valid[v_slot]      <= 1'b1;
-                entry_complete[v_slot]   <= 1'b0;
-                entry_exception[v_slot]  <= 1'b0;
-            end
-            tail <= tail + rob_id_t'(dispatch_count);
-        end
-    end
-
-    // =========================================================
-    // CDB Writeback (mark entries complete)
-    // =========================================================
-    // CDB writes can happen to any slot at any time (out-of-order completion).
-    // This is the critical fix: without this, .ready/complete is never set
-    // and the ROB stalls permanently.
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            entry_complete  <= '0;
-            entry_exception <= '0;
-        end else if (flush) begin
-            entry_complete  <= '0;
-            entry_exception <= '0;
-        end else begin
-            if (cdb0_valid && entry_valid[cdb0_tag]) begin
-                entry_complete[cdb0_tag]   <= 1'b1;
-                entry_data[cdb0_tag]       <= cdb0_data;
-                entry_flags[cdb0_tag]      <= cdb0_flags;
-                entry_flags_mask[cdb0_tag] <= cdb0_flags_mask;
-                entry_exception[cdb0_tag]  <= cdb0_exception;
-            end
-            if (cdb1_valid && entry_valid[cdb1_tag]) begin
-                entry_complete[cdb1_tag]   <= 1'b1;
-                entry_data[cdb1_tag]       <= cdb1_data;
-                entry_flags[cdb1_tag]      <= cdb1_flags;
-                entry_flags_mask[cdb1_tag] <= cdb1_flags_mask;
-                entry_exception[cdb1_tag]  <= cdb1_exception;
-            end
-
-            // SpecBits: clear resolved branch bit from all entries
-            if (specbits_resolve_valid) begin
-                for (int i = 0; i < N; i++) begin
-                    if (entry_valid[i])
-                        entry_specbits[i][specbits_resolve_tag] <= 1'b0;
-                end
-            end
-
-            // SpecBits: squash entries that depend on the mispredicted branch
-            if (specbits_squash_valid) begin
-                for (int i = 0; i < N; i++) begin
-                    if (entry_valid[i] && |(entry_specbits[i] & specbits_squash_mask)) begin
-                        entry_valid[i] <= 1'b0;  // Kill this entry
-                    end
-                end
-            end
-        end
-    end
-
-    // =========================================================
-    // Retirement (head advances, in-order)
+    // Retirement signals (combinational)
     // =========================================================
     // Retire up to 2 instructions per cycle, strictly in program order.
     // U retires from head, V retires from head+1 only if U also retires.
@@ -285,13 +196,97 @@ module f386_rob (
         end
     end
 
-    // Advance head pointer and free retired slots
+    // =========================================================
+    // Unified Sequential Block (Dispatch + CDB + Retirement + SpecBits)
+    // =========================================================
+    // Merged into a single always_ff to avoid Quartus multiple-driver errors
+    // on shared arrays (entry_valid, entry_complete, entry_data, etc.).
+    //
+    // Priority (last-write-wins in NBA semantics):
+    //   1. Dispatch writes new entries at tail
+    //   2. CDB writeback marks entries complete
+    //   3. Retirement clears entry_valid at head
+    //   4. SpecBits squash can also clear entry_valid
+    integer rob_i;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            head <= '0;
+            tail            <= '0;
+            head            <= '0;
+            entry_valid     <= '0;
+            entry_complete  <= '0;
+            entry_exception <= '0;
         end else if (flush) begin
-            head <= '0;
+            tail            <= '0;
+            head            <= '0;
+            entry_valid     <= '0;
+            entry_complete  <= '0;
+            entry_exception <= '0;
         end else begin
+            // --- Dispatch (tail advances) ---
+            if (!full) begin
+                if (dispatch_u_valid) begin
+                    entry_instr[tail]      <= dispatch_u;
+                    entry_data[tail]       <= 32'd0;
+                    entry_flags[tail]      <= 6'd0;
+                    entry_flags_mask[tail] <= 6'd0;
+                    entry_lq_idx[tail]     <= dispatch_u_lq_idx;
+                    entry_sq_idx[tail]     <= dispatch_u_sq_idx;
+                    entry_specbits[tail]   <= dispatch_u_specbits;
+                    entry_ftq_idx[tail]    <= dispatch_u_ftq_idx;
+                    entry_valid[tail]      <= 1'b1;
+                    entry_complete[tail]   <= 1'b0;
+                    entry_exception[tail]  <= 1'b0;
+                end
+                if (dispatch_v_valid) begin
+                    entry_instr[v_slot]      <= dispatch_v;
+                    entry_data[v_slot]       <= 32'd0;
+                    entry_flags[v_slot]      <= 6'd0;
+                    entry_flags_mask[v_slot] <= 6'd0;
+                    entry_lq_idx[v_slot]     <= dispatch_v_lq_idx;
+                    entry_sq_idx[v_slot]     <= dispatch_v_sq_idx;
+                    entry_specbits[v_slot]   <= dispatch_v_specbits;
+                    entry_ftq_idx[v_slot]    <= dispatch_v_ftq_idx;
+                    entry_valid[v_slot]      <= 1'b1;
+                    entry_complete[v_slot]   <= 1'b0;
+                    entry_exception[v_slot]  <= 1'b0;
+                end
+                tail <= tail + rob_id_t'(dispatch_count);
+            end
+
+            // --- CDB Writeback (mark entries complete) ---
+            if (cdb0_valid && entry_valid[cdb0_tag]) begin
+                entry_complete[cdb0_tag]   <= 1'b1;
+                entry_data[cdb0_tag]       <= cdb0_data;
+                entry_flags[cdb0_tag]      <= cdb0_flags;
+                entry_flags_mask[cdb0_tag] <= cdb0_flags_mask;
+                entry_exception[cdb0_tag]  <= cdb0_exception;
+            end
+            if (cdb1_valid && entry_valid[cdb1_tag]) begin
+                entry_complete[cdb1_tag]   <= 1'b1;
+                entry_data[cdb1_tag]       <= cdb1_data;
+                entry_flags[cdb1_tag]      <= cdb1_flags;
+                entry_flags_mask[cdb1_tag] <= cdb1_flags_mask;
+                entry_exception[cdb1_tag]  <= cdb1_exception;
+            end
+
+            // --- SpecBits: clear resolved branch bit from all entries ---
+            if (specbits_resolve_valid) begin
+                for (rob_i = 0; rob_i < N; rob_i = rob_i + 1) begin
+                    if (entry_valid[rob_i])
+                        entry_specbits[rob_i][specbits_resolve_tag] <= 1'b0;
+                end
+            end
+
+            // --- SpecBits: squash entries that depend on mispredicted branch ---
+            if (specbits_squash_valid) begin
+                for (rob_i = 0; rob_i < N; rob_i = rob_i + 1) begin
+                    if (entry_valid[rob_i] && |(entry_specbits[rob_i] & specbits_squash_mask)) begin
+                        entry_valid[rob_i] <= 1'b0;
+                    end
+                end
+            end
+
+            // --- Retirement (head advances, frees slots) ---
             if (retire_u_valid) begin
                 entry_valid[head] <= 1'b0;
                 if (retire_v_valid)

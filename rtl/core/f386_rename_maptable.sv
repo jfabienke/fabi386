@@ -86,8 +86,9 @@ module f386_rename_maptable (
     // =========================================================
     // Committed map output (for external full-flush rebuild)
     // =========================================================
+    genvar i;
     generate
-        for (genvar i = 0; i < CONF_ARCH_REG_NUM; i++) begin : gen_com_out
+        for (i = 0; i < CONF_ARCH_REG_NUM; i++) begin : gen_com_out
             assign com_map_out[i] = com_map[i];
         end
     endgenerate

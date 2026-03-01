@@ -13,7 +13,7 @@
 
 import f386_pkg::*;
 
-module f386_shadow_stack (
+module f386_shadow_stack_monitor (
     input  logic         clk,
     input  logic         reset_n,
 

@@ -17,9 +17,9 @@
  */
 
 module f386_block_ram #(
-    parameter int    ADDR_WIDTH = 10,
-    parameter int    DATA_WIDTH = 32,
-    parameter string INIT_FILE  = ""
+    parameter ADDR_WIDTH = 10,
+    parameter DATA_WIDTH = 32,
+    parameter INIT_FILE  = ""
 )(
     input  logic                    clk,
 
@@ -34,7 +34,7 @@ module f386_block_ram #(
     output logic [DATA_WIDTH-1:0]   b_rdata
 );
 
-    localparam int DEPTH = 1 << ADDR_WIDTH;
+    localparam DEPTH = 1 << ADDR_WIDTH;
 
     // Force M10K inference, suppress read-during-write hazard checking
     // for maximum Fmax. Callers must ensure no simultaneous R/W to same address

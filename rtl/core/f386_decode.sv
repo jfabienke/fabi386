@@ -444,7 +444,7 @@ module f386_decode (
     // SIB → displacement → immediate. Returns total length and decoded fields.
 
     typedef struct packed {
-        logic [3:0]  len;           // Total instruction length (1-15)
+        logic [3:0]  insn_len;      // Total instruction length (1-15)
         logic [7:0]  opcode;        // Primary opcode byte
         logic        is_0f;         // Two-byte opcode (0x0F prefix)
         logic        has_modrm;     // Instruction uses ModRM
@@ -720,8 +720,8 @@ module f386_decode (
         // Far CALL/JMP with pointer in instruction stream aren't truly indirect
         // (target is in the instruction bytes), but we treat them as microcode anyway
 
-        // Clamp to valid range
-        d.len = (pos > 4'd15) ? 4'd15 : pos;
+        // Instruction length from byte position
+        d.insn_len = pos;
 
         return d;
     endfunction
@@ -735,31 +735,6 @@ module f386_decode (
     // use a 16:1 byte-aligned mux. The synthesis tool can map this to a LUT
     // cascade with (* parallel_case *) guidance. On Cyclone V this maps to
     // ~200 ALMs vs ~400+ for a generic barrel shift.
-
-    logic [127:0] v_stream;
-
-    always_comb begin : v_stream_mux
-        (* parallel_case *)
-        case (pd_u.len)
-            4'd0:  v_stream = fetch_block;
-            4'd1:  v_stream = {8'h0,   fetch_block[127:8]};
-            4'd2:  v_stream = {16'h0,  fetch_block[127:16]};
-            4'd3:  v_stream = {24'h0,  fetch_block[127:24]};
-            4'd4:  v_stream = {32'h0,  fetch_block[127:32]};
-            4'd5:  v_stream = {40'h0,  fetch_block[127:40]};
-            4'd6:  v_stream = {48'h0,  fetch_block[127:48]};
-            4'd7:  v_stream = {56'h0,  fetch_block[127:56]};
-            4'd8:  v_stream = {64'h0,  fetch_block[127:64]};
-            4'd9:  v_stream = {72'h0,  fetch_block[127:72]};
-            4'd10: v_stream = {80'h0,  fetch_block[127:80]};
-            4'd11: v_stream = {88'h0,  fetch_block[127:88]};
-            4'd12: v_stream = {96'h0,  fetch_block[127:96]};
-            4'd13: v_stream = {104'h0, fetch_block[127:104]};
-            4'd14: v_stream = {112'h0, fetch_block[127:112]};
-            4'd15: v_stream = {120'h0, fetch_block[127:120]};
-        endcase
-    end
-
 
     // =========================================================================
     // 2-Stage Pipelined Decode
@@ -784,6 +759,30 @@ module f386_decode (
 
     always_comb begin
         pd_u_s1 = pre_decode(fetch_block, eff_default_32);
+    end
+
+    // --- V-pipe byte stream: shift fetch block by U-pipe instruction length ---
+    logic [127:0] v_stream;
+
+    always_comb begin : v_stream_mux
+        case (pd_u_s1.insn_len)
+            4'd0:  v_stream = fetch_block;
+            4'd1:  v_stream = {8'h0,   fetch_block[127:8]};
+            4'd2:  v_stream = {16'h0,  fetch_block[127:16]};
+            4'd3:  v_stream = {24'h0,  fetch_block[127:24]};
+            4'd4:  v_stream = {32'h0,  fetch_block[127:32]};
+            4'd5:  v_stream = {40'h0,  fetch_block[127:40]};
+            4'd6:  v_stream = {48'h0,  fetch_block[127:48]};
+            4'd7:  v_stream = {56'h0,  fetch_block[127:56]};
+            4'd8:  v_stream = {64'h0,  fetch_block[127:64]};
+            4'd9:  v_stream = {72'h0,  fetch_block[127:72]};
+            4'd10: v_stream = {80'h0,  fetch_block[127:80]};
+            4'd11: v_stream = {88'h0,  fetch_block[127:88]};
+            4'd12: v_stream = {96'h0,  fetch_block[127:96]};
+            4'd13: v_stream = {104'h0, fetch_block[127:104]};
+            4'd14: v_stream = {112'h0, fetch_block[127:112]};
+            4'd15: v_stream = {120'h0, fetch_block[127:120]};
+        endcase
     end
 
     // --- Pipeline Register: Stage 1 → Stage 2 ---
@@ -812,7 +811,7 @@ module f386_decode (
                 v_stream_r       <= v_stream;
                 pd_u_r           <= pd_u_s1;
                 u_pc_r           <= current_pc;
-                v_pc_r           <= current_pc + {28'h0, pd_u_s1.len};
+                v_pc_r           <= current_pc + {28'h0, pd_u_s1.insn_len};
                 u_raw_r          <= fetch_block[31:0];
                 eff_default_32_r <= eff_default_32;
                 s1_valid         <= 1;
@@ -1218,6 +1217,16 @@ module f386_decode (
         logic [2:0] addr_seg;        // Effective segment: 0=DS, 1=ES, 2=CS, 3=SS, 4=FS, 5=GS
     } reg_usage_t;
 
+    // Packed struct for address register extraction (return type)
+    typedef struct packed {
+        logic [2:0] addr_base;
+        logic       addr_base_valid;
+        logic [2:0] addr_index;
+        logic       addr_index_valid;
+        logic [1:0] addr_scale;
+        logic [2:0] addr_seg;
+    } addr_info_t;
+
     // =========================================================================
     // Address Register Extraction Helper
     // =========================================================================
@@ -1239,65 +1248,60 @@ module f386_decode (
     //   Combination of BX, BP, SI, DI per the 16-bit addressing table
     //   Special: mod==00 && rm==110 means disp16 only
 
-    function automatic void extract_addr_regs(
-        input  predecode_t pd,
-        output logic [2:0] addr_base,
-        output logic       addr_base_valid,
-        output logic [2:0] addr_index,
-        output logic       addr_index_valid,
-        output logic [1:0] addr_scale,
-        output logic [2:0] addr_seg
+    function automatic addr_info_t extract_addr_regs(
+        input  predecode_t pd
     );
-        addr_base       = 3'b000;
-        addr_base_valid = 0;
-        addr_index       = 3'b000;
-        addr_index_valid = 0;
-        addr_scale       = 2'b00;
+        addr_info_t ai;
+        ai.addr_base       = 3'b000;
+        ai.addr_base_valid = 0;
+        ai.addr_index       = 3'b000;
+        ai.addr_index_valid = 0;
+        ai.addr_scale       = 2'b00;
 
         // Default segment: DS for most, SS for EBP/ESP-based addressing
         // (overridden below if segment prefix present)
-        addr_seg = 3'd0; // DS default
+        ai.addr_seg = 3'd0; // DS default
 
         if (!pd.has_modrm || pd.mod == 2'b11)
-            return; // Register-direct, no memory address
+            return ai; // Register-direct, no memory address
 
         if (pd.addr_32) begin
             // ---- 32-bit addressing ----
             if (pd.has_sib) begin
                 // SIB byte present: base from SIB.base, index from SIB.index
-                addr_scale = pd.sib_scale;
+                ai.addr_scale = pd.sib_scale;
 
                 // Index register (SIB.index == 100 means no index / "none")
                 if (pd.sib_index != 3'b100) begin
-                    addr_index = pd.sib_index;
-                    addr_index_valid = 1;
+                    ai.addr_index = pd.sib_index;
+                    ai.addr_index_valid = 1;
                 end
 
                 // Base register
                 if (pd.mod == 2'b00 && pd.sib_base == 3'b101) begin
                     // mod==00, base==101: disp32 only, no base register
-                    addr_base_valid = 0;
+                    ai.addr_base_valid = 0;
                 end else begin
-                    addr_base = pd.sib_base;
-                    addr_base_valid = 1;
+                    ai.addr_base = pd.sib_base;
+                    ai.addr_base_valid = 1;
                 end
 
                 // SS segment default when base is ESP or EBP
-                if (addr_base_valid && (pd.sib_base == REG_ESP || pd.sib_base == REG_EBP))
-                    addr_seg = 3'd3; // SS
+                if (ai.addr_base_valid && (pd.sib_base == REG_ESP || pd.sib_base == REG_EBP))
+                    ai.addr_seg = 3'd3; // SS
             end else begin
                 // No SIB: rm field is the base register
                 if (pd.mod == 2'b00 && pd.rm == 3'b101) begin
                     // mod==00, rm==101: disp32 only, no base
-                    addr_base_valid = 0;
+                    ai.addr_base_valid = 0;
                 end else begin
-                    addr_base = pd.rm;
-                    addr_base_valid = 1;
+                    ai.addr_base = pd.rm;
+                    ai.addr_base_valid = 1;
                 end
 
                 // SS segment default when base is EBP or ESP
-                if (addr_base_valid && (pd.rm == REG_EBP || pd.rm == REG_ESP))
-                    addr_seg = 3'd3; // SS
+                if (ai.addr_base_valid && (pd.rm == REG_EBP || pd.rm == REG_ESP))
+                    ai.addr_seg = 3'd3; // SS
             end
         end else begin
             // ---- 16-bit addressing ----
@@ -1308,50 +1312,53 @@ module f386_decode (
             //   rm=011: [BP+DI]     rm=111: [BX]
             case (pd.rm)
                 3'b000: begin
-                    addr_base = REG_EBX; addr_base_valid = 1;
-                    addr_index = REG_ESI; addr_index_valid = 1;
+                    ai.addr_base = REG_EBX; ai.addr_base_valid = 1;
+                    ai.addr_index = REG_ESI; ai.addr_index_valid = 1;
                 end
                 3'b001: begin
-                    addr_base = REG_EBX; addr_base_valid = 1;
-                    addr_index = REG_EDI; addr_index_valid = 1;
+                    ai.addr_base = REG_EBX; ai.addr_base_valid = 1;
+                    ai.addr_index = REG_EDI; ai.addr_index_valid = 1;
                 end
                 3'b010: begin
-                    addr_base = REG_EBP; addr_base_valid = 1;
-                    addr_index = REG_ESI; addr_index_valid = 1;
-                    addr_seg = 3'd3; // SS for BP-based
+                    ai.addr_base = REG_EBP; ai.addr_base_valid = 1;
+                    ai.addr_index = REG_ESI; ai.addr_index_valid = 1;
+                    ai.addr_seg = 3'd3; // SS for BP-based
                 end
                 3'b011: begin
-                    addr_base = REG_EBP; addr_base_valid = 1;
-                    addr_index = REG_EDI; addr_index_valid = 1;
-                    addr_seg = 3'd3; // SS for BP-based
+                    ai.addr_base = REG_EBP; ai.addr_base_valid = 1;
+                    ai.addr_index = REG_EDI; ai.addr_index_valid = 1;
+                    ai.addr_seg = 3'd3; // SS for BP-based
                 end
                 3'b100: begin
-                    addr_base = REG_ESI; addr_base_valid = 1;
+                    ai.addr_base = REG_ESI; ai.addr_base_valid = 1;
                 end
                 3'b101: begin
-                    addr_base = REG_EDI; addr_base_valid = 1;
+                    ai.addr_base = REG_EDI; ai.addr_base_valid = 1;
                 end
                 3'b110: begin
                     if (pd.mod != 2'b00) begin
-                        addr_base = REG_EBP; addr_base_valid = 1;
-                        addr_seg = 3'd3; // SS for BP-based
+                        ai.addr_base = REG_EBP; ai.addr_base_valid = 1;
+                        ai.addr_seg = 3'd3; // SS for BP-based
                     end
                     // mod==00, rm==110: disp16 only, no base
                 end
                 3'b111: begin
-                    addr_base = REG_EBX; addr_base_valid = 1;
+                    ai.addr_base = REG_EBX; ai.addr_base_valid = 1;
                 end
             endcase
         end
 
         // Segment prefix override (if present, overrides default)
         if (pd.pref_seg != 3'd0)
-            addr_seg = pd.pref_seg;
+            ai.addr_seg = pd.pref_seg;
+
+        return ai;
     endfunction
 
 
     function automatic reg_usage_t get_reg_usage(predecode_t pd);
         reg_usage_t ru;
+        addr_info_t ai;
         logic is_cmp;      // For ALU ops: CMP doesn't write dest
         logic is_cmp_g1;   // For Grp1 ops: CMP sub-function
         ru = '0;
@@ -1359,10 +1366,13 @@ module f386_decode (
         is_cmp_g1 = 0;
 
         // ---- Extract address registers for all memory-referencing instructions ----
-        extract_addr_regs(pd,
-            ru.addr_base, ru.addr_base_valid,
-            ru.addr_index, ru.addr_index_valid,
-            ru.addr_scale, ru.addr_seg);
+        ai = extract_addr_regs(pd);
+        ru.addr_base       = ai.addr_base;
+        ru.addr_base_valid = ai.addr_base_valid;
+        ru.addr_index      = ai.addr_index;
+        ru.addr_index_valid = ai.addr_index_valid;
+        ru.addr_scale      = ai.addr_scale;
+        ru.addr_seg        = ai.addr_seg;
 
         if (pd.invalid || pd.is_prefix) return ru;
 
@@ -2223,12 +2233,12 @@ module f386_decode (
 
     always_comb begin
         // U-pipe branch target (valid for relative branches only)
-        u_branch_tgt  = u_pc_r + {28'h0, pd_u.len} + pd_u.imm_value;
+        u_branch_tgt  = u_pc_r + {28'h0, pd_u.insn_len} + pd_u.imm_value;
         u_is_branch   = pd_u.imm_is_rel && !pd_u.invalid;
         u_is_indirect = pd_u.is_indirect && !pd_u.invalid;
 
         // V-pipe branch target
-        v_branch_tgt  = v_pc_r + {28'h0, pd_v.len} + pd_v.imm_value;
+        v_branch_tgt  = v_pc_r + {28'h0, pd_v.insn_len} + pd_v.imm_value;
         v_is_branch   = pd_v.imm_is_rel && !pd_v.invalid;
         v_is_indirect = pd_v.is_indirect && !pd_v.invalid;
     end

@@ -82,7 +82,7 @@ module f386_aar_engine (
     // =================================================================
     logic [31:0] shadow_expected_ret;
 
-    f386_shadow_stack shadow (
+    f386_shadow_stack_monitor shadow (
         .clk              (clk),
         .reset_n          (reset_n),
         .curr_pc          (cpu_instr.pc),

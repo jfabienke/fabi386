@@ -35,8 +35,9 @@ module f386_picker #(
 
     assign remaining[0] = request;
 
+    genvar p;
     generate
-        for (genvar p = 0; p < NUM_PICK; p++) begin : gen_pick
+        for (p = 0; p < NUM_PICK; p++) begin : gen_pick
 
             // Find lowest set bit in remaining requests
             logic [WIDTH-1:0] lowest_bit;

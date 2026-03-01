@@ -1,10 +1,10 @@
 # fabi386: Quartus Settings File for DE10-Nano (MiSTer)
 # =====================================================
-# Device: Cyclone V 5CSEBA6U23I7N (DE10-Nano, industrial -I7 speed grade)
+# Device: Cyclone V 5CSEBA6U23I7 (DE10-Nano, industrial -I7 speed grade)
 # ALMs: 41,910 | M10K: 553 | DSP: 112
 
 set_global_assignment -name FAMILY "Cyclone V"
-set_global_assignment -name DEVICE 5CSEBA6U23I7N
+set_global_assignment -name DEVICE 5CSEBA6U23I7
 set_global_assignment -name TOP_LEVEL_ENTITY f386_emu
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION "21.1"
 set_global_assignment -name PROJECT_CREATION_TIME_DATE "00:00:00  January 01, 2024"
@@ -139,7 +139,7 @@ set_global_assignment -name ADV_NETLIST_OPT_SYNTH_WYSIWYG_REMAP ON
 # The actual pin map is inherited from the MiSTer sys/ framework
 # top-level module, which wraps f386_emu.
 
-set_global_assignment -name RESERVE_ALL_UNUSED_PINS_ACTIVE_LOW ON
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS_NO_OUTPUT_GND "AS INPUT TRI-STATED"
 set_global_assignment -name STRATIX_DEVICE_IO_STANDARD "3.3-V LVTTL"
 set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
 set_global_assignment -name MAX_CORE_JUNCTION_TEMP 100

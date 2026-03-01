@@ -52,8 +52,9 @@ module f386_distributed_ram #(
     end
 
     // Asynchronous (combinational) reads — one per port
+    genvar p;
     generate
-        for (genvar p = 0; p < READ_PORTS; p++) begin : gen_rd
+        for (p = 0; p < READ_PORTS; p++) begin : gen_rd
             assign rd_data[p] = mem[p][rd_addr[p]];
         end
     endgenerate

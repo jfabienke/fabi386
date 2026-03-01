@@ -84,8 +84,9 @@ module f386_tlb (
 
     logic [N-1:0] cam_match;
 
+    genvar i;
     generate
-        for (genvar i = 0; i < N; i++) begin : gen_cam
+        for (i = 0; i < N; i++) begin : gen_cam
             assign cam_match[i] = entry_valid[i] && (entry_vpn[i] == lookup_vpn);
         end
     endgenerate

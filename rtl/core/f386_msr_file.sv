@@ -27,7 +27,10 @@ module f386_msr_file (
     output logic [31:0]  thermal_base,
     output logic         telemetry_en,
 
-    output logic [31:0]  host_debug_pc [4],
+    output logic [31:0]  host_debug_pc_0,
+    output logic [31:0]  host_debug_pc_1,
+    output logic [31:0]  host_debug_pc_2,
+    output logic [31:0]  host_debug_pc_3,
     output logic [3:0]   host_debug_en,
     output logic         host_debug_unlock,
 
@@ -49,7 +52,7 @@ module f386_msr_file (
     logic        reg_guard_en;
     logic [31:0] reg_thermal_base;
     logic        reg_telemetry_en;
-    logic [31:0] reg_debug_pc [4];
+    logic [31:0] reg_debug_pc [0:3];
     logic [3:0]  reg_debug_en;
     logic        reg_debug_unlock;
 
@@ -61,10 +64,10 @@ module f386_msr_file (
     assign telemetry_en = reg_telemetry_en;
     assign host_debug_en = reg_debug_en;
     assign host_debug_unlock = reg_debug_unlock;
-    genvar i;
-    generate
-        for (i = 0; i < 4; i++) assign host_debug_pc[i] = reg_debug_pc[i];
-    endgenerate
+    assign host_debug_pc_0 = reg_debug_pc[0];
+    assign host_debug_pc_1 = reg_debug_pc[1];
+    assign host_debug_pc_2 = reg_debug_pc[2];
+    assign host_debug_pc_3 = reg_debug_pc[3];
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
@@ -74,25 +77,31 @@ module f386_msr_file (
             reg_thermal_base <= 32'h0F000000; // Default mapping
             reg_telemetry_en <= 1'b0;
             reg_debug_unlock <= 1'b0;
-            for(int j=0; j<4; j++) reg_debug_en[j] <= 1'b0;
+            reg_debug_en     <= 4'b0;
             reg_perfctr0     <= 64'h0;
             reg_perfctr1     <= 64'h0;
-            msr_ack <= 0;
+            msr_ack <= 1'b0;
         end else begin
             // Free-running performance counters
             reg_perfctr0 <= reg_perfctr0 + 64'd1;
             if (rob_commit_pulse)
                 reg_perfctr1 <= reg_perfctr1 + 64'd1;
 
-            msr_ack <= 0;
+            msr_ack <= 1'b0;
             msr_dout <= 64'h0;
 
             if (msr_we) begin
-                msr_ack <= 1;
+                msr_ack <= 1'b1;
                 case (msr_idx)
-                    32'hC000_1000: {reg_guard_en, reg_guard_start} <= {msr_din[32], msr_din[31:0]};
+                    32'hC000_1000: begin
+                        reg_guard_en    <= msr_din[32];
+                        reg_guard_start <= msr_din[31:0];
+                    end
                     32'hC000_1001: reg_guard_end <= msr_din[31:0];
-                    32'hC000_1002: {reg_telemetry_en, reg_thermal_base} <= {msr_din[32], msr_din[31:0]};
+                    32'hC000_1002: begin
+                        reg_telemetry_en <= msr_din[32];
+                        reg_thermal_base <= msr_din[31:0];
+                    end
                     32'hC000_1010: reg_debug_unlock <= (msr_din[31:0] == 32'hDEADBEEF); // Unlock Key
                     32'hC000_1011: reg_debug_pc[0] <= msr_din[31:0];
                     32'hC000_1012: reg_debug_pc[1] <= msr_din[31:0];
@@ -100,10 +109,11 @@ module f386_msr_file (
                     // Performance counters (Intel standard addresses)
                     32'h0000_00C1: reg_perfctr0 <= msr_din;
                     32'h0000_00C2: reg_perfctr1 <= msr_din;
+                    default: ;
                 endcase
             end
             else if (msr_re) begin
-                msr_ack <= 1;
+                msr_ack <= 1'b1;
                 case (msr_idx)
                     32'hC000_1000: msr_dout <= {31'h0, reg_guard_en, reg_guard_start};
                     32'hC000_1001: msr_dout <= {32'h0, reg_guard_end};
@@ -114,6 +124,7 @@ module f386_msr_file (
                     // Performance counters (Intel standard addresses, RDMSR/RDPMC)
                     32'h0000_00C1: msr_dout <= reg_perfctr0;
                     32'h0000_00C2: msr_dout <= reg_perfctr1;
+                    default: ;
                 endcase
             end
         end

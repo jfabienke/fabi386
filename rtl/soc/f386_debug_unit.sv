@@ -24,11 +24,17 @@ module f386_debug_unit (
 
     // --- Control Inputs ---
     // Source A: fabi386 Console (External UART/JTAG)
-    input  wire [31:0]  ext_trig_pc      [3:0],
+    input  wire [31:0]  ext_trig_pc_0,
+    input  wire [31:0]  ext_trig_pc_1,
+    input  wire [31:0]  ext_trig_pc_2,
+    input  wire [31:0]  ext_trig_pc_3,
     input  wire [3:0]   ext_trig_en,
 
     // Source B: Host CPU (Internal MSR/IO Bridge)
-    input  wire [31:0]  host_trig_pc    [3:0],
+    input  wire [31:0]  host_trig_pc_0,
+    input  wire [31:0]  host_trig_pc_1,
+    input  wire [31:0]  host_trig_pc_2,
+    input  wire [31:0]  host_trig_pc_3,
     input  wire [3:0]   host_trig_en,
     input  wire         host_unlock,     // Must be high to allow host control
 
@@ -38,31 +44,35 @@ module f386_debug_unit (
 );
 
     // Active Trigger Sets (Muxed between External and Host)
-    wire [31:0] active_pc [3:0];
+    wire [31:0] active_pc [0:3];
     wire [3:0]  active_en;
 
-    genvar j;
-    generate
-        for (j = 0; j < 4; j++) begin : trigger_mux
-            assign active_pc[j] = (host_unlock && host_trig_en[j]) ? host_trig_pc[j] : ext_trig_pc[j];
-            assign active_en[j] = (host_unlock) ? (host_trig_en[j] | ext_trig_en[j]) : ext_trig_en[j];
-        end
-    endgenerate
+    assign active_pc[0] = (host_unlock && host_trig_en[0]) ? host_trig_pc_0 : ext_trig_pc_0;
+    assign active_pc[1] = (host_unlock && host_trig_en[1]) ? host_trig_pc_1 : ext_trig_pc_1;
+    assign active_pc[2] = (host_unlock && host_trig_en[2]) ? host_trig_pc_2 : ext_trig_pc_2;
+    assign active_pc[3] = (host_unlock && host_trig_en[3]) ? host_trig_pc_3 : ext_trig_pc_3;
+
+    assign active_en[0] = host_unlock ? (host_trig_en[0] | ext_trig_en[0]) : ext_trig_en[0];
+    assign active_en[1] = host_unlock ? (host_trig_en[1] | ext_trig_en[1]) : ext_trig_en[1];
+    assign active_en[2] = host_unlock ? (host_trig_en[2] | ext_trig_en[2]) : ext_trig_en[2];
+    assign active_en[3] = host_unlock ? (host_trig_en[3] | ext_trig_en[3]) : ext_trig_en[3];
+
+    integer i;
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
-            debug_halt <= 0;
-            debug_irq  <= 0;
+            debug_halt <= 1'b0;
+            debug_irq  <= 1'b0;
         end else begin
-            debug_halt <= 0;
-            debug_irq  <= 0;
+            debug_halt <= 1'b0;
+            debug_irq  <= 1'b0;
 
-            for (int i = 0; i < 4; i++) begin
+            for (i = 0; i < 4; i = i + 1) begin
                 if (active_en[i]) begin
                     // 1. Hardware PC Breakpoint
                     if (pc_valid && curr_pc == active_pc[i]) begin
-                        debug_halt <= 1;
-                        debug_irq  <= 1; // Traps the host if configured
+                        debug_halt <= 1'b1;
+                        debug_irq  <= 1'b1; // Traps the host if configured
                     end
 
                     // 2. Data Watchpoint Logic (Simplified for brevity)

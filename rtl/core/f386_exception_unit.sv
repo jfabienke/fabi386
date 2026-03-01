@@ -167,7 +167,11 @@ module f386_exception_unit (
     // Exception Delivery FSM
     // =========================================================
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            state        <= EXC_IDLE;
+            deliver_exc  <= 1'b0;
+            cr2_we       <= 1'b0;
+        end else if (flush) begin
             state        <= EXC_IDLE;
             deliver_exc  <= 1'b0;
             cr2_we       <= 1'b0;

@@ -290,7 +290,9 @@ module f386_pit_counter (
     // -------------------------------------------------------------------------
     logic wr_msb_next;  // 0 = expecting LSB, 1 = expecting MSB
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n | set_control)
+        if (!rst_n)
+            wr_msb_next <= 1'b0;
+        else if (set_control)
             wr_msb_next <= 1'b0;
         else if (wr_done & (rw_mode == 2'd3))
             wr_msb_next <= ~wr_msb_next;
@@ -306,7 +308,9 @@ module f386_pit_counter (
     // -------------------------------------------------------------------------
     logic rd_msb_next;
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n | set_control)
+        if (!rst_n)
+            rd_msb_next <= 1'b0;
+        else if (set_control)
             rd_msb_next <= 1'b0;
         else if (rd_done & (rw_mode == 2'd3) & ~status_latched)
             rd_msb_next <= ~rd_msb_next;
@@ -356,7 +360,9 @@ module f386_pit_counter (
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n | set_control)
+        if (!rst_n)
+            ol_latched <= 1'b0;
+        else if (set_control)
             ol_latched <= 1'b0;
         else if (latch_count)
             ol_latched <= 1'b1;
@@ -380,7 +386,9 @@ module f386_pit_counter (
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n | set_control)
+        if (!rst_n)
+            status_latched <= 1'b0;
+        else if (set_control)
             status_latched <= 1'b0;
         else if (latch_status)
             status_latched <= 1'b1;
@@ -411,7 +419,9 @@ module f386_pit_counter (
     logic written_flag, written_sampled;
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n | set_control)
+        if (!rst_n)
+            written_flag <= 1'b0;
+        else if (set_control)
             written_flag <= 1'b0;
         else if (wr_seq_done & ~mode[0] & ~(mode[1] & loaded))
             written_flag <= 1'b1;           // Modes 0, 2, 3, 4 only
@@ -420,7 +430,9 @@ module f386_pit_counter (
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n | set_control)
+        if (!rst_n)
+            written_sampled <= 1'b0;
+        else if (set_control)
             written_sampled <= 1'b0;
         else if (pit_clk_rise)
             written_sampled <= written_flag;
@@ -432,7 +444,9 @@ module f386_pit_counter (
     logic armed, trigger_ff, trigger_sampled;
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n | set_control)
+        if (!rst_n)
+            armed <= 1'b0;
+        else if (set_control)
             armed <= 1'b0;
         else if (wr_seq_done & (mode[1:0] == 2'b01))
             armed <= 1'b1;                  // Arm in modes 1, 5
@@ -442,7 +456,9 @@ module f386_pit_counter (
                            (loaded &  mode[1]);
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n | set_control)
+        if (!rst_n)
+            trigger_ff <= 1'b0;
+        else if (set_control)
             trigger_ff <= 1'b0;
         else if (gate_rise & trigger_allowed)
             trigger_ff <= 1'b1;
@@ -451,7 +467,9 @@ module f386_pit_counter (
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n | set_control)
+        if (!rst_n)
+            trigger_sampled <= 1'b0;
+        else if (set_control)
             trigger_sampled <= 1'b0;
         else if (pit_clk_rise)
             trigger_sampled <= trigger_ff;
@@ -532,7 +550,9 @@ module f386_pit_counter (
 
     logic loaded;
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n | set_control)
+        if (!rst_n)
+            loaded <= 1'b0;
+        else if (set_control)
             loaded <= 1'b0;
         else if (do_load)
             loaded <= 1'b1;

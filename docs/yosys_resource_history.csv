@@ -1,0 +1,4 @@
+date,total_cells,total_ffs,alm_estimate,notes
+2026-02-28,373542,79750,74709,yosys per-module sum
+2026-02-28,376863,79884,75373,yosys per-module sum
+2026-02-28,384788,81373,76958,yosys per-module sum

@@ -153,7 +153,13 @@ module f386_microcode_sequencer (
     // Sequencer FSM
     // =========================================================
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            state      <= SEQ_IDLE;
+            r_step     <= 6'd0;
+            uop_valid  <= 1'b0;
+            r_is_rep   <= 1'b0;
+            r_is_repne <= 1'b0;
+        end else if (flush) begin
             state      <= SEQ_IDLE;
             r_step     <= 6'd0;
             uop_valid  <= 1'b0;

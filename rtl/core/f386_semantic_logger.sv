@@ -174,7 +174,10 @@ module f386_semantic_logger (
     assign log_count = wr_ptr - rd_ptr;
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            wr_ptr <= '0;
+            rd_ptr <= '0;
+        end else if (flush) begin
             wr_ptr <= '0;
             rd_ptr <= '0;
         end else begin

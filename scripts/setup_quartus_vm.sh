@@ -3,12 +3,21 @@
 # fabi386: Quartus VM Setup — UTM + Ubuntu ARM64 + Rosetta + Quartus Lite
 # ============================================================================
 # Creates an Ubuntu ARM64 VM with Rosetta x86_64 translation for running
-# Intel Quartus Prime Lite (x86_64) natively on Apple Silicon.
+# Intel Quartus Prime Lite (x86_64) on Apple Silicon.
+#
+# NOTE: Quartus 25.1 crashes under Rosetta (uses AVX in SQLite).
+#       Use Quartus 21.1 which works correctly.
+#
+# NOTE: Must use --parallel=1 when running quartus_map under Rosetta.
+#       Multi-process IPC (named pipes) deadlocks under Rosetta translation.
+#
+# NOTE: Run synthesis from tmpfs (/tmp/ramdisk), not VirtIO shared mount.
+#       The shared filesystem is too slow for Quartus's random I/O patterns.
 #
 # Usage:
-#   ./scripts/setup_quartus_vm.sh download   # Download Ubuntu ISO + Quartus
-#   ./scripts/setup_quartus_vm.sh create-vm  # Create UTM VM (after downloads)
-#   ./scripts/setup_quartus_vm.sh post-install # Run inside VM after Ubuntu install
+#   ./scripts/setup_quartus_vm.sh download     # Download Ubuntu ISO + Quartus
+#   ./scripts/setup_quartus_vm.sh create-vm    # Create UTM VM (after downloads)
+#   ./scripts/setup_quartus_vm.sh post-install # Print commands for inside VM
 # ============================================================================
 
 set -euo pipefail
@@ -25,16 +34,16 @@ DOWNLOAD_DIR="$HOME/Downloads/quartus_vm"
 UBUNTU_ISO="ubuntu-24.04.4-live-server-arm64.iso"
 UBUNTU_URL="https://cdimage.ubuntu.com/releases/24.04/release/$UBUNTU_ISO"
 
-# Quartus Prime Lite 25.1 — individual files (x86_64 Linux)
-QUARTUS_INSTALLER="QuartusLiteSetup-25.1std.0.1129-linux.run"
-QUARTUS_URL="https://downloads.intel.com/akdlm/software/acdsinst/25.1std/1129/ib_installers/$QUARTUS_INSTALLER"
+# Quartus Prime Lite 21.1 — works under Rosetta (no AVX)
+QUARTUS_INSTALLER="QuartusLiteSetup-21.1.0.842-linux.run"
+QUARTUS_URL="https://downloads.intel.com/akdlm/software/acdsinst/21.1std/842/ib_installers/$QUARTUS_INSTALLER"
 
-CYCLONEV_PKG="cyclonev-25.1std.0.1129.qdz"
-CYCLONEV_URL="https://downloads.intel.com/akdlm/software/acdsinst/25.1std/1129/ib_installers/$CYCLONEV_PKG"
+CYCLONEV_PKG="cyclonev-21.1.0.842.qdz"
+CYCLONEV_URL="https://downloads.intel.com/akdlm/software/acdsinst/21.1std/842/ib_installers/$CYCLONEV_PKG"
 
 download_files() {
     echo -e "${BOLD}═══════════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}  Downloading Ubuntu ISO + Quartus Lite 25.1${NC}"
+    echo -e "${BOLD}  Downloading Ubuntu ISO + Quartus Lite 21.1${NC}"
     echo -e "${BOLD}═══════════════════════════════════════════════════${NC}"
     echo ""
 
@@ -55,7 +64,7 @@ download_files() {
     if [[ -f "$QUARTUS_INSTALLER" ]]; then
         echo -e "${GREEN}[OK]${NC} $QUARTUS_INSTALLER already exists"
     else
-        echo -e "${CYAN}[DL]${NC} Quartus Prime Lite 25.1 installer (~1.8 GB)..."
+        echo -e "${CYAN}[DL]${NC} Quartus Prime Lite 21.1 installer (~1.8 GB)..."
         curl -L -o "$QUARTUS_INSTALLER.part" "$QUARTUS_URL"
         mv "$QUARTUS_INSTALLER.part" "$QUARTUS_INSTALLER"
         echo -e "${GREEN}[OK]${NC} $QUARTUS_INSTALLER"
@@ -119,7 +128,7 @@ create_vm() {
 
 post_install() {
     echo -e "${BOLD}═══════════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}  Post-Install: Rosetta + Quartus Setup${NC}"
+    echo -e "${BOLD}  Post-Install: Rosetta + Quartus 21.1 Setup${NC}"
     echo -e "${BOLD}  (Run this INSIDE the Ubuntu VM)${NC}"
     echo -e "${BOLD}═══════════════════════════════════════════════════${NC}"
     echo ""
@@ -167,38 +176,40 @@ sudo mkdir -p /mnt/fabi386
 sudo mount -t virtiofs share /mnt/fabi386
 echo 'share	/mnt/fabi386	virtiofs	rw,nofail	0	0' | sudo tee -a /etc/fstab
 
-# 6. Copy Quartus files from shared dir or download dir
-# If files are in /mnt/fabi386 or a shared location:
+# 6. Copy Quartus files from shared dir and install
 cd /tmp
-# Copy the installer and device package to /tmp
-# cp /mnt/downloads/QuartusLiteSetup-25.1std.0.1129-linux.run .
-# cp /mnt/downloads/cyclonev-25.1std.0.1129.qdz .
+# SCP from host: scp QuartusLiteSetup-21.1.0.842-linux.run cyclonev-21.1.0.842.qdz quartus@<vm-ip>:/tmp/
 
-# 7. Install Quartus (CLI mode, no GUI needed)
-chmod +x QuartusLiteSetup-25.1std.0.1129-linux.run
-./QuartusLiteSetup-25.1std.0.1129-linux.run \
+chmod +x QuartusLiteSetup-21.1.0.842-linux.run
+./QuartusLiteSetup-21.1.0.842-linux.run \
     --mode unattended \
-    --installdir $HOME/intelFPGA_lite/25.1std \
+    --installdir $HOME/intelFPGA_lite/21.1 \
     --accept_eula 1
 
+# 7. Patch qenv.sh for Rosetta (uname -m returns aarch64, not x86_64)
+QENV="$HOME/intelFPGA_lite/21.1/quartus/adm/qenv.sh"
+sed -i 's/QUARTUS_MAINDIR=.*/QUARTUS_MAINDIR="$HOME\/intelFPGA_lite\/21.1\/quartus"/' "$QENV"
+# Comment out the uname -m check that rejects non-x86_64
+sed -i '/uname -m/s/^/#/' "$QENV"
+# Comment out the SSE check
+sed -i '/sse/s/^/#/' "$QENV"
+
 # 8. Add to PATH
-echo 'export PATH="$HOME/intelFPGA_lite/25.1std/quartus/bin:$PATH"' >> ~/.bashrc
+echo 'export PATH="$HOME/intelFPGA_lite/21.1/quartus/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 
 # 9. Verify installation
 quartus_map --version
 
-# 10. Run synthesis on your project
-cd /mnt/fabi386
-quartus_map --read_settings_files=on --write_settings_files=off f386 -c f386
-
 SCRIPT
     echo ""
     echo -e "${CYAN}[INFO]${NC} Copy-paste the commands above into your VM terminal."
-    echo -e "${CYAN}[INFO]${NC} To get Quartus files into the VM, either:"
-    echo "  a) Use the shared directory (step 5)"
-    echo "  b) SCP from host: scp -P 22 ~/Downloads/quartus_vm/*.run quartus@<vm-ip>:/tmp/"
-    echo "  c) Download directly inside the VM with curl"
+    echo ""
+    echo -e "${YELLOW}IMPORTANT — Rosetta synthesis caveats:${NC}"
+    echo "  1. Must use --parallel=1  (Rosetta deadlocks on Quartus IPC pipes)"
+    echo "  2. Run from tmpfs, not VirtIO shared mount (too slow for random I/O)"
+    echo "  3. Use scripts/quartus_synth_check.sh to run synthesis correctly"
+    echo ""
 }
 
 # --- Main ---
@@ -209,7 +220,7 @@ case "${1:-}" in
     *)
         echo "Usage: $0 {download|create-vm|post-install}"
         echo ""
-        echo "  download      Download Ubuntu ISO + Quartus (~5.9 GB)"
+        echo "  download      Download Ubuntu ISO + Quartus 21.1 (~5.9 GB)"
         echo "  create-vm     Open UTM with VM creation instructions"
         echo "  post-install  Print commands to run inside the VM"
         exit 1

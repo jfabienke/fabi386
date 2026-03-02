@@ -161,6 +161,8 @@ package f386_pkg;
         logic [2:0]     reg_src_a;
         logic [2:0]     reg_src_b;
         rob_id_t        rob_tag;      // ROB slot assigned at dispatch
+        br_tag_t        br_tag;       // Branch speculation tag
+        logic           dest_valid;   // Instruction writes phys_dest
         phys_reg_t      phys_dest;    // Physical destination for CDB writeback
         logic [31:0]    imm_value;    // Immediate / branch displacement
         logic [5:0]     flags_in;     // Incoming EFLAGS {OF,SF,ZF,AF,PF,CF}
@@ -180,6 +182,7 @@ package f386_pkg;
 
         // Physical Register Mapping
         phys_reg_t      p_dest;
+        logic           dest_valid;    // Instruction writes p_dest
         phys_reg_t      p_src_a;
         phys_reg_t      p_src_b;
 
@@ -190,6 +193,7 @@ package f386_pkg;
         logic [31:0]    val_b;
 
         rob_id_t        rob_tag;
+        br_tag_t        br_tag;        // Branch speculation tag assigned at dispatch
         logic [31:0]    imm_value;
     } ooo_instr_t;
 

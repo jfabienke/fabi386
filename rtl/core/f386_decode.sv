@@ -2329,6 +2329,7 @@ module f386_decode (
             instr_u.opcode      <= u_encoded_opcode;
             instr_u.op_cat      <= classify_op(pd_u);
             instr_u.p_dest      <= {2'b0, ru_u.dest};
+            instr_u.dest_valid  <= ru_u.dest_valid;
             instr_u.p_src_a     <= {2'b0, ru_u.src_a};
             instr_u.p_src_b     <= {2'b0, ru_u.src_b};
             instr_u.src_a_ready <= !ru_u.src_a_valid; // Ready if not needed
@@ -2336,6 +2337,7 @@ module f386_decode (
             instr_u.val_a       <= 32'h0;
             instr_u.val_b       <= 32'h0;
             instr_u.rob_tag     <= 4'h0; // Assigned by ROB allocator
+            instr_u.br_tag      <= '0;  // Assigned at dispatch in ooo_core_top
             instr_u.imm_value   <= pd_u.imm_value;
             instr_u_valid       <= !pd_u.is_prefix && !pd_u.invalid;
 
@@ -2362,6 +2364,7 @@ module f386_decode (
             instr_v.opcode      <= pd_v.opcode;
             instr_v.op_cat      <= classify_op(pd_v);
             instr_v.p_dest      <= {2'b0, ru_v.dest};
+            instr_v.dest_valid  <= ru_v.dest_valid;
             instr_v.p_src_a     <= {2'b0, ru_v.src_a};
             instr_v.p_src_b     <= {2'b0, ru_v.src_b};
             instr_v.src_a_ready <= !ru_v.src_a_valid;
@@ -2369,6 +2372,7 @@ module f386_decode (
             instr_v.val_a       <= 32'h0;
             instr_v.val_b       <= 32'h0;
             instr_v.rob_tag     <= 4'h0;
+            instr_v.br_tag      <= '0;
             instr_v.imm_value   <= pd_v.imm_value;
             instr_v_valid       <= v_eligible;
 

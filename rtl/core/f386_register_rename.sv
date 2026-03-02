@@ -26,6 +26,10 @@ module f386_register_rename (
     output phys_reg_t   phys_dest_u,
     output logic        can_rename,
 
+    // --- Destination valid (gate freelist alloc) ---
+    input  logic        dest_valid_u,
+    input  logic        dest_valid_v,
+
     // --- Rename request (V-pipe) ---
     input  logic [2:0]  arch_dest_v,
     output phys_reg_t   phys_dest_v,
@@ -206,10 +210,10 @@ module f386_register_rename (
         .flush            (flush_int),
 
         // Allocate (dispatch)
-        .alloc_req_u      (1'b1),           // Always request; alloc_valid gates actual use
+        .alloc_req_u      (dest_valid_u),    // Only alloc when instruction writes dest
         .alloc_phys_u     (alloc_phys_u),
         .alloc_valid_u    (alloc_valid_u),
-        .alloc_req_v      (rename_v_valid),
+        .alloc_req_v      (rename_v_valid && dest_valid_v),
         .alloc_phys_v     (alloc_phys_v),
         .alloc_valid_v    (alloc_valid_v),
 

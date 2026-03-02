@@ -126,6 +126,7 @@ module f386_ooo_core_top (
     logic [31:0] branch_target;
     logic        branch_mispredict;
     rob_id_t     branch_rob_tag;
+    br_tag_t     branch_br_tag;
 
     // --- Execute Stage → Microcode ---
     logic        microcode_req;
@@ -298,6 +299,9 @@ module f386_ooo_core_top (
         .phys_dest_u   (rename_phys_u),
         .can_rename    (rename_ready),
 
+        .dest_valid_u  (dec_instr_u.dest_valid),
+        .dest_valid_v  (dec_instr_v.dest_valid),
+
         .arch_dest_v   (dec_instr_v.p_dest[2:0]),
         .phys_dest_v   (rename_phys_v),
         .v_alloc_valid (rename_v_alloc_valid),
@@ -323,12 +327,12 @@ module f386_ooo_core_top (
         .old_phys_u    (rename_old_phys_u),
         .old_phys_v    (rename_old_phys_v),
 
-        .retire_valid  (rob_retire_u_valid),
+        .retire_valid  (rob_retire_u_valid && rob_retire_u.instr.dest_valid),
         .retire_phys   (rob_retire_u.instr.p_dest),
         .retire_arch   (rob_retire_u.instr.p_dest[2:0]),
         .retire_old_phys(rob_retire_u_old_phys),
 
-        .retire_v_valid  (rob_retire_v_valid),
+        .retire_v_valid  (rob_retire_v_valid && rob_retire_v.instr.dest_valid),
         .retire_v_arch   (rob_retire_v.instr.p_dest[2:0]),
         .retire_v_phys   (rob_retire_v.instr.p_dest),
         .retire_v_old_phys(rob_retire_v_old_phys),
@@ -337,11 +341,11 @@ module f386_ooo_core_top (
                            rename_ready && !rob_full),
         .branch_id       (specbits_alloc_tag),
         .branch_mispredict(branch_mispredict),
-        .branch_restore_id(specbits_alloc_tag),
+        .branch_restore_id(branch_br_tag),
 
-        .cdb0_valid    (cdb0_valid),
+        .cdb0_valid    (cdb0_wr_valid),    // Gate busy clear by dest_valid
         .cdb0_dest     (cdb0_phys_dest),
-        .cdb1_valid    (cdb1_valid),
+        .cdb1_valid    (cdb1_wr_valid),    // Gate busy clear by dest_valid
         .cdb1_dest     (cdb1_phys_dest),
 
         .flush         (flush),
@@ -363,7 +367,9 @@ module f386_ooo_core_top (
     always_comb begin
         patched_u             = dec_instr_u;
         patched_u.rob_tag     = rob_tag_u;
-        patched_u.p_dest      = rename_phys_u;
+        patched_u.p_dest      = dec_instr_u.dest_valid ? rename_phys_u : '0;
+        patched_u.dest_valid  = dec_instr_u.dest_valid;
+        patched_u.br_tag      = (dec_instr_u.op_cat == OP_BRANCH) ? specbits_alloc_tag : '0;
         patched_u.p_src_a     = src_phys_a;
         patched_u.p_src_b     = src_phys_b;
         patched_u.src_a_ready = !src_busy_a;
@@ -373,7 +379,9 @@ module f386_ooo_core_top (
 
         patched_v             = dec_instr_v;
         patched_v.rob_tag     = rob_tag_v;
-        patched_v.p_dest      = rename_phys_v;
+        patched_v.p_dest      = dec_instr_v.dest_valid ? rename_phys_v : '0;
+        patched_v.dest_valid  = dec_instr_v.dest_valid;
+        patched_v.br_tag      = '0;  // V-pipe does not dispatch branches
         patched_v.p_src_a     = src_phys_c;
         patched_v.p_src_b     = src_phys_d;
         patched_v.src_a_ready = !src_busy_c;
@@ -387,6 +395,13 @@ module f386_ooo_core_top (
     // =================================================================
     // CDB phys_dest comes directly from execute stage (no longer cast from ROB tag)
     phys_reg_t cdb0_phys_dest, cdb1_phys_dest;
+    logic      cdb0_dest_valid, cdb1_dest_valid;
+
+    // Gated CDB valid: suppress all destination side effects for no-dest ops.
+    // ROB keeps raw cdb_valid (CMP/TEST/branches still need ROB completion).
+    logic      cdb0_wr_valid, cdb1_wr_valid;
+    assign cdb0_wr_valid = cdb0_valid && cdb0_dest_valid;
+    assign cdb1_wr_valid = cdb1_valid && cdb1_dest_valid;
 
     f386_phys_regfile prf (
         .clk       (clk),
@@ -399,10 +414,10 @@ module f386_ooo_core_top (
         .rd_data_b (prf_data_b),
         .rd_data_c (prf_data_c),
         .rd_data_d (prf_data_d),
-        .wr_en_0   (cdb0_valid),
+        .wr_en_0   (cdb0_wr_valid),
         .wr_addr_0 (cdb0_phys_dest),
         .wr_data_0 (cdb0_data),
-        .wr_en_1   (cdb1_valid),
+        .wr_en_1   (cdb1_wr_valid),
         .wr_addr_1 (cdb1_phys_dest),
         .wr_data_1 (cdb1_data)
     );
@@ -422,11 +437,11 @@ module f386_ooo_core_top (
         .exec_ready      (exec_u_ready),
 
         // CDB (for wakeup and operand capture)
-        .cdb0_valid      (cdb0_valid),
+        .cdb0_valid      (cdb0_wr_valid),    // Gate wakeup by dest_valid
         .cdb0_tag        (cdb0_tag),
         .cdb0_data       (cdb0_data),
         .cdb0_dest       (cdb0_phys_dest),
-        .cdb1_valid      (cdb1_valid),
+        .cdb1_valid      (cdb1_wr_valid),    // Gate wakeup by dest_valid
         .cdb1_tag        (cdb1_tag),
         .cdb1_data       (cdb1_data),
         .cdb1_dest       (cdb1_phys_dest),
@@ -497,7 +512,7 @@ module f386_ooo_core_top (
         .dispatch_u_ftq_idx      (ftq_deq_idx),
         .dispatch_v_ftq_idx      (ftq_deq_idx),
         .specbits_resolve_valid  (branch_resolved && !branch_mispredict),
-        .specbits_resolve_tag    (specbits_alloc_tag),
+        .specbits_resolve_tag    (branch_br_tag),
         .specbits_squash_valid   (branch_mispredict),
         .specbits_squash_mask    (specbits_squash_mask),
 
@@ -524,11 +539,11 @@ module f386_ooo_core_top (
 
         // Resolution (correct prediction → clear bit)
         .resolve_valid    (branch_resolved && !branch_mispredict),
-        .resolve_tag      (specbits_alloc_tag),  // TODO: carry br_tag through execute
+        .resolve_tag      (branch_br_tag),
 
         // Squash (misprediction → kill tagged instructions)
         .squash_valid     (branch_mispredict),
-        .squash_tag       (specbits_alloc_tag),  // TODO: carry br_tag through execute
+        .squash_tag       (branch_br_tag),
         .squash_mask      (specbits_squash_mask),
 
         .tags_available   (specbits_tags_available)
@@ -592,6 +607,8 @@ module f386_ooo_core_top (
         exec_u_instr.reg_src_a   = iq_issue_instr.p_src_a[2:0];
         exec_u_instr.reg_src_b   = iq_issue_instr.p_src_b[2:0];
         exec_u_instr.rob_tag     = iq_issue_instr.rob_tag;
+        exec_u_instr.br_tag      = iq_issue_instr.br_tag;
+        exec_u_instr.dest_valid  = iq_issue_instr.dest_valid;
         exec_u_instr.phys_dest   = iq_issue_instr.p_dest;
         exec_u_instr.imm_value   = iq_issue_instr.imm_value;
         exec_u_instr.flags_in    = alu_flags_current;
@@ -612,6 +629,8 @@ module f386_ooo_core_top (
         exec_v_instr.reg_src_a   = patched_v.p_src_a[2:0];
         exec_v_instr.reg_src_b   = patched_v.p_src_b[2:0];
         exec_v_instr.rob_tag     = rob_tag_v;
+        exec_v_instr.br_tag      = '0;
+        exec_v_instr.dest_valid  = patched_v.dest_valid;
         exec_v_instr.phys_dest   = patched_v.p_dest;
         exec_v_instr.imm_value   = patched_v.imm_value;
         exec_v_instr.flags_in    = alu_flags_current;
@@ -648,6 +667,7 @@ module f386_ooo_core_top (
         .cdb0_flags_mask (cdb0_flags_mask),
         .cdb0_exception  (cdb0_exception),
         .cdb0_phys_dest  (cdb0_phys_dest),
+        .cdb0_dest_valid (cdb0_dest_valid),
         .cdb1_valid      (cdb1_valid),
         .cdb1_tag        (cdb1_tag),
         .cdb1_data       (cdb1_data),
@@ -655,6 +675,7 @@ module f386_ooo_core_top (
         .cdb1_flags_mask (cdb1_flags_mask),
         .cdb1_exception  (cdb1_exception),
         .cdb1_phys_dest  (cdb1_phys_dest),
+        .cdb1_dest_valid (cdb1_dest_valid),
 
         // Writeback
         .wb_data_u       (wb_data_u),
@@ -671,6 +692,7 @@ module f386_ooo_core_top (
         .branch_target   (branch_target),
         .branch_mispredict(branch_mispredict),
         .branch_rob_tag  (branch_rob_tag),
+        .branch_br_tag   (branch_br_tag),
 
         // Microcode
         .microcode_req   (microcode_req),

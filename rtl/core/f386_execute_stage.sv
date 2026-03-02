@@ -50,6 +50,8 @@ module f386_execute_stage (
     output logic [5:0]   cdb1_flags_mask,
     output logic         cdb1_exception,
     output phys_reg_t    cdb1_phys_dest,   // Physical dest for PRF writeback
+    output logic         cdb0_dest_valid,  // CDB0 result has a destination
+    output logic         cdb1_dest_valid,  // CDB1 result has a destination
 
     // --- Writeback to Architectural State ---
     output logic [31:0]  wb_data_u,
@@ -66,6 +68,7 @@ module f386_execute_stage (
     output logic [31:0]  branch_target,
     output logic         branch_mispredict,
     output rob_id_t      branch_rob_tag,
+    output br_tag_t      branch_br_tag,
 
     // --- Microcode Request (to Microcode Sequencer) ---
     output logic         microcode_req,
@@ -284,6 +287,7 @@ module f386_execute_stage (
         cdb0_flags_mask = 6'd0;
         cdb0_exception  = 1'b0;
         cdb0_phys_dest  = u_instr.phys_dest;
+        cdb0_dest_valid = u_instr.dest_valid;
 
         cdb1_valid      = 1'b0;
         cdb1_tag        = 4'd0;
@@ -292,12 +296,14 @@ module f386_execute_stage (
         cdb1_flags_mask = 6'd0;
         cdb1_exception  = 1'b0;
         cdb1_phys_dest  = v_instr.phys_dest;
+        cdb1_dest_valid = v_instr.dest_valid;
 
         branch_resolved  = 1'b0;
         branch_taken     = 1'b0;
         branch_target    = 32'd0;
         branch_mispredict = 1'b0;
         branch_rob_tag   = 4'd0;
+        branch_br_tag    = '0;
 
         microcode_req    = 1'b0;
         microcode_opcode = 8'd0;
@@ -343,6 +349,7 @@ module f386_execute_stage (
                     branch_taken     = br_actual_taken;
                     branch_target    = br_actual_taken ? br_actual_target : br_next_pc;
                     branch_rob_tag   = u_instr.rob_tag;
+                    branch_br_tag    = u_instr.br_tag;
                     branch_mispredict = (br_actual_taken != u_instr.pred_taken) ||
                                         (br_actual_taken && (br_actual_target != u_instr.pred_target));
                     // CDB: branch doesn't produce a register result

@@ -27,33 +27,35 @@ module f386_lsq_props (
     input  lq_idx_t      agu_ld_idx,
     input  logic [31:0]  agu_ld_addr,
     input  logic [1:0]   agu_ld_size,
+    input  logic [3:0]   agu_ld_byte_en,
+    input  logic         agu_ld_signed,
     input  logic         agu_st_valid,
     input  sq_idx_t      agu_st_idx,
     input  logic [31:0]  agu_st_addr,
     input  logic [31:0]  agu_st_data,
     input  logic [1:0]   agu_st_size,
+    input  logic [3:0]   agu_st_byte_en,
 
     // Retire
     input  logic         retire_st_valid,
     input  sq_idx_t      retire_st_idx,
 
-    // Memory
-    input  logic [31:0]  mem_rdata,
-    input  logic         mem_ack
+    // Split-phase memory interface
+    input  logic         mem_req_ready,
+    input  logic         mem_rsp_valid,
+    input  mem_rsp_t     mem_rsp_in
 );
 
-    // ---- DUT ----
+    // ---- DUT outputs ----
     lq_idx_t     ld_dispatch_idx;
     sq_idx_t     st_dispatch_idx;
     logic        lq_full, sq_full;
     logic        ld_cdb_valid;
     rob_id_t     ld_cdb_tag;
     logic [31:0] ld_cdb_data;
-    logic        mem_req;
-    logic [31:0] mem_addr_o;
-    logic [31:0] mem_wdata_o;
-    logic        mem_wr;
-    logic [1:0]  mem_size_o;
+    logic        mem_req_valid;
+    mem_req_t    mem_req_out;
+    logic        mem_rsp_ready_o;
 
     f386_lsq dut (
         .clk               (clk),
@@ -71,23 +73,25 @@ module f386_lsq_props (
         .agu_ld_idx        (agu_ld_idx),
         .agu_ld_addr       (agu_ld_addr),
         .agu_ld_size       (agu_ld_size),
+        .agu_ld_byte_en    (agu_ld_byte_en),
+        .agu_ld_signed     (agu_ld_signed),
         .agu_st_valid      (agu_st_valid),
         .agu_st_idx        (agu_st_idx),
         .agu_st_addr       (agu_st_addr),
         .agu_st_data       (agu_st_data),
         .agu_st_size       (agu_st_size),
+        .agu_st_byte_en    (agu_st_byte_en),
         .ld_cdb_valid      (ld_cdb_valid),
         .ld_cdb_tag        (ld_cdb_tag),
         .ld_cdb_data       (ld_cdb_data),
         .retire_st_valid   (retire_st_valid),
         .retire_st_idx     (retire_st_idx),
-        .mem_req           (mem_req),
-        .mem_addr          (mem_addr_o),
-        .mem_wdata         (mem_wdata_o),
-        .mem_wr            (mem_wr),
-        .mem_size          (mem_size_o),
-        .mem_rdata         (mem_rdata),
-        .mem_ack           (mem_ack)
+        .mem_req_valid     (mem_req_valid),
+        .mem_req_ready     (mem_req_ready),
+        .mem_req_out       (mem_req_out),
+        .mem_rsp_valid     (mem_rsp_valid),
+        .mem_rsp_ready     (mem_rsp_ready_o),
+        .mem_rsp_in        (mem_rsp_in)
     );
 
     reg past_valid;
@@ -129,10 +133,10 @@ module f386_lsq_props (
     end
 
     // ================================================================
-    // Property 5: Memory write only for committed stores
+    // Property 5: Memory store request only for committed stores
     // ================================================================
     always @(*) begin
-        if (mem_req && mem_wr) begin
+        if (mem_req_valid && mem_req_out.op == MEM_OP_ST) begin
             assert (dut.sq_committed[dut.sq_head]);
         end
     end

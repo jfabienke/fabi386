@@ -53,6 +53,15 @@ package f386_pkg;
     localparam bit CONF_ENABLE_PENTIUM_EXT  = 1'b0;  // P5/P6: CMOVcc, basic MMX, RDPMC
     localparam bit CONF_ENABLE_P3_EXT       = 1'b0;  // PIII/P4: PREFETCH, CLFLUSH, fences
     localparam bit CONF_ENABLE_NEHALEM_EXT  = 1'b0;  // Nehalem+: POPCNT, LZCNT, TZCNT
+    localparam bit CONF_ENABLE_DECODE_CACHE = 1'b0;  // Phase 1: decode output cache
+    localparam int CONF_DEC_CACHE_ENTRIES   = 256;
+    localparam int CONF_DEC_CACHE_IDX_W     = $clog2(CONF_DEC_CACHE_ENTRIES); // 8
+
+    // --- P2: Memory Integration Gates ---
+    localparam bit CONF_ENABLE_LSQ_MEMIF   = 1'b0;  // P2: LSQ split-phase wiring into core_top
+    localparam bit CONF_ENABLE_MEM_FABRIC  = 1'b0;  // P2: unified memory fabric (replaces mem_ctrl)
+
+    localparam int CONF_MEM_REQ_ID_W        = 6;     // Memory transaction ID width
 
     // --- Derived Type Widths ---
     localparam int PHYS_REG_WIDTH = $clog2(CONF_PHYS_REG_NUM);  // 5 for 32
@@ -149,6 +158,48 @@ package f386_pkg;
         CLASS_HOLE     = 3'd4  // Unmapped/Empty
     } mem_class_t;
 
+    // --- Unified Memory-System Request/Response (split-phase, tagged) ---
+    typedef enum logic [2:0] {
+        MEM_OP_LD         = 3'd0, // Scalar load (1/2/4/8B)
+        MEM_OP_ST         = 3'd1, // Scalar store (1/2/4/8B)
+        MEM_OP_IFETCH_FILL= 3'd2, // Instruction line fill
+        MEM_OP_DFETCH_FILL= 3'd3, // Data line fill
+        MEM_OP_WB         = 3'd4, // Cache line writeback
+        MEM_OP_FENCE      = 3'd5  // Ordering barrier / drain point
+    } mem_op_t;
+
+    typedef enum logic [1:0] {
+        MEM_RESP_OK       = 2'd0,
+        MEM_RESP_RETRY    = 2'd1,
+        MEM_RESP_FAULT    = 2'd2,
+        MEM_RESP_MISALIGN = 2'd3
+    } mem_resp_t;
+
+    typedef struct packed {
+        logic [CONF_MEM_REQ_ID_W-1:0] id;      // Request/response match tag
+        mem_op_t       op;                      // Operation class
+        logic [31:0]   addr;                    // Byte address
+        logic [1:0]    size;                    // 0=1B, 1=2B, 2=4B, 3=8B
+        // Scalar store convention:
+        //   byte_en + wdata are aligned to addr[31:3] (64-bit word base).
+        //   The producer applies addr[2:0] lane placement before issuing req.
+        logic [7:0]    byte_en;                 // Byte lanes in a 64-bit beat
+        logic [63:0]   wdata;                   // Store/writeback payload beat
+        logic [2:0]    burst_len;               // beats-1 (0 = single beat)
+        logic          cacheable;               // 1=cacheable, 0=uncached
+        logic          strong_order;            // MMIO/fence-style ordering
+    } mem_req_t;
+
+    typedef struct packed {
+        logic [CONF_MEM_REQ_ID_W-1:0] id;      // Echoed request ID
+        // For scalar loads in bring-up adapter, rdata[63:0] is the raw DDR beat.
+        // The consumer performs byte/word/dword extraction using addr[2:0].
+        logic [127:0]  rdata;                  // Data beat payload (low 64b used now)
+        logic [2:0]    beat_idx;               // Beat number within burst
+        logic          last;                   // Last beat of this response
+        mem_resp_t     resp;                   // Completion status
+    } mem_rsp_t;
+
     // --- Dispatch/Execute Instruction Packet ---
     // Used by f386_dispatch and f386_execute_stage for decoded instructions
     // flowing from decode → dispatch → execute.
@@ -196,6 +247,32 @@ package f386_pkg;
         br_tag_t        br_tag;        // Branch speculation tag assigned at dispatch
         logic [31:0]    imm_value;
     } ooo_instr_t;
+
+    // Per-pipe decoded output (trimmed for cache storage)
+    typedef struct packed {
+        logic           valid;
+        logic [31:0]    pc;
+        logic [31:0]    raw_instr;
+        logic [7:0]     opcode;
+        op_type_t       op_cat;
+        logic [2:0]     arch_dest;
+        logic           dest_valid;
+        logic [2:0]     arch_src_a;
+        logic [2:0]     arch_src_b;
+        logic           src_a_not_needed;
+        logic           src_b_not_needed;
+        logic [31:0]    imm_value;
+        logic [31:0]    branch_target;
+        logic           branch_target_valid;
+        logic           branch_indirect;
+        logic           reads_flags;
+        logic           writes_flags;
+        logic [2:0]     addr_base;
+        logic           addr_base_valid;
+        logic [2:0]     addr_index;
+        logic           addr_index_valid;
+        logic [1:0]     addr_scale;
+    } dc_pipe_entry_t;  // 167 bits
 
     typedef struct packed {
         ooo_instr_t     instr;

@@ -31,13 +31,25 @@ module f386_register_rename (
     output phys_reg_t   phys_dest_v,
     input  logic        rename_v_valid,
 
-    // --- Source operand lookup ---
+    // --- Source operand lookup (U-pipe) ---
     input  logic [2:0]  src_arch_a,
     input  logic [2:0]  src_arch_b,
     output phys_reg_t   src_phys_a,
     output phys_reg_t   src_phys_b,
     output logic        src_busy_a,
     output logic        src_busy_b,
+
+    // --- Source operand lookup (V-pipe) ---
+    input  logic [2:0]  src_arch_c,
+    input  logic [2:0]  src_arch_d,
+    output phys_reg_t   src_phys_c,
+    output phys_reg_t   src_phys_d,
+    output logic        src_busy_c,
+    output logic        src_busy_d,
+
+    // --- Old physical mapping (for freelist reclaim at retirement) ---
+    output phys_reg_t   old_phys_u,
+    output phys_reg_t   old_phys_v,
 
     // --- Retirement (U-pipe — free old mapping) ---
     input  logic        retire_valid,
@@ -150,11 +162,21 @@ module f386_register_rename (
         .rename_phys_v    (alloc_phys_v),
         .rename_valid_v   (alloc_valid_v),
 
-        // Source operand lookup
+        // Source operand lookup (U-pipe)
         .read_arch_a      (src_arch_a),
         .read_arch_b      (src_arch_b),
         .read_phys_a      (src_phys_a),
         .read_phys_b      (src_phys_b),
+
+        // Source operand lookup (V-pipe)
+        .read_arch_c      (src_arch_c),
+        .read_arch_d      (src_arch_d),
+        .read_phys_c      (src_phys_c),
+        .read_phys_d      (src_phys_d),
+
+        // Old physical mapping
+        .old_phys_u       (old_phys_u),
+        .old_phys_v       (old_phys_v),
 
         // Snapshots
         .snap_take        (snap_take_int),
@@ -229,11 +251,17 @@ module f386_register_rename (
         .clr_valid_1      (cdb1_valid),
         .clr_phys_1       (cdb1_dest),
 
-        // Query (source operand readiness)
+        // Query (source operand readiness — U-pipe)
         .query_a          (src_phys_a),
         .query_b          (src_phys_b),
         .busy_a           (src_busy_a),
-        .busy_b           (src_busy_b)
+        .busy_b           (src_busy_b),
+
+        // Query (source operand readiness — V-pipe)
+        .query_c          (src_phys_c),
+        .query_d          (src_phys_d),
+        .busy_c           (src_busy_c),
+        .busy_d           (src_busy_d)
     );
 
     // =========================================================

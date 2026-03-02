@@ -41,12 +41,15 @@ module f386_execute_stage (
     output logic [5:0]   cdb0_flags_mask,  // Which flags this instruction writes
     output logic         cdb0_exception,
 
+    output phys_reg_t    cdb0_phys_dest,   // Physical dest for PRF writeback
+
     output logic         cdb1_valid,
     output rob_id_t      cdb1_tag,
     output logic [31:0]  cdb1_data,
     output logic [5:0]   cdb1_flags,
     output logic [5:0]   cdb1_flags_mask,
     output logic         cdb1_exception,
+    output phys_reg_t    cdb1_phys_dest,   // Physical dest for PRF writeback
 
     // --- Writeback to Architectural State ---
     output logic [31:0]  wb_data_u,
@@ -280,6 +283,7 @@ module f386_execute_stage (
         cdb0_flags      = 6'd0;
         cdb0_flags_mask = 6'd0;
         cdb0_exception  = 1'b0;
+        cdb0_phys_dest  = u_instr.phys_dest;
 
         cdb1_valid      = 1'b0;
         cdb1_tag        = 4'd0;
@@ -287,6 +291,7 @@ module f386_execute_stage (
         cdb1_flags      = 6'd0;
         cdb1_flags_mask = 6'd0;
         cdb1_exception  = 1'b0;
+        cdb1_phys_dest  = v_instr.phys_dest;
 
         branch_resolved  = 1'b0;
         branch_taken     = 1'b0;

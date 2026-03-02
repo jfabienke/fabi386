@@ -30,10 +30,18 @@ module f386_rename_maptable (
     input  logic        rename_valid_v,
 
     // --- Read ports (source operand lookup at dispatch) ---
-    input  logic [2:0]  read_arch_a,        // Source A arch reg
-    input  logic [2:0]  read_arch_b,        // Source B arch reg
+    input  logic [2:0]  read_arch_a,        // U-pipe source A arch reg
+    input  logic [2:0]  read_arch_b,        // U-pipe source B arch reg
     output phys_reg_t   read_phys_a,        // Current phys mapping for A
     output phys_reg_t   read_phys_b,        // Current phys mapping for B
+    input  logic [2:0]  read_arch_c,        // V-pipe source A arch reg
+    input  logic [2:0]  read_arch_d,        // V-pipe source B arch reg
+    output phys_reg_t   read_phys_c,
+    output phys_reg_t   read_phys_d,
+
+    // --- Old physical mapping (pre-rename, for freelist reclaim) ---
+    output phys_reg_t   old_phys_u,
+    output phys_reg_t   old_phys_v,
 
     // --- Snapshot control ---
     input  logic        snap_take,          // Take snapshot (branch dispatch)
@@ -69,19 +77,34 @@ module f386_rename_maptable (
     always_comb begin
         read_phys_a = spec_map[read_arch_a];
         read_phys_b = spec_map[read_arch_b];
+        read_phys_c = spec_map[read_arch_c];
+        read_phys_d = spec_map[read_arch_d];
 
         // Bypass: U rename
         if (rename_valid_u && rename_arch_u == read_arch_a)
             read_phys_a = rename_phys_u;
         if (rename_valid_u && rename_arch_u == read_arch_b)
             read_phys_b = rename_phys_u;
+        if (rename_valid_u && rename_arch_u == read_arch_c)
+            read_phys_c = rename_phys_u;
+        if (rename_valid_u && rename_arch_u == read_arch_d)
+            read_phys_d = rename_phys_u;
 
         // Bypass: V rename (V is younger, overrides U)
         if (rename_valid_v && rename_arch_v == read_arch_a)
             read_phys_a = rename_phys_v;
         if (rename_valid_v && rename_arch_v == read_arch_b)
             read_phys_b = rename_phys_v;
+        if (rename_valid_v && rename_arch_v == read_arch_c)
+            read_phys_c = rename_phys_v;
+        if (rename_valid_v && rename_arch_v == read_arch_d)
+            read_phys_d = rename_phys_v;
     end
+
+    // Old physical mapping: pre-rename value for freelist reclaim at retirement
+    assign old_phys_u = spec_map[rename_arch_u];
+    assign old_phys_v = (rename_valid_u && rename_arch_u == rename_arch_v)
+                        ? rename_phys_u : spec_map[rename_arch_v];
 
     // =========================================================
     // Committed map output (for external full-flush rebuild)

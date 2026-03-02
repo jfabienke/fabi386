@@ -161,6 +161,7 @@ package f386_pkg;
         logic [2:0]     reg_src_a;
         logic [2:0]     reg_src_b;
         rob_id_t        rob_tag;      // ROB slot assigned at dispatch
+        phys_reg_t      phys_dest;    // Physical destination for CDB writeback
         logic [31:0]    imm_value;    // Immediate / branch displacement
         logic [5:0]     flags_in;     // Incoming EFLAGS {OF,SF,ZF,AF,PF,CF}
         logic [5:0]     flags_mask;   // Per-flag write mask (BOOM/80x86 pattern)

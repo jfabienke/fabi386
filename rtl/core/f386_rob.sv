@@ -77,6 +77,12 @@ module f386_rob (
     input  logic         specbits_squash_valid,  // Branch mispredicted
     input  specbits_t    specbits_squash_mask,
 
+    // --- Old physical register (for freelist reclaim at retirement) ---
+    input  phys_reg_t    dispatch_u_old_phys,
+    input  phys_reg_t    dispatch_v_old_phys,
+    output phys_reg_t    retire_u_old_phys,
+    output phys_reg_t    retire_v_old_phys,
+
     // --- Flush (from Branch Resolution) ---
     input  logic         flush
 );
@@ -95,6 +101,9 @@ module f386_rob (
     logic [N-1:0]  entry_exception;  // Execution raised an exception
     ooo_instr_t    entry_instr [N];
     logic [31:0]   entry_data  [N];
+
+    // Per-entry old physical register (for freelist reclaim at retirement)
+    phys_reg_t     entry_old_phys [N];
 
     // Per-entry flags (BOOM/RSD pattern: flags travel through ROB alongside data)
     logic [5:0]    entry_flags      [N];  // ALU flags result
@@ -170,6 +179,10 @@ module f386_rob (
         retire_v_sq_idx   = entry_sq_idx[head_plus1];
         retire_v_is_store = 1'b0;
 
+        // Old physical register for freelist reclaim
+        retire_u_old_phys = entry_old_phys[head];
+        retire_v_old_phys = entry_old_phys[head_plus1];
+
         if (can_retire_u) begin
             retire_u.instr      = entry_instr[head];
             retire_u.data       = entry_data[head];
@@ -229,6 +242,7 @@ module f386_rob (
                     entry_data[tail]       <= 32'd0;
                     entry_flags[tail]      <= 6'd0;
                     entry_flags_mask[tail] <= 6'd0;
+                    entry_old_phys[tail]   <= dispatch_u_old_phys;
                     entry_lq_idx[tail]     <= dispatch_u_lq_idx;
                     entry_sq_idx[tail]     <= dispatch_u_sq_idx;
                     entry_specbits[tail]   <= dispatch_u_specbits;
@@ -242,6 +256,7 @@ module f386_rob (
                     entry_data[v_slot]       <= 32'd0;
                     entry_flags[v_slot]      <= 6'd0;
                     entry_flags_mask[v_slot] <= 6'd0;
+                    entry_old_phys[v_slot]   <= dispatch_v_old_phys;
                     entry_lq_idx[v_slot]     <= dispatch_v_lq_idx;
                     entry_sq_idx[v_slot]     <= dispatch_v_sq_idx;
                     entry_specbits[v_slot]   <= dispatch_v_specbits;

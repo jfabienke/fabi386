@@ -80,7 +80,16 @@ module f386_ooo_core_top (
 
     // --- Rename ---
     logic        rename_ready;
-    phys_reg_t   rename_phys_u;
+    phys_reg_t   rename_phys_u, rename_phys_v;
+    phys_reg_t   src_phys_a, src_phys_b, src_phys_c, src_phys_d;
+    logic        src_busy_a, src_busy_b, src_busy_c, src_busy_d;
+    phys_reg_t   rename_old_phys_u, rename_old_phys_v;
+
+    // --- PRF read data ---
+    logic [31:0] prf_data_a, prf_data_b, prf_data_c, prf_data_d;
+
+    // --- ROB old_phys retirement ---
+    phys_reg_t   rob_retire_u_old_phys, rob_retire_v_old_phys;
 
     // --- Issue Queue ---
     ooo_instr_t  iq_issue_instr;
@@ -284,25 +293,38 @@ module f386_ooo_core_top (
         .can_rename    (rename_ready),
 
         .arch_dest_v   (dec_instr_v.p_dest[2:0]),
-        .phys_dest_v   (),
+        .phys_dest_v   (rename_phys_v),
         .rename_v_valid(dec_instr_v_valid && rename_ready && !rob_full),
 
+        // U-pipe source lookup
         .src_arch_a    (dec_instr_u.p_src_a[2:0]),
         .src_arch_b    (dec_instr_u.p_src_b[2:0]),
-        .src_phys_a    (),
-        .src_phys_b    (),
-        .src_busy_a    (),
-        .src_busy_b    (),
+        .src_phys_a    (src_phys_a),
+        .src_phys_b    (src_phys_b),
+        .src_busy_a    (src_busy_a),
+        .src_busy_b    (src_busy_b),
+
+        // V-pipe source lookup
+        .src_arch_c    (dec_instr_v.p_src_a[2:0]),
+        .src_arch_d    (dec_instr_v.p_src_b[2:0]),
+        .src_phys_c    (src_phys_c),
+        .src_phys_d    (src_phys_d),
+        .src_busy_c    (src_busy_c),
+        .src_busy_d    (src_busy_d),
+
+        // Old physical mapping (for freelist reclaim)
+        .old_phys_u    (rename_old_phys_u),
+        .old_phys_v    (rename_old_phys_v),
 
         .retire_valid  (rob_retire_u_valid),
         .retire_phys   (rob_retire_u.instr.p_dest),
         .retire_arch   (rob_retire_u.instr.p_dest[2:0]),
-        .retire_old_phys('0),  // TODO: carry old_phys through ROB
+        .retire_old_phys(rob_retire_u_old_phys),
 
         .retire_v_valid  (rob_retire_v_valid),
         .retire_v_arch   (rob_retire_v.instr.p_dest[2:0]),
         .retire_v_phys   (rob_retire_v.instr.p_dest),
-        .retire_v_old_phys('0),
+        .retire_v_old_phys(rob_retire_v_old_phys),
 
         .branch_dispatch (dec_instr_u_valid && dec_instr_u.op_cat == OP_BRANCH &&
                            rename_ready && !rob_full),
@@ -325,18 +347,67 @@ module f386_ooo_core_top (
     );
 
     // =================================================================
+    // 4b. Patched Dispatch Instructions
+    // =================================================================
+    // Build fully-patched ooo_instr_t with rob_tag, physical regs,
+    // source readiness, and PRF values before sending to IQ/ROB.
+    ooo_instr_t patched_u, patched_v;
+
+    always_comb begin
+        patched_u             = dec_instr_u;
+        patched_u.rob_tag     = rob_tag_u;
+        patched_u.p_dest      = rename_phys_u;
+        patched_u.p_src_a     = src_phys_a;
+        patched_u.p_src_b     = src_phys_b;
+        patched_u.src_a_ready = !src_busy_a;
+        patched_u.src_b_ready = !src_busy_b;
+        patched_u.val_a       = prf_data_a;
+        patched_u.val_b       = prf_data_b;
+
+        patched_v             = dec_instr_v;
+        patched_v.rob_tag     = rob_tag_v;
+        patched_v.p_dest      = rename_phys_v;
+        patched_v.p_src_a     = src_phys_c;
+        patched_v.p_src_b     = src_phys_d;
+        patched_v.src_a_ready = !src_busy_c;
+        patched_v.src_b_ready = !src_busy_d;
+        patched_v.val_a       = prf_data_c;
+        patched_v.val_b       = prf_data_d;
+    end
+
+    // =================================================================
+    // 4c. Physical Register File
+    // =================================================================
+    // CDB phys_dest comes directly from execute stage (no longer cast from ROB tag)
+    phys_reg_t cdb0_phys_dest, cdb1_phys_dest;
+
+    f386_phys_regfile prf (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .rd_addr_a (src_phys_a),
+        .rd_addr_b (src_phys_b),
+        .rd_addr_c (src_phys_c),
+        .rd_addr_d (src_phys_d),
+        .rd_data_a (prf_data_a),
+        .rd_data_b (prf_data_b),
+        .rd_data_c (prf_data_c),
+        .rd_data_d (prf_data_d),
+        .wr_en_0   (cdb0_valid),
+        .wr_addr_0 (cdb0_phys_dest),
+        .wr_data_0 (cdb0_data),
+        .wr_en_1   (cdb1_valid),
+        .wr_addr_1 (cdb1_phys_dest),
+        .wr_data_1 (cdb1_data)
+    );
+
+    // =================================================================
     // 5. Issue Queue (Reservation Station)
     // =================================================================
-    // CDB physical register destinations (for IQ operand capture)
-    phys_reg_t cdb0_phys_dest, cdb1_phys_dest;
-    assign cdb0_phys_dest = phys_reg_t'(cdb0_tag);  // TODO: carry phys_dest through execute
-    assign cdb1_phys_dest = phys_reg_t'(cdb1_tag);
-
     f386_issue_queue iq (
         .clk             (clk),
         .reset_n         (rst_n),
 
-        .dispatch_instr  (dec_instr_u),
+        .dispatch_instr  (patched_u),
         .dispatch_valid  (dec_instr_u_valid && rename_ready && !rob_full),
 
         .issue_instr     (iq_issue_instr),
@@ -364,10 +435,10 @@ module f386_ooo_core_top (
         .clk               (clk),
         .rst_n             (rst_n),
 
-        // Dispatch
-        .dispatch_u        (dec_instr_u),
+        // Dispatch (patched instructions with physical reg mappings)
+        .dispatch_u        (patched_u),
         .dispatch_u_valid  (dec_instr_u_valid && rename_ready && !rob_full),
-        .dispatch_v        (dec_instr_v),
+        .dispatch_v        (patched_v),
         .dispatch_v_valid  (dec_instr_v_valid && rename_ready && !rob_full),
         .rob_tag_u         (rob_tag_u),
         .rob_tag_v         (rob_tag_v),
@@ -396,6 +467,12 @@ module f386_ooo_core_top (
         .retire_v_valid    (rob_retire_v_valid),
         .retire_v_flags    (rob_retire_v_flags),
         .retire_v_flags_mask(rob_retire_v_flags_mask),
+
+        // Old physical register (for freelist reclaim at retirement)
+        .dispatch_u_old_phys (rename_old_phys_u),
+        .dispatch_v_old_phys (rename_old_phys_v),
+        .retire_u_old_phys   (rob_retire_u_old_phys),
+        .retire_v_old_phys   (rob_retire_v_old_phys),
 
         // LSQ index pairing (stubs until LSU integration)
         .dispatch_u_lq_idx ('0),
@@ -508,6 +585,7 @@ module f386_ooo_core_top (
         exec_u_instr.reg_src_a   = iq_issue_instr.p_src_a[2:0];
         exec_u_instr.reg_src_b   = iq_issue_instr.p_src_b[2:0];
         exec_u_instr.rob_tag     = iq_issue_instr.rob_tag;
+        exec_u_instr.phys_dest   = iq_issue_instr.p_dest;
         exec_u_instr.imm_value   = iq_issue_instr.imm_value;
         exec_u_instr.flags_in    = alu_flags_current;
         exec_u_instr.flags_mask  = (iq_issue_instr.op_cat == OP_ALU_REG ||
@@ -520,17 +598,18 @@ module f386_ooo_core_top (
     // V-pipe: simple ops bypass IQ (in-order, paired with U)
     always_comb begin
         exec_v_instr.is_valid    = dec_instr_v_valid && rename_ready && !rob_full;
-        exec_v_instr.pc          = dec_instr_v.pc;
-        exec_v_instr.opcode      = dec_instr_v.opcode;
-        exec_v_instr.op_category = dec_instr_v.op_cat;
-        exec_v_instr.reg_dest    = dec_instr_v.p_dest[2:0];
-        exec_v_instr.reg_src_a   = dec_instr_v.p_src_a[2:0];
-        exec_v_instr.reg_src_b   = dec_instr_v.p_src_b[2:0];
+        exec_v_instr.pc          = patched_v.pc;
+        exec_v_instr.opcode      = patched_v.opcode;
+        exec_v_instr.op_category = patched_v.op_cat;
+        exec_v_instr.reg_dest    = patched_v.p_dest[2:0];
+        exec_v_instr.reg_src_a   = patched_v.p_src_a[2:0];
+        exec_v_instr.reg_src_b   = patched_v.p_src_b[2:0];
         exec_v_instr.rob_tag     = rob_tag_v;
-        exec_v_instr.imm_value   = dec_instr_v.imm_value;
+        exec_v_instr.phys_dest   = patched_v.p_dest;
+        exec_v_instr.imm_value   = patched_v.imm_value;
         exec_v_instr.flags_in    = alu_flags_current;
-        exec_v_instr.flags_mask  = (dec_instr_v.op_cat == OP_ALU_REG ||
-                                    dec_instr_v.op_cat == OP_ALU_IMM) ? 6'b111111 : 6'b000000;
+        exec_v_instr.flags_mask  = (patched_v.op_cat == OP_ALU_REG ||
+                                    patched_v.op_cat == OP_ALU_IMM) ? 6'b111111 : 6'b000000;
         exec_v_instr.pred_taken  = 1'b0;
         exec_v_instr.pred_target = 32'd0;
         exec_v_instr.sem_tag     = SEM_NONE;
@@ -547,10 +626,10 @@ module f386_ooo_core_top (
         .u_valid         (iq_issue_valid),
         .u_ready         (exec_u_ready),
 
-        // V-pipe
+        // V-pipe (operands from PRF via patched instruction)
         .v_instr         (exec_v_instr),
-        .v_op_a          (dec_instr_v.val_a),
-        .v_op_b          (dec_instr_v.val_b),
+        .v_op_a          (patched_v.val_a),
+        .v_op_b          (patched_v.val_b),
         .v_valid         (exec_v_instr.is_valid),
         .v_ready         (exec_v_ready),
 
@@ -561,12 +640,14 @@ module f386_ooo_core_top (
         .cdb0_flags      (cdb0_flags),
         .cdb0_flags_mask (cdb0_flags_mask),
         .cdb0_exception  (cdb0_exception),
+        .cdb0_phys_dest  (cdb0_phys_dest),
         .cdb1_valid      (cdb1_valid),
         .cdb1_tag        (cdb1_tag),
         .cdb1_data       (cdb1_data),
         .cdb1_flags      (cdb1_flags),
         .cdb1_flags_mask (cdb1_flags_mask),
         .cdb1_exception  (cdb1_exception),
+        .cdb1_phys_dest  (cdb1_phys_dest),
 
         // Writeback
         .wb_data_u       (wb_data_u),
@@ -897,6 +978,7 @@ module f386_ooo_core_top (
     // =================================================================
     // Simple pass-through for load/store addresses from execute stage.
     // A full Load/Store Unit with store buffer will replace this.
+    // Legacy: wb_data_u still driven by execute stage for this stub path
     assign mem_addr  = wb_data_u;
     assign mem_wdata = 32'd0;     // Store data path TBD
     assign mem_req   = 1'b0;      // LSU will drive this

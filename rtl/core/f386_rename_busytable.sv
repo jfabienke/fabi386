@@ -40,7 +40,13 @@ module f386_rename_busytable (
     input  phys_reg_t   query_a,
     input  phys_reg_t   query_b,
     output logic        busy_a,
-    output logic        busy_b
+    output logic        busy_b,
+
+    // --- V-pipe query ports ---
+    input  phys_reg_t   query_c,
+    input  phys_reg_t   query_d,
+    output logic        busy_c,
+    output logic        busy_d
 );
 
     logic [CONF_PHYS_REG_NUM-1:0] busy;
@@ -82,5 +88,7 @@ module f386_rename_busytable (
     // already incorporates CDB clears (and dispatch sets).
     assign busy_a = busy_next[query_a];
     assign busy_b = busy_next[query_b];
+    assign busy_c = busy_next[query_c];
+    assign busy_d = busy_next[query_d];
 
 endmodule

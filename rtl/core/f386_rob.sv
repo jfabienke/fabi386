@@ -269,14 +269,20 @@ module f386_rob (
             end
 
             // --- CDB Writeback (mark entries complete) ---
-            if (cdb0_valid && entry_valid[cdb0_tag]) begin
+            // Accept CDB for entries that are valid OR being dispatched this
+            // cycle (same-cycle V-pipe completion: dispatch + CDB in one clock).
+            if (cdb0_valid && (entry_valid[cdb0_tag] ||
+                    (dispatch_u_valid && !full && cdb0_tag == tail) ||
+                    (dispatch_v_valid && !full && cdb0_tag == v_slot))) begin
                 entry_complete[cdb0_tag]   <= 1'b1;
                 entry_data[cdb0_tag]       <= cdb0_data;
                 entry_flags[cdb0_tag]      <= cdb0_flags;
                 entry_flags_mask[cdb0_tag] <= cdb0_flags_mask;
                 entry_exception[cdb0_tag]  <= cdb0_exception;
             end
-            if (cdb1_valid && entry_valid[cdb1_tag]) begin
+            if (cdb1_valid && (entry_valid[cdb1_tag] ||
+                    (dispatch_u_valid && !full && cdb1_tag == tail) ||
+                    (dispatch_v_valid && !full && cdb1_tag == v_slot))) begin
                 entry_complete[cdb1_tag]   <= 1'b1;
                 entry_data[cdb1_tag]       <= cdb1_data;
                 entry_flags[cdb1_tag]      <= cdb1_flags;

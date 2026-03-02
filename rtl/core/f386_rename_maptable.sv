@@ -71,26 +71,27 @@ module f386_rename_maptable (
     // =========================================================
     // Combinational read ports with same-cycle rename bypass
     // =========================================================
-    // If U renames the same arch reg that a source is reading, the
-    // source sees the new mapping.  V rename further overrides if it
-    // targets the same arch reg.
+    // U-pipe sources (a,b) read the PRE-rename mapping — no U-bypass.
+    // If U renames EAX and reads EAX (ADD EAX,1), the source must see
+    // the OLD physical register, not the newly-allocated destination.
+    //
+    // V-pipe sources (c,d) DO bypass U's rename because V is younger
+    // and may read a register that U just renamed.  V rename further
+    // overrides both U and V sources (handles V→V RAW in same cycle).
     always_comb begin
+        // U-pipe sources: pre-rename mapping only
         read_phys_a = spec_map[read_arch_a];
         read_phys_b = spec_map[read_arch_b];
+
+        // V-pipe sources: bypass U rename (V reads U's new mapping)
         read_phys_c = spec_map[read_arch_c];
         read_phys_d = spec_map[read_arch_d];
-
-        // Bypass: U rename
-        if (rename_valid_u && rename_arch_u == read_arch_a)
-            read_phys_a = rename_phys_u;
-        if (rename_valid_u && rename_arch_u == read_arch_b)
-            read_phys_b = rename_phys_u;
         if (rename_valid_u && rename_arch_u == read_arch_c)
             read_phys_c = rename_phys_u;
         if (rename_valid_u && rename_arch_u == read_arch_d)
             read_phys_d = rename_phys_u;
 
-        // Bypass: V rename (V is younger, overrides U)
+        // V rename overrides everything (V is youngest in dispatch group)
         if (rename_valid_v && rename_arch_v == read_arch_a)
             read_phys_a = rename_phys_v;
         if (rename_valid_v && rename_arch_v == read_arch_b)

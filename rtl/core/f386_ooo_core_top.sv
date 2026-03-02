@@ -80,6 +80,7 @@ module f386_ooo_core_top (
 
     // --- Rename ---
     logic        rename_ready;
+    logic        rename_v_alloc_valid;
     phys_reg_t   rename_phys_u, rename_phys_v;
     phys_reg_t   src_phys_a, src_phys_b, src_phys_c, src_phys_d;
     logic        src_busy_a, src_busy_b, src_busy_c, src_busy_d;
@@ -186,6 +187,11 @@ module f386_ooo_core_top (
     // Triggered by branch misprediction or system register changes
     logic        flush;
     assign flush = branch_mispredict || cr0_write_flush || cr3_write_flush || cr4_write_flush;
+
+    // --- Dispatch Valid (derived signals used across sections) ---
+    logic dispatch_u_valid, dispatch_v_valid;
+    assign dispatch_u_valid = dec_instr_u_valid && rename_ready && !rob_full;
+    assign dispatch_v_valid = dec_instr_v_valid && rename_ready && !rob_full && rename_v_alloc_valid;
 
     // =================================================================
     // 1. Program Counter
@@ -294,6 +300,7 @@ module f386_ooo_core_top (
 
         .arch_dest_v   (dec_instr_v.p_dest[2:0]),
         .phys_dest_v   (rename_phys_v),
+        .v_alloc_valid (rename_v_alloc_valid),
         .rename_v_valid(dec_instr_v_valid && rename_ready && !rob_full),
 
         // U-pipe source lookup
@@ -408,7 +415,7 @@ module f386_ooo_core_top (
         .reset_n         (rst_n),
 
         .dispatch_instr  (patched_u),
-        .dispatch_valid  (dec_instr_u_valid && rename_ready && !rob_full),
+        .dispatch_valid  (dispatch_u_valid),
 
         .issue_instr     (iq_issue_instr),
         .issue_valid     (iq_issue_valid),
@@ -437,9 +444,9 @@ module f386_ooo_core_top (
 
         // Dispatch (patched instructions with physical reg mappings)
         .dispatch_u        (patched_u),
-        .dispatch_u_valid  (dec_instr_u_valid && rename_ready && !rob_full),
+        .dispatch_u_valid  (dispatch_u_valid),
         .dispatch_v        (patched_v),
-        .dispatch_v_valid  (dec_instr_v_valid && rename_ready && !rob_full),
+        .dispatch_v_valid  (dispatch_v_valid),
         .rob_tag_u         (rob_tag_u),
         .rob_tag_v         (rob_tag_v),
         .full              (rob_full),
@@ -597,7 +604,7 @@ module f386_ooo_core_top (
 
     // V-pipe: simple ops bypass IQ (in-order, paired with U)
     always_comb begin
-        exec_v_instr.is_valid    = dec_instr_v_valid && rename_ready && !rob_full;
+        exec_v_instr.is_valid    = dispatch_v_valid;
         exec_v_instr.pc          = patched_v.pc;
         exec_v_instr.opcode      = patched_v.opcode;
         exec_v_instr.op_category = patched_v.op_cat;
@@ -907,13 +914,13 @@ module f386_ooo_core_top (
         .v86_mode         (v86_mode),
 
         // Push on CALL dispatch (opcode E8 = near CALL)
-        .push_valid       (dec_instr_u_valid && rename_ready && !rob_full &&
+        .push_valid       (dispatch_u_valid &&
                            dec_instr_u.op_cat == OP_BRANCH &&
                            dec_instr_u.opcode == 8'hE8),
         .push_ret_addr    (dec_instr_u.pc + {24'd0, dec_instr_u.raw_instr[7:0]} + 32'd1),
 
         // Pop on RET dispatch (opcode C3 = near RET)
-        .pop_valid        (dec_instr_u_valid && rename_ready && !rob_full &&
+        .pop_valid        (dispatch_u_valid &&
                            dec_instr_u.op_cat == OP_BRANCH &&
                            dec_instr_u.opcode == 8'hC3),
 

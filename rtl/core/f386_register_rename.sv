@@ -29,6 +29,7 @@ module f386_register_rename (
     // --- Rename request (V-pipe) ---
     input  logic [2:0]  arch_dest_v,
     output phys_reg_t   phys_dest_v,
+    output logic        v_alloc_valid,     // V-pipe allocation succeeded
     input  logic        rename_v_valid,
 
     // --- Source operand lookup (U-pipe) ---
@@ -283,6 +284,7 @@ module f386_register_rename (
     // =========================================================
     assign phys_dest_u = alloc_phys_u;
     assign phys_dest_v = alloc_phys_v;
+    assign v_alloc_valid = alloc_valid_v;
 
     // can_rename: free list has at least 1 register available.
     // When V-pipe is also requesting, we need 2 — but the free list

@@ -76,11 +76,12 @@ Implementation:
 P2 baseline (current):
 - Simulation: `$fatal` stops immediately.
 - Synthesis: poison load (`0xDEAD_BEEF` to CDB) and store drain ack to prevent hang.
+- **This is temporary P2 behavior.** The poison-data and blind-ack paths must be removed once precise exception-at-retire is wired, to prevent silent data corruption from surviving into later phases.
 
 P2 upgrade (if exception lane is ready):
 - Wire LSQ fault metadata (`mem_rsp_in.resp`, faulting address) into ROB exception info.
 - ROB marks instruction as faulting; exception unit handles at retirement.
-- Remove poison-data path once exception kill-at-retire is validated.
+- Remove poison-data and blind store-drain-ack paths. Gate removal behind `CONF_ENABLE_PRECISE_MEM_EXC` so the temporary path can't accidentally coexist with the real one.
 
 ### D7: `mem_req_t.addr` is always a byte address
 
@@ -115,8 +116,12 @@ No alignment or masking at the LSQ. Downstream adapter (shim, DDRAM bridge) is r
   - Add `mem_class_t` or `cacheable` bit to AGU→LSQ interface (new AGU output).
   - Source classification from MMU remap gates (`CLASS_MMIO`, `CLASS_ADPT_MEM` → uncacheable).
   - Add routing mux in core_top: cacheable traffic → LSQ, uncacheable → direct IO path.
-  - IO path: in-order, strongly ordered, speaks `mem_req_t`/`mem_rsp_t` to shim (separate client).
+  - IO path: in-order, strongly ordered, speaks `mem_req_t`/`mem_rsp_t` (separate client).
   - Wire `mem_req_out.cacheable` and `mem_req_out.strong_order` fields from classification.
+- Two-client arbitration into mem_ctrl (required by D3 + D1):
+  - LSQ (cacheable) and IO path (uncacheable) are two `mem_req_t` clients sharing mem_ctrl's single legacy data port.
+  - Add a 2-client round-robin arbiter in front of the shim (or inside the shim as a second input). Arbiter speaks `mem_req_t`/`mem_rsp_t` upstream, single legacy port downstream.
+  - IO path gets strict priority over LSQ when both request simultaneously (MMIO must not be starved by burst DRAM traffic). Fallback: round-robin if priority causes measurable LSQ stalls.
 - Exit: build passes, boot/smoke runs, no deadlock.
 
 ### Step 3: Correctness hardening (Days 5-7)
@@ -129,7 +134,7 @@ No alignment or masking at the LSQ. Downstream adapter (shim, DDRAM bridge) is r
 
 ### Step 4: Throughput pass A (Days 8-10)
 
-- Add request FIFO (depth 2-4) at shim boundary.
+- Add request FIFO (depth 2-4) **inside** the shim module. Keeping the FIFO inside the shim preserves the clean rip-out boundary — deleting the shim later removes the FIFO with it. No external FIFO module.
 - Add perf counters: req/rsp, retry, drain, stalled cycles, flush-drain events.
 - Keep single-outstanding response semantics.
 - Exit: same correctness, reduced memory-stall cycles in microbench.

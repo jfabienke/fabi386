@@ -15,7 +15,7 @@ Shim contract:
 - Never assert a mem_ctrl request while mem_ctrl is busy for that client.
 - Hold address/data/size stable until mem_ctrl accepts (ack semantics).
 - Never consume a response unless it has a request outstanding.
-- RETRY is generated only when mem_ctrl cannot accept the request, not for completed operations.
+- The shim never generates RETRY. Flow control is backpressure only (`mem_req_ready=0`). RETRY originates only from downstream controllers (e.g., DDRAM) for transient conditions.
 
 Mapping (truth table):
 | Split-phase event | mem_ctrl action |
@@ -24,7 +24,7 @@ Mapping (truth table):
 | `req_fire` (store) | Assert mem_ctrl data write request |
 | mem_ctrl `ack` (read) | Generate `MEM_RESP_OK` with rdata |
 | mem_ctrl `ack` (write) | Generate `MEM_RESP_OK` (no data) |
-| mem_ctrl busy/not-ready | Do not accept split-phase request (`mem_req_ready=0`) |
+| mem_ctrl busy/not-ready | Backpressure: deassert `mem_req_ready` (no RETRY generated) |
 
 Rip-out path: when LSQ talks directly to DDRAM or a real fabric, delete this module.
 
@@ -111,6 +111,12 @@ No alignment or masking at the LSQ. Downstream adapter (shim, DDRAM bridge) is r
 - Propagate ports through `f386_emu.sv`.
 - Do NOT bypass mem_ctrl — it still arbitrates ifetch/PT/data.
 - Audit microcode memory path (D4 gate).
+- MMIO bypass plumbing (required by D3):
+  - Add `mem_class_t` or `cacheable` bit to AGU→LSQ interface (new AGU output).
+  - Source classification from MMU remap gates (`CLASS_MMIO`, `CLASS_ADPT_MEM` → uncacheable).
+  - Add routing mux in core_top: cacheable traffic → LSQ, uncacheable → direct IO path.
+  - IO path: in-order, strongly ordered, speaks `mem_req_t`/`mem_rsp_t` to shim (separate client).
+  - Wire `mem_req_out.cacheable` and `mem_req_out.strong_order` fields from classification.
 - Exit: build passes, boot/smoke runs, no deadlock.
 
 ### Step 3: Correctness hardening (Days 5-7)

@@ -6,21 +6,21 @@
  * controller, and video output for the DE10-Nano FPGA.
  *
  * Architecture:
- *   ┌──────────────────────────────────────────────────────┐
- *   │  f386_emu                                            │
- *   │                                                      │
- *   │  ┌──────────┐   ┌──────────┐   ┌──────────────────┐ │
- *   │  │ OoO Core │←→│ Mem Ctrl │←→│  DDRAM (HPS)      │ │
- *   │  └────┬─────┘   └──────────┘   └──────────────────┘ │
- *   │       │                                              │
- *   │  ┌────┴──────────────────────────────────┐           │
- *   │  │  I/O Bus                              │           │
- *   │  ├──────┬──────┬──────┬──────┬────┬──────┤           │
- *   │  │ PIC  │ PIT  │ PS/2 │ VGA  │RTC │ DMA  │           │
- *   │  └──────┴──────┴──────┴──────┴────┴──────┘           │
- *   │                         │                            │
- *   │                    Video Out → VGA/HDMI               │
- *   └──────────────────────────────────────────────────────┘
+ *   ┌────────────────────────────────────────────────┐
+ *   │  f386_emu                                      │
+ *   │                                                │
+ *   │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
+ *   │  │ OoO Core │←→│ Mem Ctrl │←→│  DDRAM (HPS) │  │
+ *   │  └────┬─────┘  └──────────┘  └──────────────┘  │
+ *   │       │                                        │
+ *   │  ┌────┴──────────────────────────────────┐     │
+ *   │  │  I/O Bus                              │     │
+ *   │  ├──────┬──────┬──────┬──────┬────┬──────┤     │
+ *   │  │ PIC  │ PIT  │ PS/2 │ VGA  │RTC │ DMA  │     │
+ *   │  └──────┴──────┴──────┴──────┴────┴──────┘     │
+ *   │                         │                      │
+ *   │               Video Out → VGA/HDMI             │
+ *   └────────────────────────────────────────────────┘
  *
  * Reference: ao486_MiSTer ao486.sv
  */
@@ -250,7 +250,9 @@ module f386_emu (
     logic         fetch_data_valid;
     logic         fetch_req;
 
-    logic [31:0]  mem_addr, mem_wdata, mem_rdata;
+    logic [31:0]  mem_addr;
+    logic [63:0]  mem_wdata, mem_rdata;
+    logic [7:0]   mem_byte_en;
     logic         mem_req, mem_wr, mem_ack;
 
     telemetry_pkt_t trace_out;
@@ -273,7 +275,9 @@ module f386_emu (
         .mem_rdata       (mem_rdata),
         .mem_req         (mem_req),
         .mem_wr          (mem_wr),
+        .mem_byte_en     (mem_byte_en),
         .mem_ack         (mem_ack),
+        .a20_gate        (a20_gate),
 
         .trace_out       (trace_out),
         .trace_valid     (trace_valid),
@@ -303,13 +307,13 @@ module f386_emu (
         .ifetch_valid    (fetch_data_valid),
         .ifetch_req      (fetch_req),
 
-        // Data port
+        // Data port (widened to 64-bit for P2)
         .data_addr       (mem_addr),
         .data_wdata      (mem_wdata),
         .data_rdata      (mem_rdata),
         .data_req        (mem_req),
         .data_wr         (mem_wr),
-        .data_size       (2'd2),  // Default dword, TODO: wire from LSQ
+        .data_byte_en    (mem_byte_en),
         .data_ack        (mem_ack),
 
         // Page walker

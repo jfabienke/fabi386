@@ -32,13 +32,17 @@ module f386_ooo_core_top (
     input  logic         fetch_data_valid,
     output logic         fetch_req,
 
-    // --- Data Memory Interface (to BIU / L1D) ---
+    // --- Data Memory Interface (to BIU / L1D — widened to 64-bit for P2) ---
     output logic [31:0]  mem_addr,
-    output logic [31:0]  mem_wdata,
-    input  logic [31:0]  mem_rdata,
+    output logic [63:0]  mem_wdata,
+    input  logic [63:0]  mem_rdata,
     output logic         mem_req,
     output logic         mem_wr,
+    output logic [7:0]   mem_byte_en,
     input  logic         mem_ack,
+
+    // --- A20 Gate (for AGU) ---
+    input  logic         a20_gate,
 
     // --- Telemetry Port (HARE Suite) ---
     output telemetry_pkt_t trace_out,
@@ -63,7 +67,23 @@ module f386_ooo_core_top (
     logic        bp_predict_taken;
     logic        bp_is_ret;
 
-    // --- Decode → Rename/ROB ---
+    // --- Decode raw outputs (directly from decoder) ---
+    ooo_instr_t  raw_dec_instr_u, raw_dec_instr_v;
+    logic        raw_dec_instr_u_valid, raw_dec_instr_v_valid;
+    logic        raw_dec_branch_target_u_valid, raw_dec_branch_target_v_valid;
+    logic [31:0] raw_dec_branch_target_u, raw_dec_branch_target_v;
+    logic        raw_dec_branch_indirect_u, raw_dec_branch_indirect_v;
+    logic        raw_dec_u_reads_flags, raw_dec_u_writes_flags;
+    logic        raw_dec_v_reads_flags, raw_dec_v_writes_flags;
+    logic [2:0]  raw_dec_u_addr_base, raw_dec_u_addr_index;
+    logic        raw_dec_u_addr_base_valid, raw_dec_u_addr_index_valid;
+    logic [1:0]  raw_dec_u_addr_scale;
+    logic [2:0]  raw_dec_v_addr_base, raw_dec_v_addr_index;
+    logic        raw_dec_v_addr_base_valid, raw_dec_v_addr_index_valid;
+    logic [1:0]  raw_dec_v_addr_scale;
+    logic [1:0]  raw_dec_u_mem_size, raw_dec_v_mem_size;
+
+    // --- Decode muxed outputs (cache hit or raw, driven by generate block) ---
     ooo_instr_t  dec_instr_u, dec_instr_v;
     logic        dec_instr_u_valid, dec_instr_v_valid;
     logic        dec_branch_target_u_valid, dec_branch_target_v_valid;
@@ -77,6 +97,7 @@ module f386_ooo_core_top (
     logic [2:0]  dec_v_addr_base, dec_v_addr_index;
     logic        dec_v_addr_base_valid, dec_v_addr_index_valid;
     logic [1:0]  dec_v_addr_scale;
+    logic [1:0]  dec_u_mem_size, dec_v_mem_size;
 
     // --- Rename ---
     logic        rename_ready;
@@ -104,7 +125,17 @@ module f386_ooo_core_top (
     logic [5:0]  rob_retire_u_flags, rob_retire_u_flags_mask;
     logic [5:0]  rob_retire_v_flags, rob_retire_v_flags_mask;
 
-    // --- Execute Stage → CDB ---
+    // --- Execute Stage → CDB (raw from exec, muxed in gen_lsq_memif) ---
+    logic        raw_cdb0_valid, raw_cdb1_valid;
+    rob_id_t     raw_cdb0_tag, raw_cdb1_tag;
+    logic [31:0] raw_cdb0_data, raw_cdb1_data;
+    logic [5:0]  raw_cdb0_flags, raw_cdb1_flags;
+    logic [5:0]  raw_cdb0_flags_mask, raw_cdb1_flags_mask;
+    logic        raw_cdb0_exception, raw_cdb1_exception;
+    phys_reg_t   raw_cdb0_phys_dest, raw_cdb1_phys_dest;
+    logic        raw_cdb0_dest_valid, raw_cdb1_dest_valid;
+
+    // --- CDB (muxed: generate block selects raw or LSQ) ---
     logic        cdb0_valid, cdb1_valid;
     rob_id_t     cdb0_tag, cdb1_tag;
     logic [31:0] cdb0_data, cdb1_data;
@@ -189,10 +220,26 @@ module f386_ooo_core_top (
     logic        flush;
     assign flush = branch_mispredict || cr0_write_flush || cr3_write_flush || cr4_write_flush;
 
+    // Mode-only flush for decode cache (excludes branch_mispredict)
+    wire mode_flush = cr0_write_flush || cr3_write_flush || cr4_write_flush;
+
+    // --- LSQ Dispatch Backpressure (driven by gen_lsq_memif, 0 when gate OFF) ---
+    logic lsq_dispatch_blocked;
+
+    // --- LSQ CDB1 active (gates V-pipe dispatch to prevent CDB1 collision) ---
+    logic lsq_cdb1_active;
+
+    // --- LSQ ↔ ROB wiring (driven by gen_lsq_memif, stubbed when gate OFF) ---
+    lq_idx_t  rob_dispatch_u_lq_idx;
+    sq_idx_t  rob_dispatch_u_sq_idx;
+    sq_idx_t  rob_retire_u_sq_idx_w;
+    logic     rob_retire_u_is_store_w;
+
     // --- Dispatch Valid (derived signals used across sections) ---
     logic dispatch_u_valid, dispatch_v_valid;
-    assign dispatch_u_valid = dec_instr_u_valid && rename_ready && !rob_full;
-    assign dispatch_v_valid = dec_instr_v_valid && rename_ready && !rob_full && rename_v_alloc_valid;
+    assign dispatch_u_valid = dec_instr_u_valid && rename_ready && !rob_full && !lsq_dispatch_blocked;
+    assign dispatch_v_valid = dec_instr_v_valid && rename_ready && !rob_full && rename_v_alloc_valid
+                              && !lsq_cdb1_active;
 
     // =================================================================
     // 1. Program Counter
@@ -254,39 +301,229 @@ module f386_ooo_core_top (
         .current_pc        (pc_current),
         .fetch_ack         (fetch_ack),
 
-        .instr_u           (dec_instr_u),
-        .instr_u_valid     (dec_instr_u_valid),
-        .instr_v           (dec_instr_v),
-        .instr_v_valid     (dec_instr_v_valid),
+        .instr_u           (raw_dec_instr_u),
+        .instr_u_valid     (raw_dec_instr_u_valid),
+        .instr_v           (raw_dec_instr_v),
+        .instr_v_valid     (raw_dec_instr_v_valid),
         .rename_ready      (rename_ready && !rob_full),
 
-        .branch_target_u       (dec_branch_target_u),
-        .branch_target_u_valid (dec_branch_target_u_valid),
-        .branch_indirect_u     (dec_branch_indirect_u),
-        .branch_target_v       (dec_branch_target_v),
-        .branch_target_v_valid (dec_branch_target_v_valid),
-        .branch_indirect_v     (dec_branch_indirect_v),
+        .branch_target_u       (raw_dec_branch_target_u),
+        .branch_target_u_valid (raw_dec_branch_target_u_valid),
+        .branch_indirect_u     (raw_dec_branch_indirect_u),
+        .branch_target_v       (raw_dec_branch_target_v),
+        .branch_target_v_valid (raw_dec_branch_target_v_valid),
+        .branch_indirect_v     (raw_dec_branch_indirect_v),
 
-        .u_reads_flags     (dec_u_reads_flags),
-        .u_writes_flags    (dec_u_writes_flags),
-        .v_reads_flags     (dec_v_reads_flags),
-        .v_writes_flags    (dec_v_writes_flags),
+        .u_reads_flags     (raw_dec_u_reads_flags),
+        .u_writes_flags    (raw_dec_u_writes_flags),
+        .v_reads_flags     (raw_dec_v_reads_flags),
+        .v_writes_flags    (raw_dec_v_writes_flags),
 
-        .u_addr_base       (dec_u_addr_base),
-        .u_addr_base_valid (dec_u_addr_base_valid),
-        .u_addr_index      (dec_u_addr_index),
-        .u_addr_index_valid(dec_u_addr_index_valid),
-        .u_addr_scale      (dec_u_addr_scale),
-        .v_addr_base       (dec_v_addr_base),
-        .v_addr_base_valid (dec_v_addr_base_valid),
-        .v_addr_index      (dec_v_addr_index),
-        .v_addr_index_valid(dec_v_addr_index_valid),
-        .v_addr_scale      (dec_v_addr_scale),
+        .u_addr_base       (raw_dec_u_addr_base),
+        .u_addr_base_valid (raw_dec_u_addr_base_valid),
+        .u_addr_index      (raw_dec_u_addr_index),
+        .u_addr_index_valid(raw_dec_u_addr_index_valid),
+        .u_addr_scale      (raw_dec_u_addr_scale),
+        .v_addr_base       (raw_dec_v_addr_base),
+        .v_addr_base_valid (raw_dec_v_addr_base_valid),
+        .v_addr_index      (raw_dec_v_addr_index),
+        .v_addr_index_valid(raw_dec_v_addr_index_valid),
+        .v_addr_scale      (raw_dec_v_addr_scale),
+
+        .u_mem_size        (raw_dec_u_mem_size),
+        .v_mem_size        (raw_dec_v_mem_size),
 
         .pe_mode           (pe_mode),
         .v86_mode          (v86_mode),
         .default_32        (default_32)
     );
+
+    // =================================================================
+    // 3b. Decode Cache (Phase 1)
+    // =================================================================
+    // When enabled, stores decoded U+V pipe pairs in M10K BRAM indexed by
+    // PC + CPU mode. Lookup runs in parallel with decode (same latency).
+    // On hit, mux selects cached data; on miss, fills from decoder output.
+
+    // Decode output accepted — decoder asserts valid only when s1_valid && rename_ready
+    wire decode_accepted = raw_dec_instr_u_valid && !flush;
+
+    generate if (CONF_ENABLE_DECODE_CACHE) begin : gen_dec_cache
+
+        // Pack decode outputs into dc_pipe_entry_t for fill
+        dc_pipe_entry_t dc_fill_u, dc_fill_v;
+        always_comb begin
+            dc_fill_u = '{
+                valid:              raw_dec_instr_u.valid,
+                pc:                 raw_dec_instr_u.pc,
+                raw_instr:          raw_dec_instr_u.raw_instr,
+                opcode:             raw_dec_instr_u.opcode,
+                op_cat:             raw_dec_instr_u.op_cat,
+                arch_dest:          raw_dec_instr_u.p_dest[2:0],
+                dest_valid:         raw_dec_instr_u.dest_valid,
+                arch_src_a:         raw_dec_instr_u.p_src_a[2:0],
+                arch_src_b:         raw_dec_instr_u.p_src_b[2:0],
+                src_a_not_needed:   raw_dec_instr_u.src_a_ready,
+                src_b_not_needed:   raw_dec_instr_u.src_b_ready,
+                imm_value:          raw_dec_instr_u.imm_value,
+                branch_target:      raw_dec_branch_target_u,
+                branch_target_valid:raw_dec_branch_target_u_valid,
+                branch_indirect:    raw_dec_branch_indirect_u,
+                reads_flags:        raw_dec_u_reads_flags,
+                writes_flags:       raw_dec_u_writes_flags,
+                addr_base:          raw_dec_u_addr_base,
+                addr_base_valid:    raw_dec_u_addr_base_valid,
+                addr_index:         raw_dec_u_addr_index,
+                addr_index_valid:   raw_dec_u_addr_index_valid,
+                addr_scale:         raw_dec_u_addr_scale
+            };
+            dc_fill_v = '{
+                valid:              raw_dec_instr_v.valid,
+                pc:                 raw_dec_instr_v.pc,
+                raw_instr:          raw_dec_instr_v.raw_instr,
+                opcode:             raw_dec_instr_v.opcode,
+                op_cat:             raw_dec_instr_v.op_cat,
+                arch_dest:          raw_dec_instr_v.p_dest[2:0],
+                dest_valid:         raw_dec_instr_v.dest_valid,
+                arch_src_a:         raw_dec_instr_v.p_src_a[2:0],
+                arch_src_b:         raw_dec_instr_v.p_src_b[2:0],
+                src_a_not_needed:   raw_dec_instr_v.src_a_ready,
+                src_b_not_needed:   raw_dec_instr_v.src_b_ready,
+                imm_value:          raw_dec_instr_v.imm_value,
+                branch_target:      raw_dec_branch_target_v,
+                branch_target_valid:raw_dec_branch_target_v_valid,
+                branch_indirect:    raw_dec_branch_indirect_v,
+                reads_flags:        raw_dec_v_reads_flags,
+                writes_flags:       raw_dec_v_writes_flags,
+                addr_base:          raw_dec_v_addr_base,
+                addr_base_valid:    raw_dec_v_addr_base_valid,
+                addr_index:         raw_dec_v_addr_index,
+                addr_index_valid:   raw_dec_v_addr_index_valid,
+                addr_scale:         raw_dec_v_addr_scale
+            };
+        end
+
+        // Cache instance
+        logic dc_hit;
+        dc_pipe_entry_t dc_u_out, dc_v_out;
+
+        f386_decode_cache u_dec_cache (
+            .clk        (clk),
+            .rst_n      (rst_n),
+            .lookup_pc  (pc_current),
+            .lookup_valid(fetch_ack),
+            .pe_mode    (pe_mode),
+            .v86_mode   (v86_mode),
+            .default_32 (default_32),
+            .hit        (dc_hit),
+            .hit_u      (dc_u_out),
+            .hit_v      (dc_v_out),
+            .fill_valid (decode_accepted && !dc_hit),
+            .fill_pc    (raw_dec_instr_u.pc),
+            .fill_mode  ({pe_mode, v86_mode, default_32}),
+            .fill_u     (dc_fill_u),
+            .fill_v     (dc_fill_v),
+            .inv_all    (mode_flush),
+            .perf_hits  (),
+            .perf_misses()
+        );
+
+        // Rebuild full ooo_instr_t from cache entry (zero-fill dispatch fields)
+        function automatic ooo_instr_t rebuild(dc_pipe_entry_t e);
+            rebuild.valid       = e.valid;
+            rebuild.pc          = e.pc;
+            rebuild.raw_instr   = e.raw_instr;
+            rebuild.opcode      = e.opcode;
+            rebuild.op_cat      = e.op_cat;
+            rebuild.p_dest      = {2'b0, e.arch_dest};
+            rebuild.dest_valid  = e.dest_valid;
+            rebuild.p_src_a     = {2'b0, e.arch_src_a};
+            rebuild.p_src_b     = {2'b0, e.arch_src_b};
+            rebuild.src_a_ready = e.src_a_not_needed;
+            rebuild.src_b_ready = e.src_b_not_needed;
+            rebuild.val_a       = 32'h0;
+            rebuild.val_b       = 32'h0;
+            rebuild.rob_tag     = '0;
+            rebuild.br_tag      = '0;
+            rebuild.imm_value   = e.imm_value;
+            rebuild.lq_idx      = '0;
+            rebuild.sq_idx      = '0;
+            rebuild.addr_base_valid  = e.addr_base_valid;
+            rebuild.addr_index_valid = e.addr_index_valid;
+            rebuild.addr_scale  = e.addr_scale;
+            rebuild.mem_size    = 2'd2; // Default dword; re-derived from decode on miss
+        endfunction
+
+        // Output mux: cache hit overrides decode
+        wire use_cache = dc_hit && decode_accepted;
+
+        assign dec_instr_u       = use_cache ? rebuild(dc_u_out) : raw_dec_instr_u;
+        assign dec_instr_u_valid = use_cache ? dc_u_out.valid    : raw_dec_instr_u_valid;
+        assign dec_instr_v       = use_cache ? rebuild(dc_v_out) : raw_dec_instr_v;
+        assign dec_instr_v_valid = use_cache ? dc_v_out.valid    : raw_dec_instr_v_valid;
+
+        assign dec_branch_target_u       = use_cache ? dc_u_out.branch_target       : raw_dec_branch_target_u;
+        assign dec_branch_target_u_valid = use_cache ? dc_u_out.branch_target_valid : raw_dec_branch_target_u_valid;
+        assign dec_branch_indirect_u     = use_cache ? dc_u_out.branch_indirect     : raw_dec_branch_indirect_u;
+        assign dec_branch_target_v       = use_cache ? dc_v_out.branch_target       : raw_dec_branch_target_v;
+        assign dec_branch_target_v_valid = use_cache ? dc_v_out.branch_target_valid : raw_dec_branch_target_v_valid;
+        assign dec_branch_indirect_v     = use_cache ? dc_v_out.branch_indirect     : raw_dec_branch_indirect_v;
+
+        assign dec_u_reads_flags      = use_cache ? dc_u_out.reads_flags      : raw_dec_u_reads_flags;
+        assign dec_u_writes_flags     = use_cache ? dc_u_out.writes_flags     : raw_dec_u_writes_flags;
+        assign dec_v_reads_flags      = use_cache ? dc_v_out.reads_flags      : raw_dec_v_reads_flags;
+        assign dec_v_writes_flags     = use_cache ? dc_v_out.writes_flags     : raw_dec_v_writes_flags;
+
+        assign dec_u_addr_base        = use_cache ? dc_u_out.addr_base        : raw_dec_u_addr_base;
+        assign dec_u_addr_base_valid  = use_cache ? dc_u_out.addr_base_valid  : raw_dec_u_addr_base_valid;
+        assign dec_u_addr_index       = use_cache ? dc_u_out.addr_index       : raw_dec_u_addr_index;
+        assign dec_u_addr_index_valid = use_cache ? dc_u_out.addr_index_valid : raw_dec_u_addr_index_valid;
+        assign dec_u_addr_scale       = use_cache ? dc_u_out.addr_scale       : raw_dec_u_addr_scale;
+        assign dec_v_addr_base        = use_cache ? dc_v_out.addr_base        : raw_dec_v_addr_base;
+        assign dec_v_addr_base_valid  = use_cache ? dc_v_out.addr_base_valid  : raw_dec_v_addr_base_valid;
+        assign dec_v_addr_index       = use_cache ? dc_v_out.addr_index       : raw_dec_v_addr_index;
+        assign dec_v_addr_index_valid = use_cache ? dc_v_out.addr_index_valid : raw_dec_v_addr_index_valid;
+        assign dec_v_addr_scale       = use_cache ? dc_v_out.addr_scale       : raw_dec_v_addr_scale;
+
+        // mem_size: not cached (derived from opcode+prefix each time)
+        assign dec_u_mem_size         = raw_dec_u_mem_size;
+        assign dec_v_mem_size         = raw_dec_v_mem_size;
+
+    end else begin : gen_no_dec_cache
+
+        // Passthrough when cache disabled
+        assign dec_instr_u           = raw_dec_instr_u;
+        assign dec_instr_u_valid     = raw_dec_instr_u_valid;
+        assign dec_instr_v           = raw_dec_instr_v;
+        assign dec_instr_v_valid     = raw_dec_instr_v_valid;
+
+        assign dec_branch_target_u       = raw_dec_branch_target_u;
+        assign dec_branch_target_u_valid = raw_dec_branch_target_u_valid;
+        assign dec_branch_indirect_u     = raw_dec_branch_indirect_u;
+        assign dec_branch_target_v       = raw_dec_branch_target_v;
+        assign dec_branch_target_v_valid = raw_dec_branch_target_v_valid;
+        assign dec_branch_indirect_v     = raw_dec_branch_indirect_v;
+
+        assign dec_u_reads_flags     = raw_dec_u_reads_flags;
+        assign dec_u_writes_flags    = raw_dec_u_writes_flags;
+        assign dec_v_reads_flags     = raw_dec_v_reads_flags;
+        assign dec_v_writes_flags    = raw_dec_v_writes_flags;
+
+        assign dec_u_addr_base       = raw_dec_u_addr_base;
+        assign dec_u_addr_base_valid = raw_dec_u_addr_base_valid;
+        assign dec_u_addr_index      = raw_dec_u_addr_index;
+        assign dec_u_addr_index_valid= raw_dec_u_addr_index_valid;
+        assign dec_u_addr_scale      = raw_dec_u_addr_scale;
+        assign dec_v_addr_base       = raw_dec_v_addr_base;
+        assign dec_v_addr_base_valid = raw_dec_v_addr_base_valid;
+        assign dec_v_addr_index      = raw_dec_v_addr_index;
+        assign dec_v_addr_index_valid= raw_dec_v_addr_index_valid;
+        assign dec_v_addr_scale      = raw_dec_v_addr_scale;
+
+        assign dec_u_mem_size        = raw_dec_u_mem_size;
+        assign dec_v_mem_size        = raw_dec_v_mem_size;
+
+    end endgenerate
 
     // =================================================================
     // 4. Register Rename
@@ -376,6 +613,12 @@ module f386_ooo_core_top (
         patched_u.src_b_ready = !src_busy_b;
         patched_u.val_a       = prf_data_a;
         patched_u.val_b       = prf_data_b;
+        patched_u.addr_base_valid  = dec_u_addr_base_valid;
+        patched_u.addr_index_valid = dec_u_addr_index_valid;
+        patched_u.addr_scale  = dec_u_addr_scale;
+        patched_u.mem_size    = dec_u_mem_size;
+        patched_u.lq_idx      = rob_dispatch_u_lq_idx;
+        patched_u.sq_idx      = rob_dispatch_u_sq_idx;
 
         patched_v             = dec_instr_v;
         patched_v.rob_tag     = rob_tag_v;
@@ -388,12 +631,16 @@ module f386_ooo_core_top (
         patched_v.src_b_ready = !src_busy_d;
         patched_v.val_a       = prf_data_c;
         patched_v.val_b       = prf_data_d;
+        patched_v.addr_base_valid  = dec_v_addr_base_valid;
+        patched_v.addr_index_valid = dec_v_addr_index_valid;
+        patched_v.addr_scale  = dec_v_addr_scale;
+        patched_v.mem_size    = dec_v_mem_size;
     end
 
     // =================================================================
     // 4c. Physical Register File
     // =================================================================
-    // CDB phys_dest comes directly from execute stage (no longer cast from ROB tag)
+    // CDB phys_dest/dest_valid assigned by gen_lsq_memif (muxed) or gen_no_lsq_memif (passthrough)
     phys_reg_t cdb0_phys_dest, cdb1_phys_dest;
     logic      cdb0_dest_valid, cdb1_dest_valid;
 
@@ -496,13 +743,13 @@ module f386_ooo_core_top (
         .retire_u_old_phys   (rob_retire_u_old_phys),
         .retire_v_old_phys   (rob_retire_v_old_phys),
 
-        // LSQ index pairing (stubs until LSU integration)
-        .dispatch_u_lq_idx ('0),
-        .dispatch_u_sq_idx ('0),
+        // LSQ index pairing (driven by gen_lsq_memif, stubbed to '0 when gate OFF)
+        .dispatch_u_lq_idx (rob_dispatch_u_lq_idx),
+        .dispatch_u_sq_idx (rob_dispatch_u_sq_idx),
         .dispatch_v_lq_idx ('0),
         .dispatch_v_sq_idx ('0),
-        .retire_u_sq_idx   (),
-        .retire_u_is_store (),
+        .retire_u_sq_idx   (rob_retire_u_sq_idx_w),
+        .retire_u_is_store (rob_retire_u_is_store_w),
         .retire_v_sq_idx   (),
         .retire_v_is_store (),
 
@@ -659,23 +906,23 @@ module f386_ooo_core_top (
         .v_valid         (exec_v_instr.is_valid),
         .v_ready         (exec_v_ready),
 
-        // CDB (flags travel alongside data through ROB)
-        .cdb0_valid      (cdb0_valid),
-        .cdb0_tag        (cdb0_tag),
-        .cdb0_data       (cdb0_data),
-        .cdb0_flags      (cdb0_flags),
-        .cdb0_flags_mask (cdb0_flags_mask),
-        .cdb0_exception  (cdb0_exception),
-        .cdb0_phys_dest  (cdb0_phys_dest),
-        .cdb0_dest_valid (cdb0_dest_valid),
-        .cdb1_valid      (cdb1_valid),
-        .cdb1_tag        (cdb1_tag),
-        .cdb1_data       (cdb1_data),
-        .cdb1_flags      (cdb1_flags),
-        .cdb1_flags_mask (cdb1_flags_mask),
-        .cdb1_exception  (cdb1_exception),
-        .cdb1_phys_dest  (cdb1_phys_dest),
-        .cdb1_dest_valid (cdb1_dest_valid),
+        // CDB (raw outputs — muxed with LSQ CDB in gen_lsq_memif)
+        .cdb0_valid      (raw_cdb0_valid),
+        .cdb0_tag        (raw_cdb0_tag),
+        .cdb0_data       (raw_cdb0_data),
+        .cdb0_flags      (raw_cdb0_flags),
+        .cdb0_flags_mask (raw_cdb0_flags_mask),
+        .cdb0_exception  (raw_cdb0_exception),
+        .cdb0_phys_dest  (raw_cdb0_phys_dest),
+        .cdb0_dest_valid (raw_cdb0_dest_valid),
+        .cdb1_valid      (raw_cdb1_valid),
+        .cdb1_tag        (raw_cdb1_tag),
+        .cdb1_data       (raw_cdb1_data),
+        .cdb1_flags      (raw_cdb1_flags),
+        .cdb1_flags_mask (raw_cdb1_flags_mask),
+        .cdb1_exception  (raw_cdb1_exception),
+        .cdb1_phys_dest  (raw_cdb1_phys_dest),
+        .cdb1_dest_valid (raw_cdb1_dest_valid),
 
         // Writeback
         .wb_data_u       (wb_data_u),
@@ -1003,14 +1250,308 @@ module f386_ooo_core_top (
     );
 
     // =================================================================
-    // 14. Data Memory Interface (Stub — LSU to be added)
+    // 14. Data Memory Interface — LSQ Integration (P2 Step 2a)
     // =================================================================
-    // Simple pass-through for load/store addresses from execute stage.
-    // A full Load/Store Unit with store buffer will replace this.
-    // Legacy: wb_data_u still driven by execute stage for this stub path
-    assign mem_addr  = wb_data_u;
-    assign mem_wdata = 32'd0;     // Store data path TBD
-    assign mem_req   = 1'b0;      // LSU will drive this
-    assign mem_wr    = 1'b0;
+    // When CONF_ENABLE_LSQ_MEMIF is ON: full LSQ pipeline with AGU,
+    // shim, CDB mux, dispatch backpressure, and retirement wiring.
+    // When OFF: legacy stub (no behavioral change).
+
+    generate if (CONF_ENABLE_LSQ_MEMIF) begin : gen_lsq_memif
+
+        // ---------------------------------------------------------
+        // Dispatch wiring: detect memory ops
+        // ---------------------------------------------------------
+        wire lsq_ld_dispatch_valid = dispatch_u_valid && (dec_instr_u.op_cat == OP_LOAD);
+        wire lsq_st_dispatch_valid = dispatch_u_valid && (dec_instr_u.op_cat == OP_STORE);
+
+        // LSQ capacity signals
+        logic lsq_lq_full, lsq_sq_full;
+        lq_idx_t lsq_ld_dispatch_idx;
+        sq_idx_t lsq_st_dispatch_idx;
+
+        // ---------------------------------------------------------
+        // Dispatch backpressure (Finding #7)
+        // ---------------------------------------------------------
+        wire mem_dispatch_blocked = (dec_instr_u.op_cat == OP_LOAD  && lsq_lq_full) ||
+                                    (dec_instr_u.op_cat == OP_STORE && lsq_sq_full);
+        assign lsq_dispatch_blocked = mem_dispatch_blocked;
+        assign lsq_cdb1_active      = lsq_ld_cdb_valid;
+
+        // Wire LSQ indices to ROB
+        assign rob_dispatch_u_lq_idx = lsq_ld_dispatch_idx;
+        assign rob_dispatch_u_sq_idx = lsq_st_dispatch_idx;
+
+        // ---------------------------------------------------------
+        // CDB suppression: OP_LOAD must not broadcast from exec cdb0
+        // (LSQ handles load completion via cdb1)
+        // ---------------------------------------------------------
+        wire cdb0_suppress_load = (iq_issue_instr.op_cat == OP_LOAD);
+
+        // cdb0: suppress OP_LOAD broadcast (LSQ delivers load data on cdb1)
+        assign cdb0_valid      = raw_cdb0_valid && !cdb0_suppress_load;
+        assign cdb0_tag        = raw_cdb0_tag;
+        assign cdb0_data       = raw_cdb0_data;
+        assign cdb0_flags      = raw_cdb0_flags;
+        assign cdb0_flags_mask = raw_cdb0_flags_mask;
+        assign cdb0_exception  = raw_cdb0_exception;
+        assign cdb0_phys_dest  = raw_cdb0_phys_dest;
+        assign cdb0_dest_valid = raw_cdb0_dest_valid;
+
+        // ---------------------------------------------------------
+        // LSQ CDB load result
+        // ---------------------------------------------------------
+        logic        lsq_ld_cdb_valid;
+        rob_id_t     lsq_ld_cdb_tag;
+        logic [31:0] lsq_ld_cdb_data;
+
+        // ---------------------------------------------------------
+        // phys_dest side table (Finding #2)
+        // Maps ROB tag → phys_dest for LSQ CDB writeback to PRF
+        // ---------------------------------------------------------
+        phys_reg_t rob_phys_dest_tbl  [0:CONF_ROB_ENTRIES-1];
+        logic      rob_dest_valid_tbl [0:CONF_ROB_ENTRIES-1];
+
+        always_ff @(posedge clk) begin
+            if (dispatch_u_valid && !mem_dispatch_blocked) begin
+                rob_phys_dest_tbl [rob_tag_u] <= patched_u.p_dest;
+                rob_dest_valid_tbl[rob_tag_u] <= patched_u.dest_valid;
+            end
+            if (dispatch_v_valid) begin
+                rob_phys_dest_tbl [rob_tag_v] <= patched_v.p_dest;
+                rob_dest_valid_tbl[rob_tag_v] <= patched_v.dest_valid;
+            end
+        end
+
+        // cdb1: LSQ load result has priority over V-pipe execute
+        assign cdb1_valid      = lsq_ld_cdb_valid ? 1'b1             : raw_cdb1_valid;
+        assign cdb1_tag        = lsq_ld_cdb_valid ? lsq_ld_cdb_tag   : raw_cdb1_tag;
+        assign cdb1_data       = lsq_ld_cdb_valid ? lsq_ld_cdb_data  : raw_cdb1_data;
+        assign cdb1_phys_dest  = lsq_ld_cdb_valid ? rob_phys_dest_tbl[lsq_ld_cdb_tag]
+                                                   : raw_cdb1_phys_dest;
+        assign cdb1_dest_valid = lsq_ld_cdb_valid ? rob_dest_valid_tbl[lsq_ld_cdb_tag]
+                                                   : raw_cdb1_dest_valid;
+        assign cdb1_flags      = lsq_ld_cdb_valid ? 6'd0             : raw_cdb1_flags;
+        assign cdb1_flags_mask = lsq_ld_cdb_valid ? 6'd0             : raw_cdb1_flags_mask;
+        assign cdb1_exception  = lsq_ld_cdb_valid ? 1'b0             : raw_cdb1_exception;
+
+        // ---------------------------------------------------------
+        // AGU (Finding #1): combinational effective address
+        // ---------------------------------------------------------
+        logic [31:0] computed_ea;
+
+        f386_agu u_agu (
+            .seg_base     (32'd0),            // Flat model (P2 simplification)
+            .base_val     (iq_issue_instr.val_a),
+            .base_valid   (iq_issue_instr.addr_base_valid),
+            .index_val    (iq_issue_instr.val_b),
+            .index_valid  (iq_issue_instr.addr_index_valid &&
+                           iq_issue_instr.op_cat == OP_LOAD),
+            .scale        (iq_issue_instr.addr_scale),
+            .displacement (iq_issue_instr.imm_value),
+            .linear_addr  (computed_ea),
+            .a20_gate     (a20_gate)
+        );
+
+        // Store EA: base + displacement (no index — index stores need microcode)
+        wire [31:0] store_ea = (iq_issue_instr.addr_base_valid ? iq_issue_instr.val_a : 32'd0)
+                              + iq_issue_instr.imm_value;
+
+        // ---------------------------------------------------------
+        // Byte-enable derivation from size + address alignment
+        // ---------------------------------------------------------
+        // Explicit case table — shift-based approach truncates for
+        // cross-dword masks (e.g. word at addr[1:0]=3).
+        function automatic logic [3:0] size_to_byte_en(
+            input logic [1:0] size, input logic [1:0] addr_lo
+        );
+            case ({size, addr_lo})
+                // Byte (size=0): single byte at offset
+                4'b00_00: size_to_byte_en = 4'b0001;
+                4'b00_01: size_to_byte_en = 4'b0010;
+                4'b00_10: size_to_byte_en = 4'b0100;
+                4'b00_11: size_to_byte_en = 4'b1000;
+                // Word (size=1): two bytes starting at offset
+                4'b01_00: size_to_byte_en = 4'b0011;
+                4'b01_01: size_to_byte_en = 4'b0110;
+                4'b01_10: size_to_byte_en = 4'b1100;
+                4'b01_11: size_to_byte_en = 4'b1000; // Misaligned: partial (low half)
+                // Dword (size=2): full mask regardless of alignment
+                4'b10_00: size_to_byte_en = 4'b1111;
+                4'b10_01: size_to_byte_en = 4'b1111;
+                4'b10_10: size_to_byte_en = 4'b1111;
+                4'b10_11: size_to_byte_en = 4'b1111;
+                default:  size_to_byte_en = 4'b1111;
+            endcase
+        endfunction
+
+        // ---------------------------------------------------------
+        // Load in-flight tracker (Finding #4)
+        // Prevents AGU from issuing a new load while LD_WAIT is busy.
+        // Set on AGU load fire, cleared on LSQ CDB completion.
+        // ---------------------------------------------------------
+        logic ld_in_flight;
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n)
+                ld_in_flight <= 1'b0;
+            else if (flush)
+                ld_in_flight <= 1'b0;
+            else if (lsq_ld_cdb_valid)
+                ld_in_flight <= 1'b0;  // Load completed
+            else if (iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD) && !ld_in_flight)
+                ld_in_flight <= 1'b1;  // New load issued
+        end
+
+        // ---------------------------------------------------------
+        // AGU fire detection (with load backpressure)
+        // ---------------------------------------------------------
+        wire agu_ld_fire = iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD) && !ld_in_flight;
+        wire agu_st_fire = iq_issue_valid && (iq_issue_instr.op_cat == OP_STORE);
+
+        wire [31:0] agu_st_addr = store_ea;
+
+        // ROB retirement signals come from top-level wires
+        // (rob_retire_u_sq_idx_w, rob_retire_u_is_store_w)
+
+        // ---------------------------------------------------------
+        // Split-phase memory interface (LSQ ↔ shim)
+        // ---------------------------------------------------------
+        logic       lsq_mem_req_valid, lsq_mem_req_ready;
+        mem_req_t   lsq_mem_req_out;
+        logic       lsq_mem_rsp_valid, lsq_mem_rsp_ready;
+        mem_rsp_t   lsq_mem_rsp_in;
+
+        // ---------------------------------------------------------
+        // MDP signals (unused in P2a)
+        // ---------------------------------------------------------
+        logic        lsq_mdp_violation;
+        logic [31:0] lsq_mdp_violation_pc;
+
+        // ---------------------------------------------------------
+        // LSQ Instantiation
+        // ---------------------------------------------------------
+        f386_lsq u_lsq (
+            .clk              (clk),
+            .rst_n            (rst_n),
+            .flush            (flush),
+
+            // Dispatch
+            .ld_dispatch_valid (lsq_ld_dispatch_valid && !mem_dispatch_blocked),
+            .ld_dispatch_rob_tag(rob_tag_u),
+            .st_dispatch_valid (lsq_st_dispatch_valid && !mem_dispatch_blocked),
+            .st_dispatch_rob_tag(rob_tag_u),
+            .ld_dispatch_idx  (lsq_ld_dispatch_idx),
+            .st_dispatch_idx  (lsq_st_dispatch_idx),
+            .lq_full          (lsq_lq_full),
+            .sq_full          (lsq_sq_full),
+
+            // AGU load
+            .agu_ld_valid     (agu_ld_fire),
+            .agu_ld_idx       (iq_issue_instr.lq_idx),
+            .agu_ld_addr      (computed_ea),
+            .agu_ld_size      (iq_issue_instr.mem_size),
+            .agu_ld_byte_en   (size_to_byte_en(iq_issue_instr.mem_size, computed_ea[1:0])),
+            .agu_ld_signed    (1'b0),   // TODO: carry sign info from decode
+
+            // AGU store
+            .agu_st_valid     (agu_st_fire),
+            .agu_st_idx       (iq_issue_instr.sq_idx),
+            .agu_st_addr      (agu_st_addr),
+            .agu_st_data      (iq_issue_instr.val_b),
+            .agu_st_size      (iq_issue_instr.mem_size),
+            .agu_st_byte_en   (size_to_byte_en(iq_issue_instr.mem_size, agu_st_addr[1:0])),
+
+            // CDB load result
+            .ld_cdb_valid     (lsq_ld_cdb_valid),
+            .ld_cdb_tag       (lsq_ld_cdb_tag),
+            .ld_cdb_data      (lsq_ld_cdb_data),
+
+            // Retirement
+            .retire_st_valid  (rob_retire_u_valid && rob_retire_u_is_store_w),
+            .retire_st_idx    (rob_retire_u_sq_idx_w),
+
+            // D-Cache (unused in P2a — stubs)
+            .dcache_req_valid (),
+            .dcache_req_addr  (),
+            .dcache_req_wdata (),
+            .dcache_req_byte_en(),
+            .dcache_req_wr    (),
+            .dcache_req_ready (1'b0),
+            .dcache_resp_valid(1'b0),
+            .dcache_resp_data (32'd0),
+
+            // Split-phase memory (to shim)
+            .mem_req_valid    (lsq_mem_req_valid),
+            .mem_req_ready    (lsq_mem_req_ready),
+            .mem_req_out      (lsq_mem_req_out),
+            .mem_rsp_valid    (lsq_mem_rsp_valid),
+            .mem_rsp_ready    (lsq_mem_rsp_ready),
+            .mem_rsp_in       (lsq_mem_rsp_in),
+
+            // MDP
+            .mdp_violation    (lsq_mdp_violation),
+            .mdp_violation_pc (lsq_mdp_violation_pc)
+        );
+
+        // ---------------------------------------------------------
+        // Shim: LSQ split-phase ↔ widened mem_ctrl data port
+        // ---------------------------------------------------------
+        f386_lsq_to_memctrl_shim u_shim (
+            .clk          (clk),
+            .rst_n        (rst_n),
+            .flush        (flush),
+
+            .req_valid    (lsq_mem_req_valid),
+            .req_ready    (lsq_mem_req_ready),
+            .req          (lsq_mem_req_out),
+
+            .rsp_valid    (lsq_mem_rsp_valid),
+            .rsp_ready    (lsq_mem_rsp_ready),
+            .rsp          (lsq_mem_rsp_in),
+
+            .data_addr    (mem_addr),
+            .data_wdata   (mem_wdata),
+            .data_byte_en (mem_byte_en),
+            .data_req     (mem_req),
+            .data_wr      (mem_wr),
+            .data_rdata   (mem_rdata),
+            .data_ack     (mem_ack)
+        );
+
+    end else begin : gen_no_lsq_memif
+
+        // ---------------------------------------------------------
+        // Legacy stubs (gate OFF — no behavioral change)
+        // ---------------------------------------------------------
+        assign lsq_dispatch_blocked   = 1'b0;
+        assign lsq_cdb1_active        = 1'b0;
+        assign rob_dispatch_u_lq_idx  = '0;
+        assign rob_dispatch_u_sq_idx  = '0;
+
+        assign mem_addr     = 32'd0;
+        assign mem_wdata    = 64'd0;
+        assign mem_byte_en  = 8'd0;
+        assign mem_req      = 1'b0;
+        assign mem_wr       = 1'b0;
+
+        // CDB passthrough (no muxing)
+        assign cdb0_valid      = raw_cdb0_valid;
+        assign cdb0_tag        = raw_cdb0_tag;
+        assign cdb0_data       = raw_cdb0_data;
+        assign cdb0_flags      = raw_cdb0_flags;
+        assign cdb0_flags_mask = raw_cdb0_flags_mask;
+        assign cdb0_exception  = raw_cdb0_exception;
+        assign cdb0_phys_dest  = raw_cdb0_phys_dest;
+        assign cdb0_dest_valid = raw_cdb0_dest_valid;
+
+        assign cdb1_valid      = raw_cdb1_valid;
+        assign cdb1_tag        = raw_cdb1_tag;
+        assign cdb1_data       = raw_cdb1_data;
+        assign cdb1_flags      = raw_cdb1_flags;
+        assign cdb1_flags_mask = raw_cdb1_flags_mask;
+        assign cdb1_exception  = raw_cdb1_exception;
+        assign cdb1_phys_dest  = raw_cdb1_phys_dest;
+        assign cdb1_dest_valid = raw_cdb1_dest_valid;
+
+    end endgenerate
 
 endmodule

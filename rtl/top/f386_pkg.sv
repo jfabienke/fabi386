@@ -246,6 +246,14 @@ package f386_pkg;
         rob_id_t        rob_tag;
         br_tag_t        br_tag;        // Branch speculation tag assigned at dispatch
         logic [31:0]    imm_value;
+
+        // P2: Memory integration fields
+        lq_idx_t        lq_idx;             // Load queue index (filled at dispatch)
+        sq_idx_t        sq_idx;             // Store queue index (filled at dispatch)
+        logic           addr_base_valid;    // 1 = val_a is base register for AGU
+        logic           addr_index_valid;   // 1 = val_b is index register for AGU (loads only)
+        logic [1:0]     addr_scale;         // AGU scale: 0=1x, 1=2x, 2=4x, 3=8x
+        logic [1:0]     mem_size;           // Memory op size: 0=byte, 1=word, 2=dword
     } ooo_instr_t;
 
     // Per-pipe decoded output (trimmed for cache storage)

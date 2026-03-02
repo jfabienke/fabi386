@@ -29,13 +29,13 @@ module f386_mem_ctrl (
     output logic         ifetch_valid,
     input  logic         ifetch_req,
 
-    // Data port (from LSQ)
+    // Data port (from LSQ shim — widened to 64-bit for P2)
     input  logic [31:0]  data_addr,
-    input  logic [31:0]  data_wdata,
-    output logic [31:0]  data_rdata,
+    input  logic [63:0]  data_wdata,
+    output logic [63:0]  data_rdata,
     input  logic         data_req,
     input  logic         data_wr,
-    input  logic [1:0]   data_size,       // 0=byte, 1=word, 2=dword
+    input  logic [7:0]   data_byte_en,    // Byte enables (from shim)
     output logic         data_ack,
 
     // Page walker port
@@ -88,10 +88,10 @@ module f386_mem_ctrl (
     arb_state_t state;
 
     logic [31:0] arb_addr;
-    logic [31:0] arb_wdata;
+    logic [63:0] arb_wdata;
     logic        arb_wr;
     logic [2:0]  arb_source;  // Which port initiated the request
-    logic [1:0]  arb_size;
+    logic [7:0]  arb_byte_en;
 
     // Instruction fetch accumulator (128-bit from 2x 64-bit reads)
     logic [127:0] ifetch_buf;
@@ -122,12 +122,12 @@ module f386_mem_ctrl (
                         arb_source <= 3'd3;
                         state      <= ARB_PT;
                     end else if (data_req && !ddram_busy) begin
-                        arb_addr   <= apply_a20(data_addr, a20_gate);
-                        arb_wdata  <= data_wdata;
-                        arb_wr     <= data_wr;
-                        arb_source <= 3'd2;
-                        arb_size   <= data_size;
-                        state      <= ARB_DATA;
+                        arb_addr    <= apply_a20(data_addr, a20_gate);
+                        arb_wdata   <= data_wdata;
+                        arb_wr      <= data_wr;
+                        arb_source  <= 3'd2;
+                        arb_byte_en <= data_byte_en;
+                        state       <= ARB_DATA;
                     end else if (ifetch_req && !ddram_busy) begin
                         arb_addr   <= apply_a20(ifetch_addr, a20_gate);
                         arb_wr     <= 1'b0;
@@ -151,17 +151,11 @@ module f386_mem_ctrl (
                         ddram_addr     <= arb_addr[27:0];
                         ddram_burstcnt <= 8'd1;
                         if (arb_wr) begin
-                            ddram_din <= {32'd0, arb_wdata};
-                            // Byte enable based on size and address alignment
-                            case (arb_size)
-                                2'd0: ddram_be <= 8'h01 << arb_addr[2:0]; // Byte
-                                2'd1: ddram_be <= 8'h03 << arb_addr[2:0]; // Word
-                                2'd2: ddram_be <= 8'h0F << arb_addr[2:0]; // Dword
-                                default: ddram_be <= 8'hFF;
-                            endcase
-                            ddram_we <= 1'b1;
-                            data_ack <= 1'b1;
-                            state    <= ARB_IDLE;
+                            ddram_din <= arb_wdata;
+                            ddram_be  <= arb_byte_en;
+                            ddram_we  <= 1'b1;
+                            data_ack  <= 1'b1;
+                            state     <= ARB_IDLE;
                         end else begin
                             ddram_rd <= 1'b1;
                             state    <= ARB_WAIT;
@@ -202,7 +196,7 @@ module f386_mem_ctrl (
                                 end
                             end
                             3'd2: begin // Data read
-                                data_rdata <= ddram_dout[31:0];
+                                data_rdata <= ddram_dout;
                                 data_ack   <= 1'b1;
                                 state      <= ARB_IDLE;
                             end

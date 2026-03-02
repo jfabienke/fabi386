@@ -60,6 +60,10 @@ module f386_decode (
     output logic         v_addr_index_valid,
     output logic [1:0]   v_addr_scale,
 
+    // Memory operand size (for LSQ, 0=byte, 1=word, 2=dword)
+    output logic [1:0]   u_mem_size,
+    output logic [1:0]   v_mem_size,
+
     // CPU Mode Context
     input  logic         pe_mode,       // CR0.PE — Protected Mode
     input  logic         v86_mode,      // EFLAGS.VM — Virtual 8086
@@ -472,6 +476,9 @@ module f386_decode (
 
         // Branch classification
         logic        is_indirect;   // Indirect branch (FF /2, FF /4, FF /5, far CALL/JMP)
+
+        // Effective operand size (for memory op sizing)
+        logic        eff_op32;      // 1=dword, 0=word (after prefix toggle)
     } predecode_t;
 
     function automatic predecode_t pre_decode(
@@ -512,6 +519,7 @@ module f386_decode (
         // Effective sizes (default XOR prefix toggle)
         eff_op32   = use_32bit ^ d.pref_66;
         eff_addr32 = use_32bit ^ d.pref_67;
+        d.eff_op32 = eff_op32;
 
         // ---- Phase 2: Identify Opcode ----
         b = stream[pos*8 +: 8];
@@ -836,6 +844,57 @@ module f386_decode (
     // =========================================================================
     // Operation Classification
     // =========================================================================
+    // -----------------------------------------------------------------
+    // Derive memory operand size from predecode (0=byte, 1=word, 2=dword)
+    // -----------------------------------------------------------------
+    // For x86 register/memory ALU forms, bit[0] of the opcode selects
+    // byte(0) vs word/dword(1). PUSH/POP/LEA and string ops are always
+    // word/dword. Two-byte (0F) MOVZX/MOVSX have explicit 8/16 source.
+    // This is a best-effort heuristic for P2a; sign-extension info is
+    // handled separately via agu_ld_signed (TODO).
+    function automatic logic [1:0] derive_mem_size(predecode_t pd);
+        if (pd.is_0f) begin
+            // MOVZX r,r/m8  (0F B6): byte source
+            // MOVSX r,r/m8  (0F BE): byte source
+            if (pd.opcode == 8'hB6 || pd.opcode == 8'hBE)
+                return 2'd0; // byte
+            // MOVZX r,r/m16 (0F B7): word source
+            // MOVSX r,r/m16 (0F BF): word source
+            if (pd.opcode == 8'hB7 || pd.opcode == 8'hBF)
+                return 2'd1; // word
+            // Default 2-byte: use eff_op32
+            return pd.eff_op32 ? 2'd2 : 2'd1;
+        end
+
+        // Byte-sized forms: ALU r/m8 (bit[0]=0 for opcodes 00-3F even),
+        // MOV r/m8 (88,8A,C6), TEST/XCHG r/m8, etc.
+        case (pd.opcode) inside
+            8'h88, 8'h8A, 8'hC6, 8'hA0, 8'hA2: return 2'd0; // MOV byte forms
+            [8'h00:8'h3F]: begin
+                // ALU family: bit[0]=0 → byte
+                if (!pd.opcode[0])
+                    return 2'd0;
+                return pd.eff_op32 ? 2'd2 : 2'd1;
+            end
+            // PUSH/POP/LEA always word/dword
+            [8'h50:8'h5F], 8'h68, 8'h6A, 8'h8D, 8'h9C, 8'h9D:
+                return pd.eff_op32 ? 2'd2 : 2'd1;
+            // MOV r/m16/32 forms
+            8'h89, 8'h8B, 8'hC7, 8'hA1, 8'hA3:
+                return pd.eff_op32 ? 2'd2 : 2'd1;
+            // Group 1 immediate: F6=byte, F7=word/dword
+            8'hF6: return 2'd0;
+            8'hF7: return pd.eff_op32 ? 2'd2 : 2'd1;
+            // Group 2 shifts: C0/D0/D2=byte, C1/D1/D3=word/dword
+            8'hC0, 8'hD0, 8'hD2: return 2'd0;
+            8'hC1, 8'hD1, 8'hD3: return pd.eff_op32 ? 2'd2 : 2'd1;
+            // Group 3/5 (FE byte, FF word/dword)
+            8'hFE: return 2'd0;
+            8'hFF: return pd.eff_op32 ? 2'd2 : 2'd1;
+            default: return pd.eff_op32 ? 2'd2 : 2'd1;
+        endcase
+    endfunction
+
     //
     // Map opcode to op_type_t for the OoO pipeline. This determines which
     // execution unit handles the instruction.
@@ -2320,6 +2379,8 @@ module f386_decode (
             v_addr_index          <= 3'h0;
             v_addr_index_valid    <= 0;
             v_addr_scale          <= 2'b00;
+            u_mem_size            <= 2'b00;
+            v_mem_size            <= 2'b00;
         end else if (s1_valid && rename_ready) begin
 
             // --- U-Pipe Instruction ---
@@ -2330,15 +2391,41 @@ module f386_decode (
             instr_u.op_cat      <= classify_op(pd_u);
             instr_u.p_dest      <= {2'b0, ru_u.dest};
             instr_u.dest_valid  <= ru_u.dest_valid;
-            instr_u.p_src_a     <= {2'b0, ru_u.src_a};
-            instr_u.p_src_b     <= {2'b0, ru_u.src_b};
-            instr_u.src_a_ready <= !ru_u.src_a_valid; // Ready if not needed
-            instr_u.src_b_ready <= !ru_u.src_b_valid;
+
+            // --- Source operand mapping (P2: memory-op aware) ---
+            // For OP_LOAD: val_a=base, val_b=index (for AGU)
+            // For OP_STORE: val_a=base (for EA), val_b=store data
+            // For others: default reg_usage mapping
+            if (classify_op(pd_u) == OP_LOAD && pd_u.has_mem) begin
+                // Load: src_a = addr_base (dependency tracked), src_b = addr_index
+                instr_u.p_src_a     <= {2'b0, ru_u.addr_base};
+                instr_u.src_a_ready <= !ru_u.addr_base_valid;
+                instr_u.p_src_b     <= {2'b0, ru_u.addr_index};
+                instr_u.src_b_ready <= !ru_u.addr_index_valid;
+            end else if (classify_op(pd_u) == OP_STORE && pd_u.has_mem) begin
+                // Store: src_a = addr_base, src_b = data register (from reg_usage src_a)
+                instr_u.p_src_a     <= {2'b0, ru_u.addr_base};
+                instr_u.src_a_ready <= !ru_u.addr_base_valid;
+                instr_u.p_src_b     <= {2'b0, ru_u.src_a};
+                instr_u.src_b_ready <= !ru_u.src_a_valid;
+            end else begin
+                instr_u.p_src_a     <= {2'b0, ru_u.src_a};
+                instr_u.p_src_b     <= {2'b0, ru_u.src_b};
+                instr_u.src_a_ready <= !ru_u.src_a_valid;
+                instr_u.src_b_ready <= !ru_u.src_b_valid;
+            end
+
             instr_u.val_a       <= 32'h0;
             instr_u.val_b       <= 32'h0;
             instr_u.rob_tag     <= 4'h0; // Assigned by ROB allocator
             instr_u.br_tag      <= '0;  // Assigned at dispatch in ooo_core_top
             instr_u.imm_value   <= pd_u.imm_value;
+            instr_u.lq_idx      <= '0;
+            instr_u.sq_idx      <= '0;
+            instr_u.addr_base_valid  <= ru_u.addr_base_valid;
+            instr_u.addr_index_valid <= ru_u.addr_index_valid;
+            instr_u.addr_scale  <= ru_u.addr_scale;
+            instr_u.mem_size    <= derive_mem_size(pd_u);
             instr_u_valid       <= !pd_u.is_prefix && !pd_u.invalid;
 
             // U-pipe branch target + indirect flag
@@ -2356,6 +2443,7 @@ module f386_decode (
             u_addr_index          <= ru_u.addr_index;
             u_addr_index_valid    <= ru_u.addr_index_valid;
             u_addr_scale          <= ru_u.addr_scale;
+            u_mem_size            <= derive_mem_size(pd_u);
 
             // --- V-Pipe Instruction ---
             instr_v.valid       <= v_eligible;
@@ -2365,15 +2453,34 @@ module f386_decode (
             instr_v.op_cat      <= classify_op(pd_v);
             instr_v.p_dest      <= {2'b0, ru_v.dest};
             instr_v.dest_valid  <= ru_v.dest_valid;
-            instr_v.p_src_a     <= {2'b0, ru_v.src_a};
-            instr_v.p_src_b     <= {2'b0, ru_v.src_b};
-            instr_v.src_a_ready <= !ru_v.src_a_valid;
-            instr_v.src_b_ready <= !ru_v.src_b_valid;
+            // V-pipe memory-op source override (mirrors U-pipe logic)
+            if (classify_op(pd_v) == OP_LOAD && pd_v.has_mem) begin
+                instr_v.p_src_a     <= {2'b0, ru_v.addr_base};
+                instr_v.src_a_ready <= !ru_v.addr_base_valid;
+                instr_v.p_src_b     <= {2'b0, ru_v.addr_index};
+                instr_v.src_b_ready <= !ru_v.addr_index_valid;
+            end else if (classify_op(pd_v) == OP_STORE && pd_v.has_mem) begin
+                instr_v.p_src_a     <= {2'b0, ru_v.addr_base};
+                instr_v.src_a_ready <= !ru_v.addr_base_valid;
+                instr_v.p_src_b     <= {2'b0, ru_v.src_a};
+                instr_v.src_b_ready <= !ru_v.src_a_valid;
+            end else begin
+                instr_v.p_src_a     <= {2'b0, ru_v.src_a};
+                instr_v.p_src_b     <= {2'b0, ru_v.src_b};
+                instr_v.src_a_ready <= !ru_v.src_a_valid;
+                instr_v.src_b_ready <= !ru_v.src_b_valid;
+            end
             instr_v.val_a       <= 32'h0;
             instr_v.val_b       <= 32'h0;
             instr_v.rob_tag     <= 4'h0;
             instr_v.br_tag      <= '0;
             instr_v.imm_value   <= pd_v.imm_value;
+            instr_v.lq_idx      <= '0;
+            instr_v.sq_idx      <= '0;
+            instr_v.addr_base_valid  <= ru_v.addr_base_valid;
+            instr_v.addr_index_valid <= ru_v.addr_index_valid;
+            instr_v.addr_scale  <= ru_v.addr_scale;
+            instr_v.mem_size    <= derive_mem_size(pd_v);
             instr_v_valid       <= v_eligible;
 
             // V-pipe branch target + indirect flag
@@ -2391,6 +2498,7 @@ module f386_decode (
             v_addr_index          <= ru_v.addr_index;
             v_addr_index_valid    <= ru_v.addr_index_valid;
             v_addr_scale          <= ru_v.addr_scale;
+            v_mem_size            <= derive_mem_size(pd_v);
 
         end else begin
             instr_u_valid         <= 0;

@@ -62,6 +62,8 @@ package f386_pkg;
     localparam bit CONF_ENABLE_MEM_FABRIC  = 1'b0;  // P2: unified memory fabric (replaces mem_ctrl)
 
     localparam int CONF_MEM_REQ_ID_W        = 6;     // Memory transaction ID width
+    localparam int CONF_LSQ_OUTSTANDING_DEPTH = 4;   // Max requests in flight from LSQ
+    localparam int CONF_LSQ_PEND_ID_W = $clog2(CONF_LSQ_OUTSTANDING_DEPTH);  // 2
 
     // --- Derived Type Widths ---
     localparam int PHYS_REG_WIDTH = $clog2(CONF_PHYS_REG_NUM);  // 5 for 32
@@ -418,6 +420,12 @@ package f386_pkg;
     localparam logic [3:0] DESC_CALL_GATE_286       = 4'h4;
     localparam logic [3:0] DESC_LDT                 = 4'h2;
     localparam logic [3:0] DESC_TASK_GATE           = 4'h5;
+
+    // --- MMIO Address Classification ---
+    // P2: VGA hole only. TODO: expand to PCI config, APIC, ISA MMIO.
+    function automatic logic is_mmio_addr(input logic [31:0] addr);
+        return (addr >= 32'h000A_0000 && addr <= 32'h000B_FFFF);
+    endfunction
 
     // --- Exception Vector Constants (ao486 defines.v:34-51) ---
     localparam logic [7:0] EXC_DE = 8'd0;   // Divide by zero

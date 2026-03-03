@@ -1,5 +1,5 @@
 /*
- * fabi386: Load-Store Queue (LSQ) v2.0 — Byte-Granular Forwarding
+ * fabi386: Load-Store Queue (LSQ) v3.0 — Multi-Outstanding Memory Path
  * -----------------------------------------------------------------
  * 8 load queue + 8 store queue entries with byte-level store-to-load
  * forwarding.  Enforces TSO memory ordering.
@@ -65,6 +65,7 @@ module f386_lsq (
     output logic         ld_cdb_valid,
     output rob_id_t      ld_cdb_tag,
     output logic [31:0]  ld_cdb_data,
+    output logic         ld_cdb_fault,
 
     // --- Retirement Interface ---
     input  logic         retire_st_valid,
@@ -87,6 +88,14 @@ module f386_lsq (
     input  logic         mem_rsp_valid,
     output logic         mem_rsp_ready,
     input  mem_rsp_t     mem_rsp_in,
+
+    // --- IO Path Load Completion (MMIO load bypassed LSQ, LQ entry still needs marking) ---
+    input  logic         io_ld_complete_valid,
+    input  lq_idx_t      io_ld_complete_idx,
+    input  logic [31:0]  io_ld_complete_data,
+
+    // --- Store Queue Empty (for IO path TSO serialization) ---
+    output logic         sq_empty,
 
     // --- Memory Dependency Predictor ---
     output logic         mdp_violation,      // Memory ordering violation detected
@@ -164,6 +173,7 @@ module f386_lsq (
     // =========================================================
     assign lq_full = (lq_count >= LQ_N[LQ_ID_WIDTH:0]);
     assign sq_full = (sq_count >= SQ_N[SQ_ID_WIDTH:0]);
+    assign sq_empty = (sq_count == 0);
     assign ld_dispatch_idx = lq_tail;
     assign st_dispatch_idx = sq_tail;
 
@@ -199,6 +209,12 @@ module f386_lsq (
                 lq_size[agu_ld_idx]       <= agu_ld_size;
                 lq_byte_en[agu_ld_idx]    <= agu_ld_byte_en;
                 lq_addr_valid[agu_ld_idx] <= 1'b1;
+            end
+
+            // IO path load completion (MMIO load bypassed LSQ data path)
+            if (io_ld_complete_valid && lq_valid[io_ld_complete_idx]) begin
+                lq_executed[io_ld_complete_idx] <= 1'b1;
+                lq_data[io_ld_complete_idx]     <= io_ld_complete_data;
             end
 
             // Retire (dequeue) completed loads
@@ -282,7 +298,7 @@ module f386_lsq (
                     logic [3:0] needed;
                     needed = agu_ld_byte_en;
 
-                    if ((sq_byte_en[i] & needed) == needed) begin
+                    if (needed != 4'h0 && (sq_byte_en[i] & needed) == needed) begin
                         // Full coverage — forward with byte-lane merge
                         fwd_hit = 1'b1;
                         // Merge only the bytes the store wrote
@@ -395,6 +411,9 @@ module f386_lsq (
             assign mem_req_out   = '0;
             assign mem_rsp_ready = 1'b0;
 
+            // No fault detection in dcache path
+            assign ld_cdb_fault = 1'b0;
+
             // Load execution FSM (dcache path — same structure, dcache response)
             always_ff @(posedge clk or negedge rst_n) begin
                 if (!rst_n || flush) begin
@@ -447,201 +466,217 @@ module f386_lsq (
             end
 
         end else begin : gen_mem_path
-            // ---- Split-Phase Memory Path (new backend FSM) ----
+            // ---- Multi-Outstanding Split-Phase Memory Path (P2 Step 5a) ----
+            //
+            // Up to CONF_LSQ_OUTSTANDING_DEPTH requests in flight (loads + store drains).
+            // Pending FIFO tracks metadata for response extraction/routing.
+            // Responses pop FIFO head — in-order guaranteed by single-outstanding shim.
 
-            // Backend FSM states
-            typedef enum logic [1:0] {
-                BE_IDLE    = 2'd0,
-                BE_LD_RSP  = 2'd1,
-                BE_ST_RSP  = 2'd2,
-                BE_DRAIN   = 2'd3
-            } be_state_t;
+            // ---- Pending FIFO ----
+            localparam int PEND_DEPTH = CONF_LSQ_OUTSTANDING_DEPTH;  // 4
+            localparam int PEND_ID_W  = CONF_LSQ_PEND_ID_W;          // 2
 
-            be_state_t be_state_q, be_state_d;
+            typedef struct packed {
+                logic           is_load;
+                lq_idx_t        lq_idx;       // for loads: which LQ entry
+                logic [31:0]    addr;         // for load extraction (addr[2:0])
+                logic [1:0]     size;         // for load extraction
+                logic           is_signed;    // for load extraction
+            } pend_entry_t;
 
-            // Backend response signals → bridge to LD_WAIT FSM
+            pend_entry_t               pend_data [PEND_DEPTH];
+            logic [PEND_DEPTH-1:0]     pend_valid;
+            logic [PEND_ID_W-1:0]      pend_wr_ptr, pend_rd_ptr;
+            logic [PEND_ID_W:0]        pend_count;
+
+            wire pend_full  = (pend_count == PEND_DEPTH[PEND_ID_W:0]);
+            wire pend_empty = (pend_count == 0);
+            wire pend_entry_t pend_head = pend_data[pend_rd_ptr];
+
+            // ---- Store Drain Pointer (ahead-of-head) ----
+            sq_idx_t sq_drain_ptr;
+
+            // Drainable: next un-issued committed store at sq_drain_ptr
+            wire drain_store_mo = sq_valid[sq_drain_ptr] && sq_committed[sq_drain_ptr] &&
+                                  sq_addr_valid[sq_drain_ptr] && sq_data_valid[sq_drain_ptr];
+
+            // ---- Load Request-Issued Flag ----
+            logic ld_req_issued;  // Prevents double-issue of same load
+
+            // ---- Backend Response Signals → bridge to LD_WAIT FSM ----
             logic        be_resp_valid;
             logic [31:0] be_resp_data;
+            logic        be_resp_fault;
             logic        store_drain_ack_be;
 
             assign mem_resp_valid  = be_resp_valid;
             assign mem_resp_data   = be_resp_data;
+            assign ld_cdb_fault    = be_resp_fault;
             assign store_drain_ack = store_drain_ack_be;
 
-            // Response handshake — driven from registered state (no comb loop)
-            assign mem_rsp_ready = (be_state_q != BE_IDLE);
+            // ---- Response Handshake ----
+            assign mem_rsp_ready = !pend_empty;
 
-            // Request/response fire signals
-            wire req_fire = mem_req_valid && mem_req_ready;
-            wire rsp_fire = mem_rsp_valid && mem_rsp_ready;
+            // ---- Issue + Response Fire ----
+            wire can_issue   = !pend_full && !flush;
+            wire issue_load  = can_issue && (ld_state == LD_WAIT) && !ld_req_issued;
+            wire issue_store = can_issue && !issue_load && drain_store_mo;
+            wire issue_any   = issue_load || issue_store;
+            wire issue_fire  = issue_any && mem_req_ready;
 
-            // ---- Store alignment: addr[2] dword-half selection ----
-            wire [63:0] st_wdata_aligned = sq_addr[sq_head][2]
-                ? {sq_data[sq_head], 32'd0}
-                : {32'd0, sq_data[sq_head]};
-            wire [7:0]  st_byte_en_aligned = sq_addr[sq_head][2]
-                ? {sq_byte_en[sq_head], 4'h0}
-                : {4'h0, sq_byte_en[sq_head]};
+            wire rsp_fire    = mem_rsp_valid && mem_rsp_ready;
+            // Synthesis-safe ID check: gate rsp_consume on client bit + pending index
+            wire rsp_id_ok   = (mem_rsp_in.id[PEND_ID_W] == 1'b0) &&
+                               (mem_rsp_in.id[PEND_ID_W-1:0] == pend_rd_ptr);
+            wire rsp_consume = rsp_fire && !pend_empty && rsp_id_ok;
 
-            // ---- Load extraction from 64-bit raw beat ----
-            wire [63:0] raw_beat       = mem_rsp_in.rdata[63:0];
-            wire [5:0]  ld_shift_amt   = {ld_wait_addr[2:0], 3'b000};
-            wire [63:0] ld_shifted64   = raw_beat >> ld_shift_amt;
-            wire [31:0] ld_shifted     = ld_shifted64[31:0];
-            wire [31:0] extracted      = sign_zero_extend(ld_shifted, ld_wait_size,
-                                                          ld_wait_signed);
+            // ---- Store Alignment: addr[2] dword-half selection (sq_drain_ptr) ----
+            wire [63:0] st_wdata_aligned = sq_addr[sq_drain_ptr][2]
+                ? {sq_data[sq_drain_ptr], 32'd0}
+                : {32'd0, sq_data[sq_drain_ptr]};
+            wire [7:0]  st_byte_en_aligned = sq_addr[sq_drain_ptr][2]
+                ? {sq_byte_en[sq_drain_ptr], 4'h0}
+                : {4'h0, sq_byte_en[sq_drain_ptr]};
 
-            // ---- Request formation (combinational, in BE_IDLE) ----
+            // ---- Load Extraction from 64-bit raw beat (pending table metadata) ----
+            wire [63:0] raw_beat      = mem_rsp_in.rdata[63:0];
+            wire [5:0]  ld_shift_amt  = {pend_head.addr[2:0], 3'b000};
+            wire [63:0] ld_shifted64  = raw_beat >> ld_shift_amt;
+            wire [31:0] extracted     = sign_zero_extend(ld_shifted64[31:0],
+                                                          pend_head.size, pend_head.is_signed);
+
+            // ---- Request Formation ----
             always_comb begin
-                mem_req_valid = 1'b0;
+                mem_req_valid = issue_any;
                 mem_req_out   = '0;
 
-                if (be_state_q == BE_IDLE) begin
-                    if (ld_state == LD_WAIT) begin
-                        mem_req_valid       = 1'b1;
-                        mem_req_out.id      = '0;
-                        mem_req_out.op      = MEM_OP_LD;
-                        mem_req_out.addr    = ld_wait_addr;
-                        mem_req_out.size    = ld_wait_size;
-                        mem_req_out.byte_en = 8'h00;
-                        mem_req_out.wdata   = 64'd0;
-                    end else if (drain_store) begin
-                        mem_req_valid       = 1'b1;
-                        mem_req_out.id      = '0;
-                        mem_req_out.op      = MEM_OP_ST;
-                        mem_req_out.addr    = sq_addr[sq_head];
-                        mem_req_out.size    = sq_size[sq_head];
-                        mem_req_out.byte_en = st_byte_en_aligned;
-                        mem_req_out.wdata   = st_wdata_aligned;
-                    end
+                if (issue_load) begin
+                    mem_req_out.id           = {{(CONF_MEM_REQ_ID_W-PEND_ID_W-1){1'b0}}, 1'b0, pend_wr_ptr};
+                    mem_req_out.op           = MEM_OP_LD;
+                    mem_req_out.addr         = ld_wait_addr;
+                    mem_req_out.size         = ld_wait_size;
+                    mem_req_out.byte_en      = 8'h00;
+                    mem_req_out.wdata        = 64'd0;
+                    mem_req_out.cacheable    = 1'b1;
+                    mem_req_out.strong_order = 1'b0;
+                end else if (issue_store) begin
+                    mem_req_out.id           = {{(CONF_MEM_REQ_ID_W-PEND_ID_W-1){1'b0}}, 1'b0, pend_wr_ptr};
+                    mem_req_out.op           = MEM_OP_ST;
+                    mem_req_out.addr         = sq_addr[sq_drain_ptr];
+                    mem_req_out.size         = sq_size[sq_drain_ptr];
+                    mem_req_out.byte_en      = st_byte_en_aligned;
+                    mem_req_out.wdata        = st_wdata_aligned;
+                    mem_req_out.cacheable    = !is_mmio_addr(sq_addr[sq_drain_ptr]);
+                    mem_req_out.strong_order =  is_mmio_addr(sq_addr[sq_drain_ptr]);
                 end
             end
 
-            // ---- Backend state transition logic ----
-            always_comb begin
-                be_state_d = be_state_q;
-
-                case (be_state_q)
-                    BE_IDLE: begin
-                        if (req_fire) begin
-                            if (ld_state == LD_WAIT)
-                                be_state_d = BE_LD_RSP;
-                            else
-                                be_state_d = BE_ST_RSP;
-                        end
-                    end
-
-                    BE_LD_RSP: begin
-                        if (flush && !rsp_fire)
-                            be_state_d = BE_DRAIN;
-                        else if (rsp_fire)
-                            be_state_d = BE_IDLE;
-                    end
-
-                    BE_ST_RSP: begin
-                        if (flush && !rsp_fire)
-                            be_state_d = BE_DRAIN;
-                        else if (rsp_fire)
-                            be_state_d = BE_IDLE;
-                    end
-
-                    BE_DRAIN: begin
-                        if (rsp_fire)
-                            be_state_d = BE_IDLE;
-                    end
-                endcase
-            end
-
-            // ---- Backend registered state + response extraction ----
-            always_ff @(posedge clk or negedge rst_n) begin
-                if (!rst_n) begin
-                    be_state_q         <= BE_IDLE;
-                    be_resp_valid      <= 1'b0;
-                    be_resp_data       <= 32'd0;
-                    store_drain_ack_be <= 1'b0;
-                end else if (flush) begin
-                    be_state_q         <= be_state_d;  // May transition to BE_DRAIN
-                    be_resp_valid      <= 1'b0;
-                    be_resp_data       <= 32'd0;
-                    store_drain_ack_be <= 1'b0;
-                end else begin
-                    be_state_q         <= be_state_d;
-                    be_resp_valid      <= 1'b0;
-                    store_drain_ack_be <= 1'b0;
-
-                    case (be_state_q)
-                        BE_LD_RSP: begin
-                            if (rsp_fire) begin
-                                `ifndef SYNTHESIS
-                                assert (mem_rsp_in.id == '0)
-                                    else $error("LSQ: unexpected rsp id=%0d (expected 0)",
-                                                mem_rsp_in.id);
-                                `endif
-                                case (mem_rsp_in.resp)
-                                    MEM_RESP_OK: begin
-                                        be_resp_valid <= 1'b1;
-                                        be_resp_data  <= extracted;
-                                    end
-                                    MEM_RESP_RETRY: begin
-                                        // Return to BE_IDLE; LD_WAIT re-requests next cycle
-                                    end
-                                    default: begin // MEM_RESP_FAULT, MEM_RESP_MISALIGN
-                                        // Complete with poison data to unblock LD_WAIT.
-                                        // Exception unit (when wired) kills via ROB before retire.
-                                        be_resp_valid <= 1'b1;
-                                        be_resp_data  <= 32'hDEAD_BEEF;
-                                        `ifndef SYNTHESIS
-                                        $fatal(1, "LSQ: fatal resp %s on load addr=%08h",
-                                               mem_rsp_in.resp.name(), ld_wait_addr);
-                                        `endif
-                                    end
-                                endcase
-                            end
-                        end
-
-                        BE_ST_RSP: begin
-                            if (rsp_fire) begin
-                                `ifndef SYNTHESIS
-                                assert (mem_rsp_in.id == '0)
-                                    else $error("LSQ: unexpected rsp id=%0d on store",
-                                                mem_rsp_in.id);
-                                `endif
-                                case (mem_rsp_in.resp)
-                                    MEM_RESP_OK: begin
-                                        store_drain_ack_be <= 1'b1;
-                                    end
-                                    MEM_RESP_RETRY: begin
-                                        // Do NOT ack — store stays at sq_head, will re-drain
-                                    end
-                                    default: begin // MEM_RESP_FAULT, MEM_RESP_MISALIGN
-                                        // Ack the drain to unblock SQ progress.
-                                        // Exception unit (when wired) kills via ROB before retire.
-                                        store_drain_ack_be <= 1'b1;
-                                        `ifndef SYNTHESIS
-                                        $fatal(1, "LSQ: fatal resp %s on store addr=%08h",
-                                               mem_rsp_in.resp.name(), sq_addr[sq_head]);
-                                        `endif
-                                    end
-                                endcase
-                            end
-                        end
-
-                        BE_DRAIN: begin
-                            // Silently discard stale response after flush
-                        end
-
-                        default: ;
-                    endcase
-                end
-            end
-
-            // ---- Load execution FSM ----
+            // ---- Response Handling (registered) ----
             always_ff @(posedge clk or negedge rst_n) begin
                 if (!rst_n || flush) begin
-                    ld_state     <= LD_IDLE;
-                    ld_cdb_valid <= 1'b0;
+                    be_resp_valid      <= 1'b0;
+                    be_resp_data       <= 32'd0;
+                    be_resp_fault      <= 1'b0;
+                    store_drain_ack_be <= 1'b0;
+                end else begin
+                    be_resp_valid      <= 1'b0;
+                    be_resp_fault      <= 1'b0;
+                    store_drain_ack_be <= 1'b0;
+
+                    if (rsp_consume) begin
+                        if (pend_head.is_load) begin
+                            case (mem_rsp_in.resp)
+                                MEM_RESP_OK: begin
+                                    be_resp_valid <= 1'b1;
+                                    be_resp_data  <= extracted;
+                                end
+                                default: begin // MEM_RESP_FAULT, MEM_RESP_MISALIGN
+                                    be_resp_valid <= 1'b1;
+                                    be_resp_data  <= 32'hDEAD_BEEF;
+                                    be_resp_fault <= 1'b1;
+                                    `ifndef SYNTHESIS
+                                    $warning("LSQ-MO: fault resp %s on load addr=%08h",
+                                             mem_rsp_in.resp.name(), pend_head.addr);
+                                    `endif
+                                end
+                            endcase
+                        end else begin
+                            // Store drain response — ack regardless of fault
+                            store_drain_ack_be <= 1'b1;
+                            `ifndef SYNTHESIS
+                            if (mem_rsp_in.resp != MEM_RESP_OK)
+                                $warning("LSQ-MO: fault resp %s on store addr=%08h",
+                                         mem_rsp_in.resp.name(), pend_head.addr);
+                            `endif
+                        end
+                    end
+                end
+            end
+
+            // ---- Pending FIFO + sq_drain_ptr Registers ----
+            // Note: ld_req_issued is driven solely by the LD FSM block below.
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n) begin
+                    pend_valid    <= '0;
+                    pend_wr_ptr   <= '0;
+                    pend_rd_ptr   <= '0;
+                    pend_count    <= '0;
+                    sq_drain_ptr  <= '0;
+                end else if (flush) begin
+                    pend_valid    <= '0;
+                    pend_wr_ptr   <= '0;
+                    pend_rd_ptr   <= '0;
+                    pend_count    <= '0;
+                    sq_drain_ptr  <= '0;
+                end else begin
+                    // Pending write (on issue)
+                    if (issue_fire) begin
+                        pend_data[pend_wr_ptr] <= '{
+                            is_load:   issue_load,
+                            lq_idx:    ld_result_idx,
+                            addr:      issue_load ? ld_wait_addr : sq_addr[sq_drain_ptr],
+                            size:      issue_load ? ld_wait_size : sq_size[sq_drain_ptr],
+                            is_signed: issue_load ? ld_wait_signed : 1'b0
+                        };
+                        pend_valid[pend_wr_ptr] <= 1'b1;
+                        pend_wr_ptr <= pend_wr_ptr + PEND_ID_W'(1);
+                    end
+
+                    // Pending read (on response consume)
+                    if (rsp_consume) begin
+                        pend_valid[pend_rd_ptr] <= 1'b0;
+                        pend_rd_ptr <= pend_rd_ptr + PEND_ID_W'(1);
+                    end
+
+                    // Pending count
+                    case ({issue_fire, rsp_consume})
+                        2'b10:   pend_count <= pend_count + (PEND_ID_W+1)'(1);
+                        2'b01:   pend_count <= pend_count - (PEND_ID_W+1)'(1);
+                        default: ;
+                    endcase
+
+                    // sq_drain_ptr advances on store issue
+                    if (issue_fire && issue_store)
+                        sq_drain_ptr <= sq_drain_ptr + sq_idx_t'(1);
+
+                end
+            end
+
+            // ---- Load execution FSM + ld_req_issued ----
+            // ld_req_issued is driven HERE (not in pending-table block) so that
+            // it clears on the same cycle ld_state leaves LD_WAIT, preventing a
+            // 1-cycle window where a duplicate load could be re-issued.
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n || flush) begin
+                    ld_state      <= LD_IDLE;
+                    ld_cdb_valid  <= 1'b0;
+                    ld_req_issued <= 1'b0;
                 end else begin
                     ld_cdb_valid <= 1'b0;
+
+                    // ld_req_issued: set on load issue fire
+                    if (issue_fire && issue_load)
+                        ld_req_issued <= 1'b1;
 
                     case (ld_state)
                         LD_IDLE: begin
@@ -677,7 +712,8 @@ module f386_lsq (
                                 ld_cdb_data  <= mem_resp_data;
                                 lq_data[ld_result_idx]     <= mem_resp_data;
                                 lq_executed[ld_result_idx] <= 1'b1;
-                                ld_state     <= LD_IDLE;
+                                ld_state      <= LD_IDLE;
+                                ld_req_issued <= 1'b0;  // Clear HERE, same cycle as LD_WAIT→LD_IDLE
                             end
                         end
 
@@ -706,24 +742,20 @@ module f386_lsq (
                 end
             end
 
-            // Store drain invariants — full dword-lane enforcement
-            always_ff @(posedge clk) if (rst_n && drain_store) begin : store_drain_checks
+            // Store drain invariants at ack time (sq_head) — redundant with issue-time check
+            always_ff @(posedge clk) if (rst_n && store_drain_ack_be) begin : store_drain_checks
                 automatic logic [1:0] st_ofs = sq_addr[sq_head][1:0];
-                // Reject cross-dword stores: byte at any offset is fine,
-                // word must have addr[1:0] <= 2, dword must have addr[1:0] == 0.
                 case (sq_size[sq_head])
-                    2'd0: ; // byte — all offsets valid
+                    2'd0: ;
                     2'd1: assert (st_ofs <= 2'd2)
                               else $fatal(1, "LSQ: word store crosses dword boundary addr[1:0]=%0d",
                                            st_ofs);
                     2'd2: assert (st_ofs == 2'd0)
                               else $fatal(1, "LSQ: dword store misaligned addr[1:0]=%0d", st_ofs);
-                    default: ; // caught by size!=3 assert below
+                    default: ;
                 endcase
-                // Compute expected mask with 5-bit intermediate to detect truncation
                 begin
                     logic [4:0] wide_mask;
-                    logic [3:0] expected_mask;
                     case (sq_size[sq_head])
                         2'd0: wide_mask = 5'b00001 << st_ofs;
                         2'd1: wide_mask = 5'b00011 << st_ofs;
@@ -731,18 +763,104 @@ module f386_lsq (
                         default: wide_mask = 5'b01111;
                     endcase
                     assert (wide_mask[4] == 1'b0)
-                        else $fatal(1, "LSQ: store byte_en overflows dword lane size=%0d addr[1:0]=%0d",
-                                     sq_size[sq_head], st_ofs);
-                    expected_mask = wide_mask[3:0];
-                    assert (sq_byte_en[sq_head] == expected_mask)
-                        else $fatal(1, "LSQ: sq_byte_en=%04b != expected %04b for size=%0d addr[1:0]=%0d",
-                                     sq_byte_en[sq_head], expected_mask,
-                                     sq_size[sq_head], st_ofs);
+                        else $fatal(1, "LSQ: store byte_en overflows dword lane");
+                    assert (sq_byte_en[sq_head] == wide_mask[3:0])
+                        else $fatal(1, "LSQ: sq_byte_en=%04b != expected %04b",
+                                     sq_byte_en[sq_head], wide_mask[3:0]);
                 end
                 assert (sq_byte_en[sq_head] != 4'h0)
                     else $fatal(1, "LSQ: store drain with empty byte_en");
                 assert (sq_size[sq_head] != 2'd3)
-                    else $fatal(1, "LSQ: 8-byte store not supported in this phase");
+                    else $fatal(1, "LSQ: 8-byte store not supported");
+            end
+
+            // Store shape assertions at issue time (sq_drain_ptr)
+            always_ff @(posedge clk) if (rst_n && issue_fire && issue_store) begin : drain_issue_checks
+                automatic logic [1:0] st_ofs = sq_addr[sq_drain_ptr][1:0];
+                case (sq_size[sq_drain_ptr])
+                    2'd0: ;
+                    2'd1: assert (st_ofs <= 2'd2)
+                              else $fatal(1, "LSQ-MO: word store crosses dword boundary addr[1:0]=%0d",
+                                           st_ofs);
+                    2'd2: assert (st_ofs == 2'd0)
+                              else $fatal(1, "LSQ-MO: dword store misaligned addr[1:0]=%0d", st_ofs);
+                    default: ;
+                endcase
+                begin
+                    logic [4:0] wide_mask;
+                    case (sq_size[sq_drain_ptr])
+                        2'd0: wide_mask = 5'b00001 << st_ofs;
+                        2'd1: wide_mask = 5'b00011 << st_ofs;
+                        2'd2: wide_mask = 5'b01111;
+                        default: wide_mask = 5'b01111;
+                    endcase
+                    assert (wide_mask[4] == 1'b0)
+                        else $fatal(1, "LSQ-MO: store byte_en overflows dword");
+                    assert (sq_byte_en[sq_drain_ptr] == wide_mask[3:0])
+                        else $fatal(1, "LSQ-MO: sq_byte_en=%04b != expected %04b",
+                                     sq_byte_en[sq_drain_ptr], wide_mask[3:0]);
+                end
+                assert (sq_byte_en[sq_drain_ptr] != 4'h0)
+                    else $fatal(1, "LSQ-MO: store drain with empty byte_en");
+                assert (sq_size[sq_drain_ptr] != 2'd3)
+                    else $fatal(1, "LSQ-MO: 8-byte store not supported");
+            end
+
+            // Pending overflow
+            always_ff @(posedge clk) if (rst_n) begin
+                assert (!(issue_fire && pend_full))
+                    else $fatal(1, "LSQ-MO: pending FIFO overflow");
+            end
+
+            // Response ID mismatch (complements synthesis-safe rsp_id_ok gate)
+            always_ff @(posedge clk) if (rst_n) begin
+                if (rsp_fire && !rsp_id_ok && !pend_empty)
+                    $error("LSQ-MO: response ID mismatch id=%0d expected rd_ptr=%0d client_bit=%0d",
+                           mem_rsp_in.id, pend_rd_ptr, mem_rsp_in.id[PEND_ID_W]);
+            end
+
+            // No RETRY: shim never produces RETRY; fatal if seen
+            always_ff @(posedge clk) if (rst_n) begin
+                if (rsp_consume)
+                    assert (mem_rsp_in.resp != MEM_RESP_RETRY)
+                        else $fatal(1, "LSQ-MO: unexpected RETRY response");
+            end
+
+            // Watchdog — detect stuck requests (no progress for 1024 cycles)
+            logic [10:0] watchdog_ctr;
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n) begin
+                    watchdog_ctr <= '0;
+                end else if (flush) begin
+                    watchdog_ctr <= '0;
+                end else if (pend_empty) begin
+                    watchdog_ctr <= '0;
+                end else if (issue_fire || rsp_consume) begin
+                    watchdog_ctr <= '0;
+                end else begin
+                    watchdog_ctr <= watchdog_ctr + 11'd1;
+                    assert (watchdog_ctr < 11'd1024)
+                        else $fatal(1, "LSQ-MO: watchdog fired -- no progress for 1024 cycles (pend_count=%0d)",
+                                     pend_count);
+                end
+            end
+
+            // Flush assertions: queues must be empty one cycle after flush
+            logic flush_d1;
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    flush_d1 <= 1'b0;
+                else
+                    flush_d1 <= flush;
+            end
+
+            always_ff @(posedge clk) if (rst_n && flush_d1 && !flush) begin
+                assert (lq_count == 0)
+                    else $error("LSQ: lq_count=%0d after flush (expected 0)", lq_count);
+                assert (sq_count == 0)
+                    else $error("LSQ: sq_count=%0d after flush (expected 0)", sq_count);
+                assert (pend_count == 0)
+                    else $error("LSQ-MO: pend_count=%0d after flush (expected 0)", pend_count);
             end
             `endif
 

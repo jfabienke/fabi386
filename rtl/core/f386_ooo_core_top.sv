@@ -229,6 +229,9 @@ module f386_ooo_core_top (
     // --- LSQ CDB1 active (gates V-pipe dispatch to prevent CDB1 collision) ---
     logic lsq_cdb1_active;
 
+    // --- LSQ load issue stall (gates IQ exec_ready to prevent load dequeue when LD_WAIT busy) ---
+    logic lsq_load_issue_stall;
+
     // --- LSQ ↔ ROB wiring (driven by gen_lsq_memif, stubbed when gate OFF) ---
     lq_idx_t  rob_dispatch_u_lq_idx;
     sq_idx_t  rob_dispatch_u_sq_idx;
@@ -681,7 +684,7 @@ module f386_ooo_core_top (
 
         .issue_instr     (iq_issue_instr),
         .issue_valid     (iq_issue_valid),
-        .exec_ready      (exec_u_ready),
+        .exec_ready      (exec_u_ready && !lsq_load_issue_stall),
 
         // CDB (for wakeup and operand capture)
         .cdb0_valid      (cdb0_wr_valid),    // Gate wakeup by dest_valid
@@ -1274,8 +1277,8 @@ module f386_ooo_core_top (
         // ---------------------------------------------------------
         wire mem_dispatch_blocked = (dec_instr_u.op_cat == OP_LOAD  && lsq_lq_full) ||
                                     (dec_instr_u.op_cat == OP_STORE && lsq_sq_full);
-        assign lsq_dispatch_blocked = mem_dispatch_blocked;
-        assign lsq_cdb1_active      = lsq_ld_cdb_valid;
+        assign lsq_dispatch_blocked  = mem_dispatch_blocked;
+        assign lsq_cdb1_active       = lsq_ld_cdb_valid;
 
         // Wire LSQ indices to ROB
         assign rob_dispatch_u_lq_idx = lsq_ld_dispatch_idx;
@@ -1339,22 +1342,34 @@ module f386_ooo_core_top (
         // ---------------------------------------------------------
         logic [31:0] computed_ea;
 
+        // AGU index_valid: enabled for loads (val_b = index value).
+        // Disabled for stores (val_b = store DATA, not index) — indexed
+        // stores require 3 operands and must be decomposed by microcode.
+        wire agu_index_en = iq_issue_instr.addr_index_valid &&
+                            (iq_issue_instr.op_cat == OP_LOAD);
+
         f386_agu u_agu (
             .seg_base     (32'd0),            // Flat model (P2 simplification)
             .base_val     (iq_issue_instr.val_a),
             .base_valid   (iq_issue_instr.addr_base_valid),
             .index_val    (iq_issue_instr.val_b),
-            .index_valid  (iq_issue_instr.addr_index_valid &&
-                           iq_issue_instr.op_cat == OP_LOAD),
+            .index_valid  (agu_index_en),
             .scale        (iq_issue_instr.addr_scale),
             .displacement (iq_issue_instr.imm_value),
             .linear_addr  (computed_ea),
             .a20_gate     (a20_gate)
         );
 
-        // Store EA: base + displacement (no index — index stores need microcode)
-        wire [31:0] store_ea = (iq_issue_instr.addr_base_valid ? iq_issue_instr.val_a : 32'd0)
-                              + iq_issue_instr.imm_value;
+        // Stores also use computed_ea (= base + disp, index_valid=0).
+        // Indexed stores compute wrong EA (missing index*scale) — guarded
+        // by assertion below. Requires microcode decomposition to fix.
+        // synthesis translate_off
+        always @(posedge clk) begin
+            if (agu_st_fire && iq_issue_instr.addr_index_valid)
+                $warning("LSQ: indexed store at PC=%08h — EA missing index*scale (needs microcode)",
+                         iq_issue_instr.pc);
+        end
+        // synthesis translate_on
 
         // ---------------------------------------------------------
         // Byte-enable derivation from size + address alignment
@@ -1374,7 +1389,7 @@ module f386_ooo_core_top (
                 4'b01_00: size_to_byte_en = 4'b0011;
                 4'b01_01: size_to_byte_en = 4'b0110;
                 4'b01_10: size_to_byte_en = 4'b1100;
-                4'b01_11: size_to_byte_en = 4'b1000; // Misaligned: partial (low half)
+                4'b01_11: size_to_byte_en = 4'b1111; // Cross-dword: conservative full mask (split access TODO)
                 // Dword (size=2): full mask regardless of alignment
                 4'b10_00: size_to_byte_en = 4'b1111;
                 4'b10_01: size_to_byte_en = 4'b1111;
@@ -1407,7 +1422,8 @@ module f386_ooo_core_top (
         wire agu_ld_fire = iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD) && !ld_in_flight;
         wire agu_st_fire = iq_issue_valid && (iq_issue_instr.op_cat == OP_STORE);
 
-        wire [31:0] agu_st_addr = store_ea;
+        // Gate IQ exec_ready so loads aren't dequeued when LD_WAIT is busy
+        assign lsq_load_issue_stall = ld_in_flight && (iq_issue_instr.op_cat == OP_LOAD);
 
         // ROB retirement signals come from top-level wires
         // (rob_retire_u_sq_idx_w, rob_retire_u_is_store_w)
@@ -1455,10 +1471,10 @@ module f386_ooo_core_top (
             // AGU store
             .agu_st_valid     (agu_st_fire),
             .agu_st_idx       (iq_issue_instr.sq_idx),
-            .agu_st_addr      (agu_st_addr),
+            .agu_st_addr      (computed_ea),
             .agu_st_data      (iq_issue_instr.val_b),
             .agu_st_size      (iq_issue_instr.mem_size),
-            .agu_st_byte_en   (size_to_byte_en(iq_issue_instr.mem_size, agu_st_addr[1:0])),
+            .agu_st_byte_en   (size_to_byte_en(iq_issue_instr.mem_size, computed_ea[1:0])),
 
             // CDB load result
             .ld_cdb_valid     (lsq_ld_cdb_valid),
@@ -1524,6 +1540,7 @@ module f386_ooo_core_top (
         // ---------------------------------------------------------
         assign lsq_dispatch_blocked   = 1'b0;
         assign lsq_cdb1_active        = 1'b0;
+        assign lsq_load_issue_stall   = 1'b0;
         assign rob_dispatch_u_lq_idx  = '0;
         assign rob_dispatch_u_sq_idx  = '0;
 

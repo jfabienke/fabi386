@@ -1,44 +1,65 @@
-# fabi386: Final Timing & Verification Summary
+# fabi386 Timing & Verification Summary (Current)
 
-## 1. Timing Analysis (150MHz Target)
+**Updated:** 2026-03-02  
+**Reference commit:** `f919624`
 
-- **Toolchain:** Yosys + nextpnr (or vendor-specific synthesis/PnR)
-- **Constraint:** `FREQUENCY PORT "clk_core" 150.0 MHz;`
-- **Reference Result:** PASS (Worst Negative Slack: **+0.245 ns**)
-- **Critical Path:** MMU TLB Tag Comparison → Pipeline Stall Logic
-- **Optimization:** Applied `(* syn_keep, nomerge *)` attributes to the TLB comparator
-  tree to prevent logic duplication that was bloating routing delays.
-- **Note:** Timing results are implementation-specific and will vary by target FPGA.
+This file tracks the current verification/timing posture of the active codebase.
+It replaces older "final"/aspirational claims.
 
-## 2. RE Engine Validation (AAR Suite)
+---
 
-- **Shadow Stack:** Successfully tracked 100% of calls in a standard BIOS boot sequence.
-  Correctly flagged a deliberate "Stack Pivot" in a sample copy-protection loader.
-- **Stride Detection:** Identified RGB palette updates at 0x3C9 with 3-byte stride accuracy.
-- **PASC Classification:** Latency-based detection correctly distinguished between internal
-  256MB HyperRAM and external ISA-bus peripherals with 100% reliability in simulation.
+## 1. Synthesis Snapshot
 
-## 3. Acceleration Benchmarks (Estimated)
+Most recent documented Quartus analysis/synthesis snapshot is tracked in
+`docs/fpga_resource_budget.md` (Cyclone V / DE10-Nano).
 
-| Metric             | Result                                                          |
-|--------------------|-----------------------------------------------------------------|
-| BitBlt Performance | Solid Fill 640x480x8bpp in **2.05ms** (zero CPU cycles)        |
-| Disk Throughput    | IDE DMA **18.2 MB/s** sequential read from SDHC (bypasses PIO) |
-| IPC (Measured)     | **1.28** on ALU/Branch intensive workloads (Dhrystone)          |
+Key reported utilization baseline (from that document):
+- ALMs: 11,206 / 41,910
+- ALUTs: 14,764 / 83,820
+- Registers: 5,517 / 166,036
+- DSP: 9 / 112
 
-## 4. Hardware Stability
+Important context:
+- This snapshot does not imply full end-to-end P2 memory integration closure.
+- Some blocks are feature-gated or not on the active execution path.
 
-- **Thermal:** 150MHz @ 66% utilization → **680mW** estimated power draw.
-  Module heat-spreader sufficient for enclosed 386 cases.
-- **Signal Integrity:** Differential HyperBus clock matched to within **5ps skew**
-  across the 6-layer PCB.
+---
 
-## Key Specifications Summary
+## 2. Verification Status
 
-| Parameter          | Value                                        |
-|--------------------|----------------------------------------------|
-| Core Clock         | 150 MHz                                      |
-| FPGA Requirements  | ~68K LUTs, 170 BRAM (18Kb), 60 DSP (18x18)  |
-| Power (reference)  | ~680mW @ 66% utilization                     |
-| External Memory    | 256MB HyperRAM                               |
-| PCB (reference)    | 6-layer with differential HyperBus           |
+### Available and active
+
+- Verilator testbench suite under `bench/verilator/`
+- Formal properties under `bench/formal/` for ALU/ROB/SegCache/LSQ/TLB
+- sv2v full-tree transpile checks used as regression sanity gate
+
+### Not yet signoff-complete
+
+- End-to-end LSQ-in-core memory integration (P2)
+- Split-phase shim/fabric deadlock stress coverage
+- Full memory-fault retirement/exception delivery integration checks
+- Post-fit timing signoff for final integrated configuration
+
+---
+
+## 3. Timing Position
+
+Current status should be treated as:
+
+- **Synthesis-validated for current build configurations**
+- **Not a final timing-closure signoff for all planned P2/P3 features**
+
+Any MHz/WNS claim must be tied to:
+1. exact commit,
+2. exact Quartus flow/settings,
+3. exact enabled feature gates,
+4. generated report artifact.
+
+---
+
+## 4. Next Required Evidence (P2)
+
+1. Build with `CONF_ENABLE_LSQ_MEMIF` path and collect synthesis/timing reports.
+2. Add memory-handshake stress regressions (flush + retry + backpressure).
+3. Re-run resource/timing snapshots after shim/FIFO/ID milestones.
+4. Publish per-milestone artifacts in `docs/fpga_resource_budget.md` or a dedicated report file.

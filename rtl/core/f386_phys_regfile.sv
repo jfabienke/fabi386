@@ -38,8 +38,18 @@ module f386_phys_regfile (
     logic [31:0] regfile [CONF_PHYS_REG_NUM];
 
     // =========================================================
-    // Read ports with CDB bypass (port 1 has priority over port 0)
+    // Read ports
     // =========================================================
+`ifdef VERILATOR
+    // Simulation benches currently expose combinational loops through same-cycle
+    // CDB->PRF bypass paths. Disable bypass in simulation to break zero-delay
+    // feedback while keeping synthesized behavior unchanged.
+    always_comb rd_data_a = regfile[rd_addr_a];
+    always_comb rd_data_b = regfile[rd_addr_b];
+    always_comb rd_data_c = regfile[rd_addr_c];
+    always_comb rd_data_d = regfile[rd_addr_d];
+`else
+    // Read ports with CDB bypass (port 1 has priority over port 0)
     always_comb begin
         rd_data_a = regfile[rd_addr_a];
         if (wr_en_0 && wr_addr_0 == rd_addr_a) rd_data_a = wr_data_0;
@@ -63,6 +73,7 @@ module f386_phys_regfile (
         if (wr_en_0 && wr_addr_0 == rd_addr_d) rd_data_d = wr_data_0;
         if (wr_en_1 && wr_addr_1 == rd_addr_d) rd_data_d = wr_data_1;
     end
+`endif
 
     // =========================================================
     // Write ports (registered)

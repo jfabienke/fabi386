@@ -18,7 +18,11 @@ module f386_branch_predict_gshare (
     // Feedback from Resolution (Execution/Commit)
     input  logic         res_valid,
     input  logic [31:0]  res_pc,
-    input  logic         res_actually_taken
+    input  logic         res_actually_taken,
+    input  logic [CONF_GHR_WIDTH-1:0] res_ghr_snap, // Prediction-time GHR snapshot
+
+    // Snapshot for FTQ enqueue (prediction-time metadata)
+    output logic [CONF_GHR_WIDTH-1:0] ghr_snapshot
 );
 
     localparam int GHR_W = CONF_GHR_WIDTH;          // Parameterized GHR width
@@ -31,12 +35,14 @@ module f386_branch_predict_gshare (
     // Pattern History Table (2-bit saturating counters)
     logic [1:0] pht [PHT_N];
 
-    // XOR Indexing (Gshare)
+    // XOR Indexing (true gshare)
     wire [PHT_W-1:0] fetch_idx = fetch_pc[PHT_W+1:2] ^ ghr[PHT_W-1:0];
-    wire [PHT_W-1:0] res_idx   = res_pc[PHT_W+1:2] ^ ghr[PHT_W-1:0];
+    // Training must use the prediction-time GHR snapshot for this branch.
+    wire [PHT_W-1:0] res_idx   = res_pc[PHT_W+1:2] ^ res_ghr_snap[PHT_W-1:0];
 
     // Asynchronous Prediction
     assign predict_taken = pht[fetch_idx][1];
+    assign ghr_snapshot  = ghr;
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin

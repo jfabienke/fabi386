@@ -32,14 +32,25 @@ module f386_ooo_core_top (
     input  logic         fetch_data_valid,
     output logic         fetch_req,
 
-    // --- Data Memory Interface (to BIU / L1D — widened to 64-bit for P2) ---
+    // --- Data Memory Interface (legacy, to BIU / L1D — widened to 64-bit for P2) ---
     output logic [31:0]  mem_addr,
     output logic [63:0]  mem_wdata,
     input  logic [63:0]  mem_rdata,
     output logic         mem_req,
     output logic         mem_wr,
     output logic [7:0]   mem_byte_en,
+    output logic         mem_cacheable,
+    output logic         mem_strong_order,
     input  logic         mem_ack,
+    input  logic         mem_gnt,
+
+    // --- Split-Phase Data Port (active when CONF_ENABLE_MEM_FABRIC=1) ---
+    output logic         sp_data_req_valid,
+    input  logic         sp_data_req_ready,
+    output mem_req_t     sp_data_req,
+    input  logic         sp_data_rsp_valid,
+    output logic         sp_data_rsp_ready,
+    input  mem_rsp_t     sp_data_rsp,
 
     // --- A20 Gate (for AGU) ---
     input  logic         a20_gate,
@@ -66,6 +77,7 @@ module f386_ooo_core_top (
     logic [31:0] bp_next_pc;
     logic        bp_predict_taken;
     logic        bp_is_ret;
+    logic [CONF_GHR_WIDTH-1:0] bp_ghr_snapshot;
 
     // --- Decode raw outputs (directly from decoder) ---
     ooo_instr_t  raw_dec_instr_u, raw_dec_instr_v;
@@ -182,6 +194,11 @@ module f386_ooo_core_top (
     ftq_idx_t    ftq_deq_idx;
     logic [31:0] ftq_redirect_repair_pc;
     logic [CONF_GHR_WIDTH-1:0] ftq_redirect_repair_ghr;
+    logic [CONF_GHR_WIDTH-1:0] ftq_lookup_ghr;
+    ftq_idx_t    branch_ftq_idx;
+
+    // Side-table: ROB tag -> FTQ index for prediction repair/training
+    ftq_idx_t    rob_ftq_idx_tbl [0:CONF_ROB_ENTRIES-1];
 
     // --- CPU Mode (driven by sys_regs) ---
     logic        pe_mode;
@@ -244,6 +261,23 @@ module f386_ooo_core_top (
     assign dispatch_v_valid = dec_instr_v_valid && rename_ready && !rob_full && rename_v_alloc_valid
                               && !lsq_cdb1_active;
 
+    // Track FTQ index alongside each dispatched ROB entry so branch resolution
+    // can recover prediction-time metadata (e.g. GHR snapshot).
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n || flush) begin
+            for (int i = 0; i < CONF_ROB_ENTRIES; i++)
+                rob_ftq_idx_tbl[i] <= '0;
+        end else begin
+            if (dispatch_u_valid) rob_ftq_idx_tbl[rob_tag_u] <= ftq_deq_idx;
+            if (dispatch_v_valid) rob_ftq_idx_tbl[rob_tag_v] <= ftq_deq_idx;
+        end
+    end
+
+    always_comb begin
+        branch_ftq_idx = '0;
+        if (branch_resolved) branch_ftq_idx = rob_ftq_idx_tbl[branch_rob_tag];
+    end
+
     // =================================================================
     // 1. Program Counter
     // =================================================================
@@ -282,9 +316,11 @@ module f386_ooo_core_top (
 
         // Feedback from execute (branch resolution)
         .res_valid          (branch_resolved),
-        .res_pc             (dec_instr_u.pc),
+        .res_pc             (iq_issue_instr.pc),
         .res_actually_taken (branch_taken),
-        .res_is_mispredict  (branch_mispredict)
+        .res_is_mispredict  (branch_mispredict),
+        .res_ghr_snap       (ftq_lookup_ghr),
+        .ghr_snapshot       (bp_ghr_snapshot)
     );
 
     // Simple RET detection from decode output
@@ -814,7 +850,7 @@ module f386_ooo_core_top (
         .enq_pred_target  (bp_next_pc),
         .enq_br_tag       (specbits_alloc_tag),
         .enq_has_branch   (1'b0),  // TODO: populated by pre-decode scan
-        .enq_ghr          ('0),    // TODO: GHR snapshot from branch predictor
+        .enq_ghr          (bp_ghr_snapshot),
         .enq_ready        (ftq_enq_ready),
         .enq_ftq_idx      (ftq_enq_idx),
 
@@ -830,13 +866,14 @@ module f386_ooo_core_top (
 
         // Redirect (mispredict)
         .redirect_valid   (branch_mispredict),
-        .redirect_ftq_idx (ftq_deq_idx),  // TODO: carry ftq_idx through execute
+        .redirect_ftq_idx (branch_ftq_idx),
         .redirect_repair_pc (ftq_redirect_repair_pc),
         .redirect_repair_ghr(ftq_redirect_repair_ghr),
 
         // ROB PC lookup
-        .lookup_idx       ('0),    // Driven by retirement when needed
-        .lookup_pc        ()       // Available for exception PC reporting
+        .lookup_idx       (branch_ftq_idx),
+        .lookup_pc        (),      // Available for exception PC reporting
+        .lookup_ghr       (ftq_lookup_ghr)
     );
 
     // =================================================================
@@ -1278,7 +1315,7 @@ module f386_ooo_core_top (
         wire mem_dispatch_blocked = (dec_instr_u.op_cat == OP_LOAD  && lsq_lq_full) ||
                                     (dec_instr_u.op_cat == OP_STORE && lsq_sq_full);
         assign lsq_dispatch_blocked  = mem_dispatch_blocked;
-        assign lsq_cdb1_active       = lsq_ld_cdb_valid;
+        // lsq_cdb1_active assigned below after IO path CDB signals are declared
 
         // Wire LSQ indices to ROB
         assign rob_dispatch_u_lq_idx = lsq_ld_dispatch_idx;
@@ -1306,6 +1343,19 @@ module f386_ooo_core_top (
         logic        lsq_ld_cdb_valid;
         rob_id_t     lsq_ld_cdb_tag;
         logic [31:0] lsq_ld_cdb_data;
+        logic        lsq_ld_cdb_fault;
+
+        // ---------------------------------------------------------
+        // IO path CDB load result (MMIO loads)
+        // ---------------------------------------------------------
+        logic        io_ld_cdb_valid;
+        rob_id_t     io_ld_cdb_tag;
+        logic [31:0] io_ld_cdb_data;
+        lq_idx_t     io_ld_cdb_lq_idx;
+        logic        io_ld_cdb_fault;
+
+        // Combined CDB1 active flag (gates V-pipe exec CDB)
+        assign lsq_cdb1_active = lsq_ld_cdb_valid || io_ld_cdb_valid;
 
         // ---------------------------------------------------------
         // phys_dest side table (Finding #2)
@@ -1325,17 +1375,23 @@ module f386_ooo_core_top (
             end
         end
 
-        // cdb1: LSQ load result has priority over V-pipe execute
-        assign cdb1_valid      = lsq_ld_cdb_valid ? 1'b1             : raw_cdb1_valid;
-        assign cdb1_tag        = lsq_ld_cdb_valid ? lsq_ld_cdb_tag   : raw_cdb1_tag;
-        assign cdb1_data       = lsq_ld_cdb_valid ? lsq_ld_cdb_data  : raw_cdb1_data;
-        assign cdb1_phys_dest  = lsq_ld_cdb_valid ? rob_phys_dest_tbl[lsq_ld_cdb_tag]
+        // cdb1: IO path > LSQ > V-pipe execute priority
+        wire any_ld_cdb = io_ld_cdb_valid || lsq_ld_cdb_valid;
+        wire [3:0] ld_cdb_rob_tag = io_ld_cdb_valid ? io_ld_cdb_tag : lsq_ld_cdb_tag;
+        wire [31:0] ld_cdb_result = io_ld_cdb_valid ? io_ld_cdb_data : lsq_ld_cdb_data;
+
+        assign cdb1_valid      = any_ld_cdb        ? 1'b1                             : raw_cdb1_valid;
+        assign cdb1_tag        = any_ld_cdb        ? ld_cdb_rob_tag                   : raw_cdb1_tag;
+        assign cdb1_data       = any_ld_cdb        ? ld_cdb_result                    : raw_cdb1_data;
+        assign cdb1_phys_dest  = any_ld_cdb        ? rob_phys_dest_tbl[ld_cdb_rob_tag]
                                                    : raw_cdb1_phys_dest;
-        assign cdb1_dest_valid = lsq_ld_cdb_valid ? rob_dest_valid_tbl[lsq_ld_cdb_tag]
+        assign cdb1_dest_valid = any_ld_cdb        ? rob_dest_valid_tbl[ld_cdb_rob_tag]
                                                    : raw_cdb1_dest_valid;
-        assign cdb1_flags      = lsq_ld_cdb_valid ? 6'd0             : raw_cdb1_flags;
-        assign cdb1_flags_mask = lsq_ld_cdb_valid ? 6'd0             : raw_cdb1_flags_mask;
-        assign cdb1_exception  = lsq_ld_cdb_valid ? 1'b0             : raw_cdb1_exception;
+        assign cdb1_flags      = any_ld_cdb        ? 6'd0                             : raw_cdb1_flags;
+        assign cdb1_flags_mask = any_ld_cdb        ? 6'd0                             : raw_cdb1_flags_mask;
+        assign cdb1_exception  = io_ld_cdb_valid   ? io_ld_cdb_fault                  :
+                                 lsq_ld_cdb_valid  ? lsq_ld_cdb_fault                :
+                                                     raw_cdb1_exception;
 
         // ---------------------------------------------------------
         // AGU (Finding #1): combinational effective address
@@ -1347,6 +1403,23 @@ module f386_ooo_core_top (
         // stores require 3 operands and must be decomposed by microcode.
         wire agu_index_en = iq_issue_instr.addr_index_valid &&
                             (iq_issue_instr.op_cat == OP_LOAD);
+
+        // Indexed store guard: block agu_st_fire when addr_index_valid.
+        // EA would be wrong (missing index*scale) since val_b carries
+        // store data, not index. These instructions must go through
+        // microcode decomposition. Stalling in the IQ is safe — they'll
+        // block until microcode is wired (P3). Writing a wrong address
+        // is not safe.
+        wire indexed_store_block = iq_issue_instr.addr_index_valid &&
+                                   (iq_issue_instr.op_cat == OP_STORE);
+
+        // Misaligned cross-dword store guard: block agu_st_fire when
+        // the store would cross a 32-bit dword boundary. Without
+        // split-store support, these produce truncated byte_en masks
+        // and silently partial-write. Stall in IQ until split-store
+        // handling exists.
+        // Cross-dword: word at ea[1:0]==3, dword at ea[1:0]!=0.
+        // Uses computed_ea which is valid combinationally from AGU.
 
         f386_agu u_agu (
             .seg_base     (32'd0),            // Flat model (P2 simplification)
@@ -1360,49 +1433,82 @@ module f386_ooo_core_top (
             .a20_gate     (a20_gate)
         );
 
-        // Stores also use computed_ea (= base + disp, index_valid=0).
-        // Indexed stores compute wrong EA (missing index*scale) — guarded
-        // by assertion below. Requires microcode decomposition to fix.
-        // synthesis translate_off
-        always @(posedge clk) begin
-            if (agu_st_fire && iq_issue_instr.addr_index_valid)
-                $warning("LSQ: indexed store at PC=%08h — EA missing index*scale (needs microcode)",
-                         iq_issue_instr.pc);
-        end
-        // synthesis translate_on
+        // Misaligned cross-dword store detection (uses computed_ea from AGU)
+        wire misaligned_store_block = (iq_issue_instr.op_cat == OP_STORE) && (
+            (iq_issue_instr.mem_size == 2'd1 && computed_ea[1:0] == 2'd3) ||  // word at offset 3
+            (iq_issue_instr.mem_size == 2'd2 && computed_ea[1:0] != 2'd0)     // dword misaligned
+        );
 
         // ---------------------------------------------------------
         // Byte-enable derivation from size + address alignment
         // ---------------------------------------------------------
-        // Explicit case table — shift-based approach truncates for
-        // cross-dword masks (e.g. word at addr[1:0]=3).
-        function automatic logic [3:0] size_to_byte_en(
+        // ---------------------------------------------------------
+        // Byte-enable for LOADS (LSQ CAM forwarding)
+        // Cross-dword accesses get byte_en=0 to disable forwarding —
+        // the 64-bit beat memory path handles them correctly, but the
+        // 32-bit forwarding CAM cannot.
+        // ---------------------------------------------------------
+        function automatic logic [3:0] ld_byte_en(
             input logic [1:0] size, input logic [1:0] addr_lo
         );
             case ({size, addr_lo})
-                // Byte (size=0): single byte at offset
-                4'b00_00: size_to_byte_en = 4'b0001;
-                4'b00_01: size_to_byte_en = 4'b0010;
-                4'b00_10: size_to_byte_en = 4'b0100;
-                4'b00_11: size_to_byte_en = 4'b1000;
-                // Word (size=1): two bytes starting at offset
-                4'b01_00: size_to_byte_en = 4'b0011;
-                4'b01_01: size_to_byte_en = 4'b0110;
-                4'b01_10: size_to_byte_en = 4'b1100;
-                4'b01_11: size_to_byte_en = 4'b1111; // Cross-dword: conservative full mask (split access TODO)
-                // Dword (size=2): full mask regardless of alignment
-                4'b10_00: size_to_byte_en = 4'b1111;
-                4'b10_01: size_to_byte_en = 4'b1111;
-                4'b10_10: size_to_byte_en = 4'b1111;
-                4'b10_11: size_to_byte_en = 4'b1111;
-                default:  size_to_byte_en = 4'b1111;
+                4'b00_00: ld_byte_en = 4'b0001;
+                4'b00_01: ld_byte_en = 4'b0010;
+                4'b00_10: ld_byte_en = 4'b0100;
+                4'b00_11: ld_byte_en = 4'b1000;
+                4'b01_00: ld_byte_en = 4'b0011;
+                4'b01_01: ld_byte_en = 4'b0110;
+                4'b01_10: ld_byte_en = 4'b1100;
+                4'b01_11: ld_byte_en = 4'b0000; // Cross-dword: disable forwarding
+                4'b10_00: ld_byte_en = 4'b1111;
+                4'b10_01: ld_byte_en = 4'b0000; // Misaligned dword: disable forwarding
+                4'b10_10: ld_byte_en = 4'b0000;
+                4'b10_11: ld_byte_en = 4'b0000;
+                default:  ld_byte_en = 4'b0000;
             endcase
         endfunction
 
         // ---------------------------------------------------------
+        // Byte-enable for STORES (actual lane mask for memory write)
+        // Must never be zero — LSQ store_drain_checks assert this.
+        // Cross-dword stores produce truncated masks here; the
+        // store_drain_checks assertion catches them as errors.
+        // ---------------------------------------------------------
+        function automatic logic [3:0] st_byte_en(
+            input logic [1:0] size, input logic [1:0] addr_lo
+        );
+            case ({size, addr_lo})
+                4'b00_00: st_byte_en = 4'b0001;
+                4'b00_01: st_byte_en = 4'b0010;
+                4'b00_10: st_byte_en = 4'b0100;
+                4'b00_11: st_byte_en = 4'b1000;
+                4'b01_00: st_byte_en = 4'b0011;
+                4'b01_01: st_byte_en = 4'b0110;
+                4'b01_10: st_byte_en = 4'b1100;
+                4'b01_11: st_byte_en = 4'b1000; // Cross-dword word: low byte in this dword (truncated)
+                4'b10_00: st_byte_en = 4'b1111;
+                4'b10_01: st_byte_en = 4'b1110; // Misaligned dword (truncated to this dword)
+                4'b10_10: st_byte_en = 4'b1100;
+                4'b10_11: st_byte_en = 4'b1000;
+                default:  st_byte_en = 4'b1111;
+            endcase
+        endfunction
+
+        // ---------------------------------------------------------
+        // MMIO classification (after AGU)
+        // ---------------------------------------------------------
+        wire ea_is_mmio = is_mmio_addr(computed_ea);
+
+        // IO path ready signal (forward-declared, driven by IO path instance)
+        logic io_path_ld_ready;
+
+        // LSQ store queue empty (for IO path TSO serialization)
+        logic lsq_sq_empty;
+
+        // ---------------------------------------------------------
         // Load in-flight tracker (Finding #4)
         // Prevents AGU from issuing a new load while LD_WAIT is busy.
-        // Set on AGU load fire, cleared on LSQ CDB completion.
+        // Set on AGU load fire, cleared on LSQ or IO CDB completion.
         // ---------------------------------------------------------
         logic ld_in_flight;
         always_ff @(posedge clk or negedge rst_n) begin
@@ -1410,31 +1516,56 @@ module f386_ooo_core_top (
                 ld_in_flight <= 1'b0;
             else if (flush)
                 ld_in_flight <= 1'b0;
-            else if (lsq_ld_cdb_valid)
+            else if (lsq_ld_cdb_valid || io_ld_cdb_valid)
                 ld_in_flight <= 1'b0;  // Load completed
-            else if (iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD) && !ld_in_flight)
+            else if (iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD) && !ld_in_flight
+                     && (!ea_is_mmio || io_path_ld_ready))
                 ld_in_flight <= 1'b1;  // New load issued
         end
 
         // ---------------------------------------------------------
-        // AGU fire detection (with load backpressure)
+        // AGU fire detection (split MMIO vs cacheable)
         // ---------------------------------------------------------
-        wire agu_ld_fire = iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD) && !ld_in_flight;
-        wire agu_st_fire = iq_issue_valid && (iq_issue_instr.op_cat == OP_STORE);
+        wire agu_ld_fire      = iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD)
+                                && !ld_in_flight && !ea_is_mmio;
+        wire agu_ld_mmio_fire = iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD)
+                                && !ld_in_flight && ea_is_mmio && io_path_ld_ready;
+        wire agu_st_fire      = iq_issue_valid && (iq_issue_instr.op_cat == OP_STORE)
+                                && !indexed_store_block && !misaligned_store_block;
 
-        // Gate IQ exec_ready so loads aren't dequeued when LD_WAIT is busy
-        assign lsq_load_issue_stall = ld_in_flight && (iq_issue_instr.op_cat == OP_LOAD);
+        // Gate IQ exec_ready: stall on in-flight load, MMIO load when IO not ready,
+        // indexed store (needs microcode), or misaligned cross-dword store (needs split)
+        assign lsq_load_issue_stall =
+            ((iq_issue_instr.op_cat == OP_LOAD) &&
+             (ld_in_flight || (ea_is_mmio && !io_path_ld_ready))) ||
+            indexed_store_block || misaligned_store_block;
 
         // ROB retirement signals come from top-level wires
         // (rob_retire_u_sq_idx_w, rob_retire_u_is_store_w)
 
         // ---------------------------------------------------------
-        // Split-phase memory interface (LSQ ↔ shim)
+        // Split-phase memory interface (LSQ ↔ arbiter client 0)
         // ---------------------------------------------------------
         logic       lsq_mem_req_valid, lsq_mem_req_ready;
         mem_req_t   lsq_mem_req_out;
         logic       lsq_mem_rsp_valid, lsq_mem_rsp_ready;
         mem_rsp_t   lsq_mem_rsp_in;
+
+        // ---------------------------------------------------------
+        // Split-phase memory interface (IO path ↔ arbiter client 1)
+        // ---------------------------------------------------------
+        logic       io_mem_req_valid, io_mem_req_ready;
+        mem_req_t   io_mem_req_out;
+        logic       io_mem_rsp_valid, io_mem_rsp_ready;
+        mem_rsp_t   io_mem_rsp_in;
+
+        // ---------------------------------------------------------
+        // Split-phase memory interface (arbiter ↔ shim)
+        // ---------------------------------------------------------
+        logic       arb_mem_req_valid, arb_mem_req_ready;
+        mem_req_t   arb_mem_req_out;
+        logic       arb_mem_rsp_valid, arb_mem_rsp_ready;
+        mem_rsp_t   arb_mem_rsp_in;
 
         // ---------------------------------------------------------
         // MDP signals (unused in P2a)
@@ -1460,32 +1591,41 @@ module f386_ooo_core_top (
             .lq_full          (lsq_lq_full),
             .sq_full          (lsq_sq_full),
 
-            // AGU load
+            // AGU load (cacheable only — MMIO goes to IO path)
             .agu_ld_valid     (agu_ld_fire),
             .agu_ld_idx       (iq_issue_instr.lq_idx),
             .agu_ld_addr      (computed_ea),
             .agu_ld_size      (iq_issue_instr.mem_size),
-            .agu_ld_byte_en   (size_to_byte_en(iq_issue_instr.mem_size, computed_ea[1:0])),
+            .agu_ld_byte_en   (ld_byte_en(iq_issue_instr.mem_size, computed_ea[1:0])),
             .agu_ld_signed    (1'b0),   // TODO: carry sign info from decode
 
-            // AGU store
+            // AGU store (all stores — MMIO classification on drain)
             .agu_st_valid     (agu_st_fire),
             .agu_st_idx       (iq_issue_instr.sq_idx),
             .agu_st_addr      (computed_ea),
             .agu_st_data      (iq_issue_instr.val_b),
             .agu_st_size      (iq_issue_instr.mem_size),
-            .agu_st_byte_en   (size_to_byte_en(iq_issue_instr.mem_size, computed_ea[1:0])),
+            .agu_st_byte_en   (st_byte_en(iq_issue_instr.mem_size, computed_ea[1:0])),
 
             // CDB load result
             .ld_cdb_valid     (lsq_ld_cdb_valid),
             .ld_cdb_tag       (lsq_ld_cdb_tag),
             .ld_cdb_data      (lsq_ld_cdb_data),
+            .ld_cdb_fault     (lsq_ld_cdb_fault),
 
             // Retirement
             .retire_st_valid  (rob_retire_u_valid && rob_retire_u_is_store_w),
             .retire_st_idx    (rob_retire_u_sq_idx_w),
 
-            // D-Cache (unused in P2a — stubs)
+            // IO path load completion (MMIO load bypassed LSQ data path)
+            .io_ld_complete_valid (io_ld_cdb_valid),
+            .io_ld_complete_idx   (io_ld_cdb_lq_idx),
+            .io_ld_complete_data  (io_ld_cdb_data),
+
+            // Store queue empty (for IO path TSO serialization)
+            .sq_empty         (lsq_sq_empty),
+
+            // D-Cache (unused in P2 — stubs)
             .dcache_req_valid (),
             .dcache_req_addr  (),
             .dcache_req_wdata (),
@@ -1495,7 +1635,7 @@ module f386_ooo_core_top (
             .dcache_resp_valid(1'b0),
             .dcache_resp_data (32'd0),
 
-            // Split-phase memory (to shim)
+            // Split-phase memory (to arbiter client 0)
             .mem_req_valid    (lsq_mem_req_valid),
             .mem_req_ready    (lsq_mem_req_ready),
             .mem_req_out      (lsq_mem_req_out),
@@ -1509,29 +1649,161 @@ module f386_ooo_core_top (
         );
 
         // ---------------------------------------------------------
-        // Shim: LSQ split-phase ↔ widened mem_ctrl data port
+        // MMIO IO Path (MMIO loads — strongly ordered, in-order)
         // ---------------------------------------------------------
-        f386_lsq_to_memctrl_shim u_shim (
-            .clk          (clk),
-            .rst_n        (rst_n),
-            .flush        (flush),
+        f386_mmio_io_path u_io_path (
+            .clk              (clk),
+            .rst_n            (rst_n),
+            .flush            (flush),
 
-            .req_valid    (lsq_mem_req_valid),
-            .req_ready    (lsq_mem_req_ready),
-            .req          (lsq_mem_req_out),
+            // Upstream: MMIO load request
+            .ld_req_valid     (agu_ld_mmio_fire),
+            .ld_req_ready     (io_path_ld_ready),
+            .ld_req_addr      (computed_ea),
+            .ld_req_size      (iq_issue_instr.mem_size),
+            .ld_req_signed    (1'b0),   // TODO: carry sign info from decode
+            .ld_req_rob_tag   (iq_issue_instr.rob_tag),
+            .ld_req_lq_idx    (iq_issue_instr.lq_idx),
 
-            .rsp_valid    (lsq_mem_rsp_valid),
-            .rsp_ready    (lsq_mem_rsp_ready),
-            .rsp          (lsq_mem_rsp_in),
+            // TSO ordering
+            .sq_empty         (lsq_sq_empty),
 
-            .data_addr    (mem_addr),
-            .data_wdata   (mem_wdata),
-            .data_byte_en (mem_byte_en),
-            .data_req     (mem_req),
-            .data_wr      (mem_wr),
-            .data_rdata   (mem_rdata),
-            .data_ack     (mem_ack)
+            // CDB output
+            .ld_cdb_valid     (io_ld_cdb_valid),
+            .ld_cdb_tag       (io_ld_cdb_tag),
+            .ld_cdb_data      (io_ld_cdb_data),
+            .ld_cdb_lq_idx    (io_ld_cdb_lq_idx),
+            .ld_cdb_fault     (io_ld_cdb_fault),
+
+            // Downstream: split-phase memory (to arbiter client 1)
+            .mem_req_valid    (io_mem_req_valid),
+            .mem_req_ready    (io_mem_req_ready),
+            .mem_req_out      (io_mem_req_out),
+            .mem_rsp_valid    (io_mem_rsp_valid),
+            .mem_rsp_ready    (io_mem_rsp_ready),
+            .mem_rsp_in       (io_mem_rsp_in)
         );
+
+        // ---------------------------------------------------------
+        // 2-Client Arbiter: LSQ (c0) + IO path (c1) → shim
+        // ---------------------------------------------------------
+        f386_mem_req_arbiter u_arbiter (
+            .clk              (clk),
+            .rst_n            (rst_n),
+            .flush            (flush),
+
+            // Client 0 (LSQ)
+            .c0_req_valid     (lsq_mem_req_valid),
+            .c0_req_ready     (lsq_mem_req_ready),
+            .c0_req           (lsq_mem_req_out),
+            .c0_rsp_valid     (lsq_mem_rsp_valid),
+            .c0_rsp_ready     (lsq_mem_rsp_ready),
+            .c0_rsp           (lsq_mem_rsp_in),
+
+            // Client 1 (IO path)
+            .c1_req_valid     (io_mem_req_valid),
+            .c1_req_ready     (io_mem_req_ready),
+            .c1_req           (io_mem_req_out),
+            .c1_rsp_valid     (io_mem_rsp_valid),
+            .c1_rsp_ready     (io_mem_rsp_ready),
+            .c1_rsp           (io_mem_rsp_in),
+
+            // Downstream (to shim)
+            .dn_req_valid     (arb_mem_req_valid),
+            .dn_req_ready     (arb_mem_req_ready),
+            .dn_req           (arb_mem_req_out),
+            .dn_rsp_valid     (arb_mem_rsp_valid),
+            .dn_rsp_ready     (arb_mem_rsp_ready),
+            .dn_rsp           (arb_mem_rsp_in)
+        );
+
+        // ---------------------------------------------------------
+        // Data port routing: MEM_FABRIC → split-phase, else → shim
+        // ---------------------------------------------------------
+        if (CONF_ENABLE_MEM_FABRIC) begin : gen_mem_fabric
+            // Arbiter downstream → split-phase ports (no shim)
+            assign sp_data_req_valid = arb_mem_req_valid;
+            assign arb_mem_req_ready = sp_data_req_ready;
+            assign sp_data_req       = arb_mem_req_out;
+            assign arb_mem_rsp_valid = sp_data_rsp_valid;
+            assign sp_data_rsp_ready = arb_mem_rsp_ready;
+            assign arb_mem_rsp_in    = sp_data_rsp;
+
+            // Stub legacy ports
+            assign mem_addr         = 32'd0;
+            assign mem_wdata        = 64'd0;
+            assign mem_byte_en      = 8'd0;
+            assign mem_req          = 1'b0;
+            assign mem_wr           = 1'b0;
+            assign mem_cacheable    = 1'b0;
+            assign mem_strong_order = 1'b0;
+        end else begin : gen_legacy_shim
+            // Stub split-phase ports
+            assign sp_data_req_valid = 1'b0;
+            assign sp_data_req       = '0;
+            assign sp_data_rsp_ready = 1'b0;
+
+            // Perf counter wires (readable via simulation waveforms)
+            logic [31:0] shim_ctr_req_total;
+            logic [31:0] shim_ctr_rsp_total;
+            logic [31:0] shim_ctr_stall_cycles;
+            logic [31:0] shim_ctr_drain_events;
+            logic [31:0] shim_ctr_fifo_full_cyc;
+
+            f386_lsq_to_memctrl_shim u_shim (
+                .clk          (clk),
+                .rst_n        (rst_n),
+                .flush        (flush),
+
+                .req_valid    (arb_mem_req_valid),
+                .req_ready    (arb_mem_req_ready),
+                .req          (arb_mem_req_out),
+
+                .rsp_valid    (arb_mem_rsp_valid),
+                .rsp_ready    (arb_mem_rsp_ready),
+                .rsp          (arb_mem_rsp_in),
+
+                .data_addr         (mem_addr),
+                .data_wdata        (mem_wdata),
+                .data_byte_en      (mem_byte_en),
+                .data_req          (mem_req),
+                .data_wr           (mem_wr),
+                .data_cacheable    (mem_cacheable),
+                .data_strong_order (mem_strong_order),
+                .data_rdata        (mem_rdata),
+                .data_ack          (mem_ack),
+                .data_gnt          (mem_gnt),
+
+                .ctr_req_total    (shim_ctr_req_total),
+                .ctr_rsp_total    (shim_ctr_rsp_total),
+                .ctr_stall_cycles (shim_ctr_stall_cycles),
+                .ctr_drain_events (shim_ctr_drain_events),
+                .ctr_fifo_full_cyc(shim_ctr_fifo_full_cyc)
+            );
+        end
+
+        // ---------------------------------------------------------
+        // MMIO range coverage assertions (sim-only)
+        // ---------------------------------------------------------
+        `ifndef SYNTHESIS
+        always @(posedge clk) begin
+            if (mem_req && !mem_wr) begin
+                if (mem_addr >= 32'hFEE0_0000 && mem_addr <= 32'hFEE0_0FFF)
+                    $warning("APIC access at %08h -- not classified as MMIO", mem_addr);
+                if (mem_addr >= 32'h0000_0CF8 && mem_addr <= 32'h0000_0CFF)
+                    $warning("PCI config access at %08h -- not classified as MMIO", mem_addr);
+                if (mem_addr >= 32'hFEC0_0000 && mem_addr <= 32'hFEC0_003F)
+                    $warning("IOAPIC access at %08h -- not classified as MMIO", mem_addr);
+            end
+        end
+
+        // IO path and LSQ CDB must never fire simultaneously
+        always @(posedge clk) begin
+            if (rst_n)
+                assert (!(io_ld_cdb_valid && lsq_ld_cdb_valid))
+                    else $error("CDB1: IO path and LSQ load CDB fired simultaneously");
+        end
+        `endif
 
     end else begin : gen_no_lsq_memif
 
@@ -1544,11 +1816,18 @@ module f386_ooo_core_top (
         assign rob_dispatch_u_lq_idx  = '0;
         assign rob_dispatch_u_sq_idx  = '0;
 
-        assign mem_addr     = 32'd0;
-        assign mem_wdata    = 64'd0;
-        assign mem_byte_en  = 8'd0;
-        assign mem_req      = 1'b0;
-        assign mem_wr       = 1'b0;
+        assign mem_addr         = 32'd0;
+        assign mem_wdata        = 64'd0;
+        assign mem_byte_en      = 8'd0;
+        assign mem_req          = 1'b0;
+        assign mem_wr           = 1'b0;
+        assign mem_cacheable    = 1'b0;
+        assign mem_strong_order = 1'b0;
+
+        // Stub split-phase ports
+        assign sp_data_req_valid = 1'b0;
+        assign sp_data_req       = '0;
+        assign sp_data_rsp_ready = 1'b0;
 
         // CDB passthrough (no muxing)
         assign cdb0_valid      = raw_cdb0_valid;

@@ -52,7 +52,7 @@ module f386_emu (
     output logic        CE_PIXEL,
 
     // --- DDRAM Interface ---
-    output logic [27:0] DDRAM_ADDR,
+    output logic [28:0] DDRAM_ADDR,   // 64-bit word address (512M × 8B = 4GB)
     output logic [7:0]  DDRAM_BURSTCNT,
     output logic [63:0] DDRAM_DIN,
     output logic [7:0]  DDRAM_BE,
@@ -253,13 +253,20 @@ module f386_emu (
     logic [31:0]  mem_addr;
     logic [63:0]  mem_wdata, mem_rdata;
     logic [7:0]   mem_byte_en;
-    logic         mem_req, mem_wr, mem_ack;
+    logic         mem_req, mem_wr, mem_ack, mem_gnt;
+    logic         mem_cacheable, mem_strong_order;
 
     telemetry_pkt_t trace_out;
     logic           trace_valid;
 
     logic         cpu_irq;
     logic [7:0]   cpu_irq_vector;
+
+    // Split-phase data port (between core and L2_SP when MEM_FABRIC=1)
+    logic         sp_data_req_valid, sp_data_req_ready;
+    mem_req_t     sp_data_req;
+    logic         sp_data_rsp_valid, sp_data_rsp_ready;
+    mem_rsp_t     sp_data_rsp;
 
     f386_ooo_core_top cpu (
         .clk             (cpu_clk),
@@ -273,10 +280,21 @@ module f386_emu (
         .mem_addr        (mem_addr),
         .mem_wdata       (mem_wdata),
         .mem_rdata       (mem_rdata),
-        .mem_req         (mem_req),
-        .mem_wr          (mem_wr),
-        .mem_byte_en     (mem_byte_en),
-        .mem_ack         (mem_ack),
+        .mem_req          (mem_req),
+        .mem_wr           (mem_wr),
+        .mem_byte_en      (mem_byte_en),
+        .mem_cacheable    (mem_cacheable),
+        .mem_strong_order (mem_strong_order),
+        .mem_ack          (mem_ack),
+        .mem_gnt          (mem_gnt),
+
+        .sp_data_req_valid (sp_data_req_valid),
+        .sp_data_req_ready (sp_data_req_ready),
+        .sp_data_req       (sp_data_req),
+        .sp_data_rsp_valid (sp_data_rsp_valid),
+        .sp_data_rsp_ready (sp_data_rsp_ready),
+        .sp_data_rsp       (sp_data_rsp),
+
         .a20_gate        (a20_gate),
 
         .trace_out       (trace_out),
@@ -297,47 +315,143 @@ module f386_emu (
     assign pt_req   = 1'b0;
     assign pt_wr    = 1'b0;
 
-    f386_mem_ctrl mem_ctrl (
-        .clk             (cpu_clk),
-        .rst_n           (combined_rst_n),
+    generate
+    if (CONF_ENABLE_MEM_FABRIC) begin : gen_l2_sp
 
-        // Instruction fetch
-        .ifetch_addr     (fetch_addr),
-        .ifetch_data     (fetch_data),
-        .ifetch_valid    (fetch_data_valid),
-        .ifetch_req      (fetch_req),
+`ifndef SYNTHESIS
+        // Gate dependency: MEM_FABRIC requires LSQ_MEMIF (split-phase wiring)
+        // and L2_CACHE (reuses L2 geometry params).
+        initial begin
+            if (!CONF_ENABLE_LSQ_MEMIF)
+                $fatal(1, "CONF_ENABLE_MEM_FABRIC requires CONF_ENABLE_LSQ_MEMIF");
+            if (!CONF_ENABLE_L2_CACHE)
+                $fatal(1, "CONF_ENABLE_MEM_FABRIC requires CONF_ENABLE_L2_CACHE");
+        end
+`endif
 
-        // Data port (widened to 64-bit for P2)
-        .data_addr       (mem_addr),
-        .data_wdata      (mem_wdata),
-        .data_rdata      (mem_rdata),
-        .data_req        (mem_req),
-        .data_wr         (mem_wr),
-        .data_byte_en    (mem_byte_en),
-        .data_ack        (mem_ack),
+        // L2_SP: split-phase data port + blocking ifetch/PT + DDRAM
+        f386_l2_cache_sp l2_sp (
+            .clk             (cpu_clk),
+            .rst_n           (combined_rst_n),
 
-        // Page walker
-        .pt_addr         (pt_addr),
-        .pt_wdata        (pt_wdata),
-        .pt_rdata        (pt_rdata),
-        .pt_req          (pt_req),
-        .pt_wr           (pt_wr),
-        .pt_ack          (pt_ack),
+            .ifetch_addr     (fetch_addr),
+            .ifetch_data     (fetch_data),
+            .ifetch_valid    (fetch_data_valid),
+            .ifetch_req      (fetch_req),
 
-        // A20 gate
-        .a20_gate        (a20_gate),
+            .data_req_valid  (sp_data_req_valid),
+            .data_req_ready  (sp_data_req_ready),
+            .data_req        (sp_data_req),
+            .data_rsp_valid  (sp_data_rsp_valid),
+            .data_rsp_ready  (sp_data_rsp_ready),
+            .data_rsp        (sp_data_rsp),
 
-        // DDRAM
-        .ddram_addr      (DDRAM_ADDR),
-        .ddram_burstcnt  (DDRAM_BURSTCNT),
-        .ddram_din       (DDRAM_DIN),
-        .ddram_be        (DDRAM_BE),
-        .ddram_we        (DDRAM_WE),
-        .ddram_rd        (DDRAM_RD),
-        .ddram_dout      (DDRAM_DOUT),
-        .ddram_dout_ready(DDRAM_DOUT_READY),
-        .ddram_busy      (DDRAM_BUSY)
-    );
+            .pt_addr         (pt_addr),
+            .pt_wdata        (pt_wdata),
+            .pt_rdata        (pt_rdata),
+            .pt_req          (pt_req),
+            .pt_wr           (pt_wr),
+            .pt_ack          (pt_ack),
+
+            .a20_gate        (a20_gate),
+
+            .ddram_addr      (DDRAM_ADDR),
+            .ddram_burstcnt  (DDRAM_BURSTCNT),
+            .ddram_din       (DDRAM_DIN),
+            .ddram_be        (DDRAM_BE),
+            .ddram_we        (DDRAM_WE),
+            .ddram_rd        (DDRAM_RD),
+            .ddram_dout      (DDRAM_DOUT),
+            .ddram_dout_ready(DDRAM_DOUT_READY),
+            .ddram_busy      (DDRAM_BUSY)
+        );
+
+    end else if (CONF_ENABLE_L2_CACHE) begin : gen_l2_cache
+
+        f386_l2_cache l2 (
+            .clk             (cpu_clk),
+            .rst_n           (combined_rst_n),
+
+            .ifetch_addr     (fetch_addr),
+            .ifetch_data     (fetch_data),
+            .ifetch_valid    (fetch_data_valid),
+            .ifetch_req      (fetch_req),
+
+            .data_addr         (mem_addr),
+            .data_wdata        (mem_wdata),
+            .data_rdata        (mem_rdata),
+            .data_req          (mem_req),
+            .data_wr           (mem_wr),
+            .data_byte_en      (mem_byte_en),
+            .data_cacheable    (mem_cacheable),
+            .data_strong_order (mem_strong_order),
+            .data_ack          (mem_ack),
+            .data_gnt          (mem_gnt),
+
+            .pt_addr         (pt_addr),
+            .pt_wdata        (pt_wdata),
+            .pt_rdata        (pt_rdata),
+            .pt_req          (pt_req),
+            .pt_wr           (pt_wr),
+            .pt_ack          (pt_ack),
+
+            .a20_gate        (a20_gate),
+
+            .ddram_addr      (DDRAM_ADDR),
+            .ddram_burstcnt  (DDRAM_BURSTCNT),
+            .ddram_din       (DDRAM_DIN),
+            .ddram_be        (DDRAM_BE),
+            .ddram_we        (DDRAM_WE),
+            .ddram_rd        (DDRAM_RD),
+            .ddram_dout      (DDRAM_DOUT),
+            .ddram_dout_ready(DDRAM_DOUT_READY),
+            .ddram_busy      (DDRAM_BUSY)
+        );
+
+    end else begin : gen_mem_ctrl
+
+        f386_mem_ctrl mem_ctrl (
+            .clk             (cpu_clk),
+            .rst_n           (combined_rst_n),
+
+            .ifetch_addr     (fetch_addr),
+            .ifetch_data     (fetch_data),
+            .ifetch_valid    (fetch_data_valid),
+            .ifetch_req      (fetch_req),
+
+            .data_addr         (mem_addr),
+            .data_wdata        (mem_wdata),
+            .data_rdata        (mem_rdata),
+            .data_req          (mem_req),
+            .data_wr           (mem_wr),
+            .data_byte_en      (mem_byte_en),
+            .data_cacheable    (mem_cacheable),
+            .data_strong_order (mem_strong_order),
+            .data_ack          (mem_ack),
+            .data_gnt          (mem_gnt),
+
+            .pt_addr         (pt_addr),
+            .pt_wdata        (pt_wdata),
+            .pt_rdata        (pt_rdata),
+            .pt_req          (pt_req),
+            .pt_wr           (pt_wr),
+            .pt_ack          (pt_ack),
+
+            .a20_gate        (a20_gate),
+
+            .ddram_addr      (DDRAM_ADDR),
+            .ddram_burstcnt  (DDRAM_BURSTCNT),
+            .ddram_din       (DDRAM_DIN),
+            .ddram_be        (DDRAM_BE),
+            .ddram_we        (DDRAM_WE),
+            .ddram_rd        (DDRAM_RD),
+            .ddram_dout      (DDRAM_DOUT),
+            .ddram_dout_ready(DDRAM_DOUT_READY),
+            .ddram_busy      (DDRAM_BUSY)
+        );
+
+    end
+    endgenerate
 
     // =====================================================================
     //  I/O Bus

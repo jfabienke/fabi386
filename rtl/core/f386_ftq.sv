@@ -59,7 +59,8 @@ module f386_ftq (
 
     // --- ROB PC lookup (for retirement / exception reporting) ---
     input  ftq_idx_t    lookup_idx,
-    output logic [31:0] lookup_pc
+    output logic [31:0] lookup_pc,
+    output logic [CONF_GHR_WIDTH-1:0] lookup_ghr
 );
 
     localparam int N     = CONF_FTQ_ENTRIES;   // 8
@@ -108,6 +109,7 @@ module f386_ftq (
     // ROB PC lookup (combinational read port)
     // =========================================================
     assign lookup_pc = entries[lookup_idx].fetch_pc;
+    assign lookup_ghr = entries[lookup_idx].ghr_snap;
 
     // =========================================================
     // Enqueue

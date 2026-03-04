@@ -515,7 +515,13 @@ module f386_lsq (
             assign store_drain_ack = store_drain_ack_be;
 
             // ---- Response Handshake ----
-            assign mem_rsp_ready = !pend_empty;
+            // Ready only when incoming response ID matches a valid pending entry.
+            // During flush, the arbiter force-consumes responses (dn_rsp_ready=1),
+            // so LSQ never sees stale responses post-flush.
+            wire [PEND_ID_W-1:0] rsp_pend_idx = mem_rsp_in.id[PEND_ID_W-1:0];
+            wire rsp_id_valid = (mem_rsp_in.id[PEND_ID_W] == 1'b0) &&
+                                pend_valid[rsp_pend_idx];
+            assign mem_rsp_ready = rsp_id_valid;
 
             // ---- Issue + Response Fire ----
             wire can_issue   = !pend_full && !flush;
@@ -525,10 +531,14 @@ module f386_lsq (
             wire issue_fire  = issue_any && mem_req_ready;
 
             wire rsp_fire    = mem_rsp_valid && mem_rsp_ready;
-            // Synthesis-safe ID check: gate rsp_consume on client bit + pending index
-            wire rsp_id_ok   = (mem_rsp_in.id[PEND_ID_W] == 1'b0) &&
-                               (mem_rsp_in.id[PEND_ID_W-1:0] == pend_rd_ptr);
-            wire rsp_consume = rsp_fire && !pend_empty && rsp_id_ok;
+            // OoO response matching: accept any valid pending entry, not just head
+            wire rsp_id_ok   = rsp_id_valid;
+            wire rsp_consume = rsp_fire && rsp_id_ok;
+            wire rsp_consume_at_head = rsp_consume && (rsp_pend_idx == pend_rd_ptr);
+
+            // Drain rd_ptr: advance when head is already consumed or consumed this cycle
+            wire pend_drain_head = (!pend_valid[pend_rd_ptr] && (pend_count != 0))
+                                   || rsp_consume_at_head;
 
             // ---- Store Alignment: addr[2] dword-half selection (sq_drain_ptr) ----
             wire [63:0] st_wdata_aligned = sq_addr[sq_drain_ptr][2]
@@ -538,12 +548,13 @@ module f386_lsq (
                 ? {sq_byte_en[sq_drain_ptr], 4'h0}
                 : {4'h0, sq_byte_en[sq_drain_ptr]};
 
-            // ---- Load Extraction from 64-bit raw beat (pending table metadata) ----
-            wire [63:0] raw_beat      = mem_rsp_in.rdata[63:0];
-            wire [5:0]  ld_shift_amt  = {pend_head.addr[2:0], 3'b000};
-            wire [63:0] ld_shifted64  = raw_beat >> ld_shift_amt;
-            wire [31:0] extracted     = sign_zero_extend(ld_shifted64[31:0],
-                                                          pend_head.size, pend_head.is_signed);
+            // ---- Load Extraction from 64-bit raw beat (indexed pending entry) ----
+            wire pend_entry_t rsp_entry = pend_data[rsp_pend_idx];
+            wire [63:0] raw_beat       = mem_rsp_in.rdata[63:0];
+            wire [5:0]  ld_shift_amt   = {rsp_entry.addr[2:0], 3'b000};
+            wire [63:0] ld_shifted64   = raw_beat >> ld_shift_amt;
+            wire [31:0] extracted      = sign_zero_extend(ld_shifted64[31:0],
+                                                           rsp_entry.size, rsp_entry.is_signed);
 
             // ---- Request Formation ----
             always_comb begin
@@ -584,7 +595,7 @@ module f386_lsq (
                     store_drain_ack_be <= 1'b0;
 
                     if (rsp_consume) begin
-                        if (pend_head.is_load) begin
+                        if (rsp_entry.is_load) begin
                             case (mem_rsp_in.resp)
                                 MEM_RESP_OK: begin
                                     be_resp_valid <= 1'b1;
@@ -596,7 +607,7 @@ module f386_lsq (
                                     be_resp_fault <= 1'b1;
                                     `ifndef SYNTHESIS
                                     $warning("LSQ-MO: fault resp %s on load addr=%08h",
-                                             mem_rsp_in.resp.name(), pend_head.addr);
+                                             mem_rsp_in.resp.name(), rsp_entry.addr);
                                     `endif
                                 end
                             endcase
@@ -606,7 +617,7 @@ module f386_lsq (
                             `ifndef SYNTHESIS
                             if (mem_rsp_in.resp != MEM_RESP_OK)
                                 $warning("LSQ-MO: fault resp %s on store addr=%08h",
-                                         mem_rsp_in.resp.name(), pend_head.addr);
+                                         mem_rsp_in.resp.name(), rsp_entry.addr);
                             `endif
                         end
                     end
@@ -642,14 +653,19 @@ module f386_lsq (
                         pend_wr_ptr <= pend_wr_ptr + PEND_ID_W'(1);
                     end
 
-                    // Pending read (on response consume)
+                    // OoO response consume: clear the indexed entry
                     if (rsp_consume) begin
-                        pend_valid[pend_rd_ptr] <= 1'b0;
-                        pend_rd_ptr <= pend_rd_ptr + PEND_ID_W'(1);
+                        pend_valid[rsp_pend_idx] <= 1'b0;
                     end
 
-                    // Pending count
-                    case ({issue_fire, rsp_consume})
+                    // Drain rd_ptr: advance past consumed (invalid) entries at head.
+                    // pend_count tracks allocated slots (wr_ptr - rd_ptr), so only
+                    // changes when rd_ptr advances — NOT on OoO rsp_consume.
+                    if (pend_drain_head)
+                        pend_rd_ptr <= pend_rd_ptr + PEND_ID_W'(1);
+
+                    // pend_count: allocated slot distance (wr_ptr - rd_ptr)
+                    case ({issue_fire, pend_drain_head})
                         2'b10:   pend_count <= pend_count + (PEND_ID_W+1)'(1);
                         2'b01:   pend_count <= pend_count - (PEND_ID_W+1)'(1);
                         default: ;
@@ -812,11 +828,12 @@ module f386_lsq (
                     else $fatal(1, "LSQ-MO: pending FIFO overflow");
             end
 
-            // Response ID mismatch (complements synthesis-safe rsp_id_ok gate)
+            // Unexpected response ID outside flush (catches L2/shim bugs)
             always_ff @(posedge clk) if (rst_n) begin
-                if (rsp_fire && !rsp_id_ok && !pend_empty)
-                    $error("LSQ-MO: response ID mismatch id=%0d expected rd_ptr=%0d client_bit=%0d",
-                           mem_rsp_in.id, pend_rd_ptr, mem_rsp_in.id[PEND_ID_W]);
+                if (mem_rsp_valid && !rsp_id_valid && !flush)
+                    $error("LSQ-MO: unexpected response ID=%0d (client_bit=%0d, pend_valid[%0d]=%0d)",
+                           mem_rsp_in.id, mem_rsp_in.id[PEND_ID_W],
+                           rsp_pend_idx, pend_valid[rsp_pend_idx]);
             end
 
             // No RETRY: shim never produces RETRY; fatal if seen

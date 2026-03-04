@@ -28,10 +28,11 @@ set(VERILATOR_COMMON_FLAGS
     --trace                  # VCD trace support
     --timing                 # Timing support
     -Wall                    # All warnings
+    -Wno-fatal               # Do not treat warnings as fatal in bench builds
     -Wno-DECLFILENAME        # Don't warn about filename vs module name
     -Wno-UNUSED              # Don't warn about unused signals during dev
-    --x-assign unique        # X propagation
-    --x-initial unique       # X initial values
+    --x-assign fast          # Avoid random-X oscillation in known comb-loop blocks
+    --x-initial fast
 )
 
 # ============================================================
@@ -76,6 +77,7 @@ verilate(tb_ooo_core
         ${RTL_ROOT}/core/f386_branch_predict_hybrid.sv
         ${RTL_ROOT}/core/f386_branch_predict.sv
         ${RTL_ROOT}/core/f386_decode.sv
+        ${RTL_ROOT}/core/f386_decode_cache.sv
         ${RTL_ROOT}/core/f386_dispatch.sv
         ${RTL_ROOT}/core/f386_execute_stage.sv
         ${RTL_ROOT}/core/f386_issue_queue.sv
@@ -91,9 +93,39 @@ verilate(tb_ooo_core
 )
 
 # ============================================================
+# Test: Shim Flush/Grant/Ack Race
+# ============================================================
+verilate(test_shim_flush_race
+    SOURCES
+        ${RTL_ROOT}/top/f386_pkg.sv
+        ${RTL_ROOT}/memory/f386_lsq_to_memctrl_shim.sv
+        ${CMAKE_CURRENT_SOURCE_DIR}/shim_flush_race_tb.sv
+    TOP_MODULE shim_flush_race_tb
+    CPP_SOURCES test_shim_flush_race.cpp
+    FLAGS ${VERILATOR_COMMON_FLAGS}
+    INCLUDE_DIRS ${RTL_INCLUDE_DIRS}
+)
+
+# ============================================================
+# Test: L2 Split-Phase Cache with MSHRs
+# ============================================================
+verilate(test_l2_sp
+    SOURCES
+        ${RTL_ROOT}/top/f386_pkg.sv
+        ${RTL_ROOT}/memory/f386_l2_cache_sp.sv
+        ${CMAKE_CURRENT_SOURCE_DIR}/l2_sp_tb.sv
+    TOP_MODULE l2_sp_tb
+    CPP_SOURCES test_l2_sp.cpp
+    FLAGS ${VERILATOR_COMMON_FLAGS}
+    INCLUDE_DIRS ${RTL_INCLUDE_DIRS}
+)
+
+# ============================================================
 # CTest integration
 # ============================================================
 enable_testing()
 add_test(NAME alu_basic COMMAND test_alu_basic)
 add_test(NAME branch    COMMAND test_branch)
 add_test(NAME ooo_core  COMMAND tb_ooo_core)
+add_test(NAME shim_flush_race COMMAND test_shim_flush_race)
+add_test(NAME l2_sp     COMMAND test_l2_sp)

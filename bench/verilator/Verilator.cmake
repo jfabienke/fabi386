@@ -40,7 +40,7 @@ function(verilate TARGET_NAME)
 
     add_custom_command(
         OUTPUT ${VERILATOR_STAMP}
-        COMMAND ${VERILATOR_BIN} verilator
+        COMMAND ${VERILATOR_BIN}
             --cc
             --Mdir ${VDIR}
             --top-module ${V_TOP_MODULE}
@@ -56,7 +56,7 @@ function(verilate TARGET_NAME)
     # Build the Verilated model library
     add_custom_command(
         OUTPUT ${VDIR}/V${V_TOP_MODULE}__ALL.a
-        COMMAND make -C ${VDIR} -f V${V_TOP_MODULE}.mk
+        COMMAND make -C ${VDIR} -f V${V_TOP_MODULE}.mk VERILATOR_ROOT=${VERILATOR_ROOT}
         DEPENDS ${VERILATOR_STAMP}
         COMMENT "Building Verilated model for ${V_TOP_MODULE}..."
         VERBATIM
@@ -76,9 +76,13 @@ function(verilate TARGET_NAME)
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
+    find_package(Threads REQUIRED)
+
     target_link_libraries(${TARGET_NAME} PRIVATE
         ${VDIR}/V${V_TOP_MODULE}__ALL.a
         ${VERILATOR_ROOT}/include/verilated.cpp
+        ${VERILATOR_ROOT}/include/verilated_threads.cpp
         ${VERILATOR_ROOT}/include/verilated_vcd_c.cpp
+        Threads::Threads
     )
 endfunction()

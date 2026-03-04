@@ -23,6 +23,7 @@ public:
         : top_(new Vf386_branch_predict_gshare)
         , trace_(new VerilatedVcdC)
         , tick_(0)
+        , ghr_model_(0)
     {
         Verilated::traceEverOn(true);
         top_->trace(trace_, 99);
@@ -42,6 +43,8 @@ public:
         top_->res_valid = 0;
         top_->res_pc = 0;
         top_->res_actually_taken = 0;
+        top_->res_ghr_snap = 0;
+        ghr_model_ = 0;
 
         for (int i = 0; i < 10; i++) {
             top_->clk = !top_->clk;
@@ -70,13 +73,16 @@ public:
         top_->res_valid = 1;
         top_->res_pc = pc;
         top_->res_actually_taken = taken ? 1 : 0;
+        top_->res_ghr_snap = ghr_model_;
         clock();
         top_->res_valid = 0;
+        ghr_model_ = static_cast<uint8_t>((ghr_model_ << 1) | (taken ? 1 : 0));
     }
 
     Vf386_branch_predict_gshare* top_;
     VerilatedVcdC* trace_;
     uint64_t tick_;
+    uint8_t ghr_model_;
 };
 
 static int tests_run = 0;
@@ -99,6 +105,11 @@ int main(int argc, char** argv) {
     GshareTB tb;
     tb.reset();
 
+    auto pc_for_target_idx = [&](uint8_t target_idx) -> uint32_t {
+        uint8_t pc_idx = static_cast<uint8_t>(target_idx ^ tb.ghr_model_);
+        return static_cast<uint32_t>(pc_idx) << 2;
+    };
+
     // Test 1: After reset, all entries are weakly not-taken (2'b01)
     // PHT MSB = 0, so predict_taken should be false
     {
@@ -106,56 +117,55 @@ int main(int argc, char** argv) {
         check("Initial prediction is not-taken", pred == false);
     }
 
-    // Test 2: Train a branch to be taken
-    // Resolve same branch as taken multiple times
+    // Test 2: Train one PHT entry to taken using snapshot-correct gshare mapping
     {
-        uint32_t pc = 0x200;
-        // First taken: 01 -> 10 (weakly taken, MSB=1)
-        tb.resolve(pc, true);
-        bool pred = tb.predict(pc);
+        constexpr uint8_t target_idx = 0x42;
+
+        // First taken: 01 -> 10
+        tb.resolve(pc_for_target_idx(target_idx), true);
+        bool pred = tb.predict(pc_for_target_idx(target_idx));
         check("After 1 taken: predict taken", pred == true);
 
-        // Second taken: 10 -> 11 (strongly taken)
-        tb.resolve(pc, true);
-        pred = tb.predict(pc);
+        // Second taken: 10 -> 11
+        tb.resolve(pc_for_target_idx(target_idx), true);
+        pred = tb.predict(pc_for_target_idx(target_idx));
         check("After 2 taken: predict taken (strongly)", pred == true);
     }
 
-    // Test 3: Train a branch to be not-taken
+    // Test 3: Train one PHT entry to not-taken
     {
-        uint32_t pc = 0x300;
-        // Initial: 01 (weakly not taken)
-        // Resolve not-taken: 01 -> 00 (strongly not taken)
-        tb.resolve(pc, false);
-        bool pred = tb.predict(pc);
+        constexpr uint8_t target_idx = 0x63;
+        tb.resolve(pc_for_target_idx(target_idx), false); // 01 -> 00
+        bool pred = tb.predict(pc_for_target_idx(target_idx));
         check("After not-taken: predict not-taken", pred == false);
     }
 
     // Test 4: Counter saturation
     {
-        uint32_t pc = 0x400;
+        constexpr uint8_t target_idx = 0x7C;
         // Train strongly taken (11)
-        tb.resolve(pc, true);
-        tb.resolve(pc, true);
-        tb.resolve(pc, true);
+        tb.resolve(pc_for_target_idx(target_idx), true);
+        tb.resolve(pc_for_target_idx(target_idx), true);
+        tb.resolve(pc_for_target_idx(target_idx), true);
 
         // One not-taken should weaken (11 -> 10) but still predict taken
-        tb.resolve(pc, false);
-        bool pred = tb.predict(pc);
+        tb.resolve(pc_for_target_idx(target_idx), false);
+        bool pred = tb.predict(pc_for_target_idx(target_idx));
         check("Saturated counter weakens but stays taken", pred == true);
     }
 
-    // Test 5: Multiple branches maintain separate histories via GHR XOR
+    // Test 5: Multiple targets maintain separate PHT entries
     {
-        // Train PC 0x1000 taken, PC 0x2000 not-taken
+        constexpr uint8_t idx_taken = 0x15;
+        constexpr uint8_t idx_nt    = 0xE2;
         for (int i = 0; i < 4; i++) {
-            tb.resolve(0x1000, true);
+            tb.resolve(pc_for_target_idx(idx_taken), true);
         }
         for (int i = 0; i < 4; i++) {
-            tb.resolve(0x2000, false);
+            tb.resolve(pc_for_target_idx(idx_nt), false);
         }
-        // After GHR shifts, indices may alias, but basic direction should hold
-        // This is a weaker check due to GHR interaction
+        check("Taken target remains taken", tb.predict(pc_for_target_idx(idx_taken)) == true);
+        check("Not-taken target remains not-taken", tb.predict(pc_for_target_idx(idx_nt)) == false);
     }
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);

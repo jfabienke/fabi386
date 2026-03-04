@@ -9,8 +9,12 @@
  *   Arbiter ──> [FIFO depth 4] ──> Shim FSM ──> mem_ctrl data port
  *
  * FSM: IDLE → ISSUE → WAIT_ACK → RESPOND  (happy path)
- *      WAIT_ACK → DRAIN → IDLE            (flush during pending)
+ *      ISSUE/WAIT_ACK → DRAIN → IDLE      (flush during pending)
  *      RESPOND → IDLE                     (normal or flush)
+ *
+ * S_DRAIN uses req_accepted_q (set by data_gnt from downstream) to decide:
+ *   req_accepted_q=1 → downstream is processing, wait for data_ack
+ *   req_accepted_q=0 → downstream never accepted, safe to cancel immediately
  *
  * Policy decision D1: standalone shim, single client, no RETRY.
  */
@@ -37,8 +41,11 @@ module f386_lsq_to_memctrl_shim (
     output logic [7:0]   data_byte_en,
     output logic         data_req,
     output logic         data_wr,
+    output logic         data_cacheable,
+    output logic         data_strong_order,
     input  logic [63:0]  data_rdata,
     input  logic         data_ack,
+    input  logic         data_gnt,        // Grant from downstream (1-cycle pulse on acceptance)
 
     // --- Performance Counters ---
     output logic [31:0]  ctr_req_total,
@@ -73,6 +80,8 @@ module f386_lsq_to_memctrl_shim (
         logic [63:0]                   wdata;
         logic [7:0]                    byte_en;
         logic                          wr;
+        logic                          cacheable;
+        logic                          strong_order;
         logic [CONF_MEM_REQ_ID_W-1:0] id;
     } fifo_entry_t;
 
@@ -124,11 +133,13 @@ module f386_lsq_to_memctrl_shim (
     // FIFO data write
     always_ff @(posedge clk) begin
         if (fifo_wr_en) begin
-            fifo_mem[fifo_wr_ptr].addr    <= req.addr;
-            fifo_mem[fifo_wr_ptr].wdata   <= req.wdata;
-            fifo_mem[fifo_wr_ptr].byte_en <= req.byte_en;
-            fifo_mem[fifo_wr_ptr].wr      <= (req.op == MEM_OP_ST);
-            fifo_mem[fifo_wr_ptr].id      <= req.id;
+            fifo_mem[fifo_wr_ptr].addr         <= req.addr;
+            fifo_mem[fifo_wr_ptr].wdata        <= req.wdata;
+            fifo_mem[fifo_wr_ptr].byte_en      <= req.byte_en;
+            fifo_mem[fifo_wr_ptr].wr           <= (req.op == MEM_OP_ST);
+            fifo_mem[fifo_wr_ptr].cacheable    <= req.cacheable;
+            fifo_mem[fifo_wr_ptr].strong_order <= req.strong_order;
+            fifo_mem[fifo_wr_ptr].id           <= req.id;
         end
     end
 
@@ -142,6 +153,8 @@ module f386_lsq_to_memctrl_shim (
     logic [63:0]                     lat_wdata;
     logic [7:0]                      lat_byte_en;
     logic                            lat_wr;
+    logic                            lat_cacheable;
+    logic                            lat_strong_order;
     logic [CONF_MEM_REQ_ID_W-1:0]   lat_id;
 
     // Latched read response
@@ -155,6 +168,18 @@ module f386_lsq_to_memctrl_shim (
             state_q <= S_IDLE;
         else
             state_q <= state_d;
+    end
+
+    // Track whether downstream accepted the current request (via data_gnt).
+    // Used by S_DRAIN to decide: wait for ack (accepted) vs cancel (not accepted).
+    logic req_accepted_q;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            req_accepted_q <= 1'b0;
+        else if (state_q == S_IDLE)
+            req_accepted_q <= 1'b0;     // Clear at start of each request cycle
+        else if (data_gnt)
+            req_accepted_q <= 1'b1;     // Downstream accepted — ack will follow
     end
 
     always_comb begin
@@ -183,8 +208,14 @@ module f386_lsq_to_memctrl_shim (
             end
 
             S_DRAIN: begin
-                if (data_ack)
+                if (req_accepted_q) begin
+                    // Downstream accepted — must wait for data_ack before reuse
+                    if (data_ack)
+                        state_d = S_IDLE;
+                end else begin
+                    // Downstream never accepted — safe to cancel immediately
                     state_d = S_IDLE;
+                end
             end
 
             S_RESPOND: begin
@@ -201,11 +232,13 @@ module f386_lsq_to_memctrl_shim (
     // =========================================================
     always_ff @(posedge clk) begin
         if (fifo_rd_en) begin
-            lat_addr    <= fifo_head.addr;
-            lat_wdata   <= fifo_head.wdata;
-            lat_byte_en <= fifo_head.byte_en;
-            lat_wr      <= fifo_head.wr;
-            lat_id      <= fifo_head.id;
+            lat_addr         <= fifo_head.addr;
+            lat_wdata        <= fifo_head.wdata;
+            lat_byte_en      <= fifo_head.byte_en;
+            lat_wr           <= fifo_head.wr;
+            lat_cacheable    <= fifo_head.cacheable;
+            lat_strong_order <= fifo_head.strong_order;
+            lat_id           <= fifo_head.id;
         end
     end
 
@@ -233,13 +266,24 @@ module f386_lsq_to_memctrl_shim (
     end
 
     // =========================================================
-    // Downstream (mem_ctrl) Outputs
+    // Downstream (mem_ctrl / L2) Outputs
     // =========================================================
-    assign data_req     = (state_q == S_ISSUE);
-    assign data_addr    = lat_addr;
-    assign data_wdata   = lat_wdata;
-    assign data_byte_en = lat_byte_en;
-    assign data_wr      = lat_wr;
+    // data_req is a LEVEL signal held in S_ISSUE and S_WAIT_ACK until
+    // the downstream accepts and completes the request (data_ack).
+    // The !data_ack gate suppresses data_req on the exact cycle data_ack
+    // fires, preventing re-acceptance on the same clock edge.
+    //
+    // NOT held in S_DRAIN: after flush, stale requests must not be
+    // presented.  If the downstream already accepted (req_accepted_q),
+    // it will complete and send data_ack regardless of data_req.
+    assign data_req          = (state_q == S_ISSUE ||
+                                state_q == S_WAIT_ACK) && !data_ack;
+    assign data_addr         = lat_addr;
+    assign data_wdata        = lat_wdata;
+    assign data_byte_en      = lat_byte_en;
+    assign data_wr           = lat_wr;
+    assign data_cacheable    = lat_cacheable;
+    assign data_strong_order = lat_strong_order;
 
     // =========================================================
     // Performance Counters (saturating 32-bit)

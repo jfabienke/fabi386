@@ -266,7 +266,7 @@ plus non-functional requirements (formal verification, testing, build methodolog
 | **Toooba** ★★★★☆ | **Split Load-Store Queue** with store buffer. TSO memory model support — directly relevant for x86 which requires strong ordering. | `src_Core/RISCY_OOO/procs/RV64G_OOO/SplitLSQ.bsv` |
 | **mor1kx** ★★★☆☆ | 256-entry store buffer (FIFO). Decouples LSU from memory bus. Shows simple store buffer design. | Store buffer module |
 
-**Recommendation:** fabi386's LSQ is listed as "TBD" in the RSD comparison — this is a critical missing piece. x86 requires TSO (Total Store Order) — all stores must be visible in program order, but loads can be reordered with respect to other loads. Study Toooba's TSO support directly. RSD's memory dependency predictor enables speculative load execution, which is key for OoO performance. BOOM's split address/data queues reduce area by separating store address computation from data availability.
+**Recommendation (updated):** fabi386 now has an implemented LSQ (`rtl/core/f386_lsq.sv`) with byte-granular forwarding and a split-phase memory boundary. The remaining gap is integration depth: the active top-level memory path still goes through `f386_mem_ctrl` legacy req/ack plumbing, so LSQ-driven split-phase memory is not yet the default end-to-end path. For P2, use RSD/BOOM/Toooba primarily as references for non-blocking integration details (MSHR-style overlap, response routing, ordering checks) rather than for first-principles LSQ bring-up.
 
 ---
 

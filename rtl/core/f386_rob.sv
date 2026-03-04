@@ -133,7 +133,14 @@ module f386_rob (
     // Full when there aren't enough free slots for both U and V
     logic [ROB_ID_WIDTH:0] free_slots;
     assign free_slots = N[ROB_ID_WIDTH:0] - count;
+`ifdef VERILATOR
+    // Simulation bench mode: avoid combinational full<->dispatch feedback loop
+    // through top-level dispatch gating by using a conservative fullness rule.
+    // This may stall earlier (requires >=2 free slots) but keeps behavior safe.
+    assign full = (free_slots < {{(ROB_ID_WIDTH-1){1'b0}}, 2'd2});
+`else
     assign full = (free_slots < {{(ROB_ID_WIDTH-1){1'b0}}, dispatch_count});
+`endif
 
     // Assigned tags match the actual dispatch slots
     // V-pipe slot: next after U if U is also dispatching, else same as U

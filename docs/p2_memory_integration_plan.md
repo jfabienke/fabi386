@@ -1,7 +1,17 @@
 # P2: Memory Integration Plan
 
 **Created:** 2026-03-02
-**Status:** Decisions locked, implementation not started
+**Status:** Steps 1–2b landed, Step 3–4 in progress
+
+---
+
+## Progress Snapshot
+
+- Step 1 gates present (`CONF_ENABLE_LSQ_MEMIF`, `CONF_ENABLE_MEM_FABRIC`).
+- Step 2a: LSQ wired into core_top (commits `37b44d4`, `10f164b`), shim translates split-phase to legacy.
+- Step 2b: MMIO bypass via `f386_mmio_io_path`, 2-client arbiter `f386_mem_req_arbiter`, `is_mmio_addr()` in pkg. IO path on CDB1 with priority over LSQ. Store drain carries `cacheable`/`strong_order`.
+- Step 3: Watchdog + fault hardening + flush assertions.
+- Step 4: Shim FIFO (depth 2) + perf counters.
 
 ---
 
@@ -104,6 +114,7 @@ No alignment or masking at the LSQ. Downstream adapter (shim, DDRAM bridge) is r
 - Add `CONF_ENABLE_LSQ_MEMIF` and `CONF_ENABLE_MEM_FABRIC` to `f386_pkg.sv`.
 - Policy document = this file (locked).
 - Exit: sv2v clean with both gates on/off.
+- Current status: **partially complete** (gates present; top-level gate plumbing still pending).
 
 ### Step 2: Integration-first wiring (Days 2-4)
 
@@ -163,3 +174,20 @@ No alignment or masking at the LSQ. Downstream adapter (shim, DDRAM bridge) is r
 - Performance counters show measurable front-end and memory progress.
 - MMIO traffic confirmed to bypass LSQ (directed test or formal check).
 - Microcode memory ops confirmed to flow through AGU→LSQ.
+
+---
+
+## Microcode Audit (P2 Step 2b)
+
+**Gap:** The microcode sequencer (`f386_microcode_rom.sv`) is defined but **not instantiated** in `f386_ooo_core_top.sv`. When `OP_MICROCODE` is dispatched:
+- The U-pipe stalls (no CDB writeback for OP_MICROCODE).
+- No micro-ops are generated or dispatched.
+- Complex instructions (PUSHA, POPA, REP string ops, ENTER/LEAVE with nesting) will **deadlock** the ROB.
+
+**Current mitigation:** The decoder marks these as `OP_MICROCODE` but they are rare in boot code and DOS-era binaries. The ROB will stall indefinitely if one is encountered.
+
+**Deferred to P3:** Sequencer instantiation, micro-op dispatch loop, and LSQ integration for microcode-generated loads/stores. This requires:
+1. Sequencer instantiation in core_top with U-pipe interlock.
+2. Micro-op → AGU → LSQ path (each uop gets its own LQ/SQ entry).
+3. Micro-op CDB writeback (final uop retires the macro-op in ROB).
+4. Flush/rollback of partial micro-op sequences.

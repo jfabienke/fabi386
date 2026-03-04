@@ -25,7 +25,11 @@ module f386_branch_predict_hybrid (
     input  logic         res_valid,
     input  logic [31:0]  res_pc,
     input  logic         res_actually_taken,
-    input  logic         res_is_mispredict
+    input  logic         res_is_mispredict,
+    input  logic [CONF_GHR_WIDTH-1:0] res_ghr_snap,
+
+    // Snapshot to enqueue into FTQ with each fetch block
+    output logic [CONF_GHR_WIDTH-1:0] ghr_snapshot
 );
 
     // 1. Gshare Component (Conditional logic)
@@ -36,7 +40,9 @@ module f386_branch_predict_hybrid (
         .predict_taken(gshare_taken),
         .res_valid(res_valid),
         .res_pc(res_pc),
-        .res_actually_taken(res_actually_taken)
+        .res_actually_taken(res_actually_taken),
+        .res_ghr_snap(res_ghr_snap),
+        .ghr_snapshot(ghr_snapshot)
     );
 
     // 2. RAS Component (Function returns)

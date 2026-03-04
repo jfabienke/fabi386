@@ -59,7 +59,20 @@ package f386_pkg;
 
     // --- P2: Memory Integration Gates ---
     localparam bit CONF_ENABLE_LSQ_MEMIF   = 1'b0;  // P2: LSQ split-phase wiring into core_top
-    localparam bit CONF_ENABLE_MEM_FABRIC  = 1'b0;  // P2: unified memory fabric (replaces mem_ctrl)
+    localparam bit CONF_ENABLE_MEM_FABRIC  = 1'b0;  // P2: split-phase L2 with MSHRs (requires LSQ_MEMIF + L2_CACHE)
+    localparam bit CONF_ENABLE_L2_CACHE    = 1'b0;  // L2: 128KB unified cache (replaces mem_ctrl)
+
+    // --- L2 Split-Phase / MSHR ---
+    localparam int CONF_L2_NUM_MSHR   = 4;
+    localparam int CONF_L2_MSHR_ID_W  = $clog2(CONF_L2_NUM_MSHR);  // 2
+
+    // --- L2 Cache Geometry ---
+    localparam int CONF_L2_SETS       = 1024;  // 128KB / 32B / 4 ways
+    localparam int CONF_L2_WAYS       = 4;
+    localparam int CONF_L2_LINE_BYTES = 32;    // Matches CONF_L1D_LINE_BYTES
+    localparam int CONF_L2_INDEX_W    = $clog2(CONF_L2_SETS);       // 10
+    localparam int CONF_L2_OFFSET_W   = $clog2(CONF_L2_LINE_BYTES); // 5
+    localparam int CONF_L2_TAG_W      = 32 - CONF_L2_INDEX_W - CONF_L2_OFFSET_W; // 17
 
     localparam int CONF_MEM_REQ_ID_W        = 6;     // Memory transaction ID width
     localparam int CONF_LSQ_OUTSTANDING_DEPTH = 4;   // Max requests in flight from LSQ
@@ -161,6 +174,9 @@ package f386_pkg;
     } mem_class_t;
 
     // --- Unified Memory-System Request/Response (split-phase, tagged) ---
+    // D7: mem_req_t.addr is always a byte address.
+    // DDRAM_ADDR is always a 64-bit word address (byte_addr[31:3]).
+    // Conversion responsibility: the module that drives DDRAM_ADDR.
     typedef enum logic [2:0] {
         MEM_OP_LD         = 3'd0, // Scalar load (1/2/4/8B)
         MEM_OP_ST         = 3'd1, // Scalar store (1/2/4/8B)
@@ -443,5 +459,10 @@ package f386_pkg;
     localparam logic [7:0] EXC_PF = 8'd14;  // Page fault
     localparam logic [7:0] EXC_AC = 8'd17;  // Alignment check
     localparam logic [7:0] EXC_MC = 8'd18;  // Machine check
+
+    // --- Gate Dependency Assertions ---
+    // MEM_FABRIC requires both LSQ_MEMIF (split-phase ports) and L2_CACHE (geometry reuse).
+    // Note: Verilator does not allow initial blocks in packages, so these are
+    // enforced via generate-if assertions in modules that use the gates.
 
 endpackage

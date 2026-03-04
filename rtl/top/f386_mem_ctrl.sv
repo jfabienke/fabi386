@@ -36,7 +36,10 @@ module f386_mem_ctrl (
     input  logic         data_req,
     input  logic         data_wr,
     input  logic [7:0]   data_byte_en,    // Byte enables (from shim)
+    input  logic         data_cacheable,  // Cacheability hint (unused — for L2 contract)
+    input  logic         data_strong_order, // Ordering hint (unused — for L2 contract)
     output logic         data_ack,
+    output logic         data_gnt,        // Grant: 1-cycle pulse when data request accepted
 
     // Page walker port
     input  logic [31:0]  pt_addr,
@@ -50,7 +53,7 @@ module f386_mem_ctrl (
     input  logic         a20_gate,        // 1=enabled (normal), 0=wrap at 1MB
 
     // --- DDRAM Interface (MiSTer framework) ---
-    output logic [27:0]  ddram_addr,      // Byte address (256MB range)
+    output logic [28:0]  ddram_addr,      // 64-bit word address (addr[31:3])
     output logic [7:0]   ddram_burstcnt,  // Burst count (1 for single, 8 for cache line)
     output logic [63:0]  ddram_din,       // Write data (64-bit wide)
     output logic [7:0]   ddram_be,        // Byte enables
@@ -86,6 +89,9 @@ module f386_mem_ctrl (
     } arb_state_t;
 
     arb_state_t state;
+
+    // Data grant — combinational, fires on the cycle IDLE accepts data_req
+    assign data_gnt = (state == ARB_IDLE) && data_req && !ddram_busy && !pt_req;
 
     logic [31:0] arb_addr;
     logic [63:0] arb_wdata;
@@ -139,7 +145,7 @@ module f386_mem_ctrl (
 
                 ARB_IFETCH: begin
                     if (!ddram_busy) begin
-                        ddram_addr     <= arb_addr[27:0] + (ifetch_phase ? 28'd8 : 28'd0);
+                        ddram_addr     <= arb_addr[31:3] + (ifetch_phase ? 29'd1 : 29'd0);
                         ddram_burstcnt <= 8'd1;
                         ddram_rd       <= 1'b1;
                         state          <= ARB_WAIT;
@@ -148,7 +154,7 @@ module f386_mem_ctrl (
 
                 ARB_DATA: begin
                     if (!ddram_busy) begin
-                        ddram_addr     <= arb_addr[27:0];
+                        ddram_addr     <= arb_addr[31:3];
                         ddram_burstcnt <= 8'd1;
                         if (arb_wr) begin
                             ddram_din <= arb_wdata;
@@ -165,7 +171,7 @@ module f386_mem_ctrl (
 
                 ARB_PT: begin
                     if (!ddram_busy) begin
-                        ddram_addr     <= arb_addr[27:0];
+                        ddram_addr     <= arb_addr[31:3];
                         ddram_burstcnt <= 8'd1;
                         if (arb_wr) begin
                             ddram_din <= {32'd0, arb_wdata};

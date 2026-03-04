@@ -53,7 +53,7 @@ public:
         top_->clk = 0;
         top_->rst_n = 0;
         top_->fetch_data_valid = 0;
-        top_->fetch_data = 0;
+        VL_ZERO_W(4, top_->fetch_data);
         top_->mem_rdata = 0;
         top_->mem_ack = 0;
         top_->irq = 0;

@@ -84,7 +84,10 @@ module f386_rob (
     output phys_reg_t    retire_v_old_phys,
 
     // --- Flush (from Branch Resolution) ---
-    input  logic         flush
+    input  logic         flush,
+
+    // --- P3: Head pointer export (for microcode drain) ---
+    output rob_id_t      rob_head_out
 );
 
     // =========================================================
@@ -119,6 +122,7 @@ module f386_rob (
 
     rob_id_t head, tail;
     logic [ROB_ID_WIDTH:0] count;  // +1 bit to represent 0..N
+    assign rob_head_out = head;
 
     // =========================================================
     // Occupancy

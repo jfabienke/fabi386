@@ -62,7 +62,12 @@ module f386_ooo_core_top (
     // --- External Interrupts ---
     input  logic         irq,
     input  logic [7:0]   irq_vector
+`ifdef VERILATOR
+    ,input logic         test_force_flush
+`endif
 );
+
+    `include "f386_microcode_defs.svh"
 
     // =================================================================
     // Internal Wiring
@@ -118,6 +123,10 @@ module f386_ooo_core_top (
     phys_reg_t   src_phys_a, src_phys_b, src_phys_c, src_phys_d;
     logic        src_busy_a, src_busy_b, src_busy_c, src_busy_d;
     phys_reg_t   rename_old_phys_u, rename_old_phys_v;
+    phys_reg_t   rename_com_map [CONF_ARCH_REG_NUM];
+
+    // --- ROB head pointer (for microcode drain) ---
+    rob_id_t     rob_head_ptr;
 
     // --- PRF read data ---
     logic [31:0] prf_data_a, prf_data_b, prf_data_c, prf_data_d;
@@ -174,6 +183,17 @@ module f386_ooo_core_top (
     // --- Execute Stage → Microcode ---
     logic        microcode_req;
     logic [7:0]  microcode_opcode;
+
+    // --- P3: Microcode muxed signals (driven by gen_microcode or passthrough) ---
+    logic        eff_iq_exec_ready;       // IQ exec_ready (gated during UC_ACTIVE)
+    logic        eff_exec_u_valid;        // Execute u_valid (sequencer or IQ)
+    instr_info_t eff_exec_u_instr;        // Execute u_instr (sequencer or IQ)
+    logic [31:0] eff_u_op_a, eff_u_op_b;  // Execute operands
+    phys_reg_t   eff_prf_rd_addr_a;       // PRF read port A
+    phys_reg_t   eff_prf_rd_addr_b;       // PRF read port B
+    logic        eff_rob_cdb0_valid;      // ROB CDB0 valid (suppress intermediate micro-ops)
+    rob_id_t     eff_rob_cdb0_tag;        // ROB CDB0 tag (macro_rob_tag for synthetic)
+    logic        ucode_block_interrupt;   // Block interrupts during atomic sequences
 
     // --- SpecBits (Phase P1) ---
     br_tag_t     specbits_alloc_tag;
@@ -235,7 +255,11 @@ module f386_ooo_core_top (
     // --- Flush Signal ---
     // Triggered by branch misprediction or system register changes
     logic        flush;
+`ifdef VERILATOR
+    assign flush = branch_mispredict || cr0_write_flush || cr3_write_flush || cr4_write_flush || test_force_flush;
+`else
     assign flush = branch_mispredict || cr0_write_flush || cr3_write_flush || cr4_write_flush;
+`endif
 
     // Mode-only flush for decode cache (excludes branch_mispredict)
     wire mode_flush = cr0_write_flush || cr3_write_flush || cr4_write_flush;
@@ -255,11 +279,15 @@ module f386_ooo_core_top (
     sq_idx_t  rob_retire_u_sq_idx_w;
     logic     rob_retire_u_is_store_w;
 
+    // --- P3: Microcode active (driven by gen_microcode, 0 when gate OFF) ---
+    logic ucode_active;
+
     // --- Dispatch Valid (derived signals used across sections) ---
     logic dispatch_u_valid, dispatch_v_valid;
-    assign dispatch_u_valid = dec_instr_u_valid && rename_ready && !rob_full && !lsq_dispatch_blocked;
+    assign dispatch_u_valid = dec_instr_u_valid && rename_ready && !rob_full && !lsq_dispatch_blocked
+                              && !ucode_active;
     assign dispatch_v_valid = dec_instr_v_valid && rename_ready && !rob_full && rename_v_alloc_valid
-                              && !lsq_cdb1_active;
+                              && !lsq_cdb1_active && !ucode_active;
 
     // Track FTQ index alongside each dispatched ROB entry so branch resolution
     // can recover prediction-time metadata (e.g. GHR snapshot).
@@ -344,7 +372,7 @@ module f386_ooo_core_top (
         .instr_u_valid     (raw_dec_instr_u_valid),
         .instr_v           (raw_dec_instr_v),
         .instr_v_valid     (raw_dec_instr_v_valid),
-        .rename_ready      (rename_ready && !rob_full),
+        .rename_ready      (rename_ready && !rob_full && !ucode_active),
 
         .branch_target_u       (raw_dec_branch_target_u),
         .branch_target_u_valid (raw_dec_branch_target_u_valid),
@@ -491,6 +519,12 @@ module f386_ooo_core_top (
             rebuild.addr_index_valid = e.addr_index_valid;
             rebuild.addr_scale  = e.addr_scale;
             rebuild.mem_size    = 2'd2; // Default dword; re-derived from decode on miss
+            // P3: microcode fields (not cached — OP_MICROCODE never hits decode cache)
+            rebuild.is_0f       = 1'b0;
+            rebuild.modrm_reg   = 3'd0;
+            rebuild.is_rep      = 1'b0;
+            rebuild.is_repne    = 1'b0;
+            rebuild.is_32bit    = 1'b0;
         endfunction
 
         // Output mux: cache hit overrides decode
@@ -630,7 +664,10 @@ module f386_ooo_core_top (
         .pre_warm_valid   (1'b0),
         .pre_warm_arch_reg(3'b000),
         .pre_warm_value   (32'd0),
-        .pre_warm_ready   ()
+        .pre_warm_ready   (),
+
+        // P3: Committed map export (for microcode sequencer)
+        .com_map_out      (rename_com_map)
     );
 
     // =================================================================
@@ -640,11 +677,15 @@ module f386_ooo_core_top (
     // source readiness, and PRF values before sending to IQ/ROB.
     ooo_instr_t patched_u, patched_v;
 
+    // P3: Force dest_valid=0 for OP_MICROCODE — no rename allocation
+    // Micro-ops write committed physical registers directly via CDB→PRF
+    wire ucode_dest_suppress = (dec_instr_u.op_cat == OP_MICROCODE);
+
     always_comb begin
         patched_u             = dec_instr_u;
         patched_u.rob_tag     = rob_tag_u;
-        patched_u.p_dest      = dec_instr_u.dest_valid ? rename_phys_u : '0;
-        patched_u.dest_valid  = dec_instr_u.dest_valid;
+        patched_u.p_dest      = (dec_instr_u.dest_valid && !ucode_dest_suppress) ? rename_phys_u : '0;
+        patched_u.dest_valid  = dec_instr_u.dest_valid && !ucode_dest_suppress;
         patched_u.br_tag      = (dec_instr_u.op_cat == OP_BRANCH) ? specbits_alloc_tag : '0;
         patched_u.p_src_a     = src_phys_a;
         patched_u.p_src_b     = src_phys_b;
@@ -692,8 +733,8 @@ module f386_ooo_core_top (
     f386_phys_regfile prf (
         .clk       (clk),
         .rst_n     (rst_n),
-        .rd_addr_a (src_phys_a),
-        .rd_addr_b (src_phys_b),
+        .rd_addr_a (eff_prf_rd_addr_a),
+        .rd_addr_b (eff_prf_rd_addr_b),
         .rd_addr_c (src_phys_c),
         .rd_addr_d (src_phys_d),
         .rd_data_a (prf_data_a),
@@ -720,7 +761,7 @@ module f386_ooo_core_top (
 
         .issue_instr     (iq_issue_instr),
         .issue_valid     (iq_issue_valid),
-        .exec_ready      (exec_u_ready && !lsq_load_issue_stall),
+        .exec_ready      (eff_iq_exec_ready),
 
         // CDB (for wakeup and operand capture)
         .cdb0_valid      (cdb0_wr_valid),    // Gate wakeup by dest_valid
@@ -752,9 +793,9 @@ module f386_ooo_core_top (
         .rob_tag_v         (rob_tag_v),
         .full              (rob_full),
 
-        // CDB writeback from execute (flags travel with data — BOOM/RSD pattern)
-        .cdb0_valid        (cdb0_valid),
-        .cdb0_tag          (cdb0_tag),
+        // CDB writeback from execute (ROB CDB0 gated for microcode intermediate ops)
+        .cdb0_valid        (eff_rob_cdb0_valid),
+        .cdb0_tag          (eff_rob_cdb0_tag),
         .cdb0_data         (cdb0_data),
         .cdb0_flags        (cdb0_flags),
         .cdb0_flags_mask   (cdb0_flags_mask),
@@ -803,7 +844,10 @@ module f386_ooo_core_top (
         .specbits_squash_mask    (specbits_squash_mask),
 
         // Flush
-        .flush             (flush)
+        .flush             (flush),
+
+        // P3: Head pointer export (for microcode drain)
+        .rob_head_out      (rob_head_ptr)
     );
 
     // =================================================================
@@ -932,11 +976,11 @@ module f386_ooo_core_top (
         .clk             (clk),
         .reset_n         (rst_n),
 
-        // U-pipe
-        .u_instr         (exec_u_instr),
-        .u_op_a          (iq_issue_instr.val_a),
-        .u_op_b          (iq_issue_instr.val_b),
-        .u_valid         (iq_issue_valid),
+        // U-pipe (muxed for microcode: eff_* signals from gen_microcode)
+        .u_instr         (eff_exec_u_instr),
+        .u_op_a          (eff_u_op_a),
+        .u_op_b          (eff_u_op_b),
+        .u_valid         (eff_exec_u_valid),
         .u_ready         (exec_u_ready),
 
         // V-pipe (operands from PRF via patched instruction)
@@ -1017,6 +1061,11 @@ module f386_ooo_core_top (
         end
     end
 
+    // --- Microcode EFLAGS write port (driven by gen_microcode / gen_no_microcode) ---
+    logic [31:0] ucode_eflags_din;
+    logic [31:0] ucode_eflags_mask;
+    logic        ucode_eflags_we;
+
     f386_sys_regs sys_regs (
         .clk             (clk),
         .rst_n           (rst_n),
@@ -1030,10 +1079,10 @@ module f386_ooo_core_top (
         .pf_cr2_din      (32'h0),
         .pf_cr2_we       (1'b0),
 
-        // EFLAGS write port (undriven until microcode sequencer)
-        .eflags_din      (32'h0),
-        .eflags_mask     (32'h0),
-        .eflags_we       (1'b0),
+        // EFLAGS write port (microcode special commands)
+        .eflags_din      (ucode_eflags_din),
+        .eflags_mask     (ucode_eflags_mask),
+        .eflags_we       (ucode_eflags_we),
 
         // ALU flags from ROB retirement (BOOM/RSD pattern: flags travel through ROB)
         .alu_flags_in    (merged_retire_flags),
@@ -1847,6 +1896,325 @@ module f386_ooo_core_top (
         assign cdb1_exception  = raw_cdb1_exception;
         assign cdb1_phys_dest  = raw_cdb1_phys_dest;
         assign cdb1_dest_valid = raw_cdb1_dest_valid;
+
+    end endgenerate
+
+    // Debug probe: microcode FSM state (for Verilator tests)
+    logic [1:0] dbg_ucode_state;
+
+    // =================================================================
+    // 15. Microcode Sequencer Integration (P3.1a)
+    // =================================================================
+    // When CONF_ENABLE_MICROCODE is ON: instantiates sequencer, drain FSM,
+    // muxes IQ/exec/CDB/PRF signals for micro-op execution.
+    // When OFF: all eff_* signals are passthrough (zero behavior change).
+
+    generate if (CONF_ENABLE_MICROCODE) begin : gen_microcode
+
+        // ---------------------------------------------------------
+        // Drain FSM States
+        // ---------------------------------------------------------
+        typedef enum logic [1:0] {
+            UC_IDLE     = 2'd0,
+            UC_DRAINING = 2'd1,   // Waiting for ROB head to reach macro-op
+            UC_ACTIVE   = 2'd2    // Sequencer running micro-ops
+        } ucode_state_t;
+
+        ucode_state_t ucode_state;
+
+        // Latched macro-op info
+        rob_id_t  macro_rob_tag;
+        logic [7:0]  macro_opcode;
+        logic        macro_is_0f;
+        logic [2:0]  macro_modrm_reg;
+        logic        macro_is_32bit;
+        logic        macro_is_rep;
+        logic        macro_is_repne;
+        logic [31:0] macro_pc;
+
+        // Force dequeue: 1-cycle pulse to consume macro-op from IQ
+        logic iq_force_dequeue;
+
+        // Sequencer signals
+        logic        seq_uop_valid;
+        logic [47:0] seq_uop_data;
+        op_type_t    seq_uop_op_type;
+        logic [3:0]  seq_uop_alu_op;
+        logic [2:0]  seq_uop_dest_reg;
+        logic [2:0]  seq_uop_src_a_reg;
+        logic [2:0]  seq_uop_src_b_reg;
+        logic [2:0]  seq_uop_seg_reg;
+        logic [7:0]  seq_uop_special_cmd;
+        logic [15:0] seq_uop_immediate;
+        logic        seq_uop_is_last;
+        logic        seq_uop_is_atomic;
+        logic        seq_busy;
+        logic        seq_block_interrupt;
+
+        // ---------------------------------------------------------
+        // Sequencer Instantiation
+        // ---------------------------------------------------------
+        f386_microcode_sequencer u_ucode_seq (
+            .clk            (clk),
+            .rst_n          (rst_n),
+            .flush          (flush),
+            .start          (ucode_state == UC_DRAINING && rob_head_ptr == macro_rob_tag),
+            .opcode         (macro_is_0f ? 8'h0F : macro_opcode),
+            .opcode_ext     (macro_opcode),
+            .is_0f_prefix   (macro_is_0f),
+            .is_rep_prefix  (macro_is_rep),
+            .is_repne       (macro_is_repne),
+            .is_32bit       (macro_is_32bit),
+            .modrm_reg      (macro_modrm_reg),
+            .instr_pc       (macro_pc),
+            .uop_valid      (seq_uop_valid),
+            .uop_data       (seq_uop_data),
+            .uop_op_type    (seq_uop_op_type),
+            .uop_alu_op     (seq_uop_alu_op),
+            .uop_dest_reg   (seq_uop_dest_reg),
+            .uop_src_a_reg  (seq_uop_src_a_reg),
+            .uop_src_b_reg  (seq_uop_src_b_reg),
+            .uop_seg_reg    (seq_uop_seg_reg),
+            .uop_special_cmd(seq_uop_special_cmd),
+            .uop_immediate  (seq_uop_immediate),
+            .uop_is_last    (seq_uop_is_last),
+            .uop_is_atomic  (seq_uop_is_atomic),
+            .exec_ack       (ucode_exec_ack),
+            .busy           (seq_busy),
+            .block_interrupt(seq_block_interrupt),
+            .rep_ecx_zero   (1'b1),    // P3.1a stub: REP terminates immediately
+            .rep_zf_value   (1'b0)     // P3.1c: real feedback
+        );
+
+        // ---------------------------------------------------------
+        // Drain FSM
+        // ---------------------------------------------------------
+        // Microcode exec_ack: CDB0 fires for ALU ops, or immediate for stubs
+        wire uop_is_mem_stub = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
+                               (seq_uop_op_type == OP_LOAD || seq_uop_op_type == OP_STORE);
+
+        wire ucode_exec_ack = (ucode_state == UC_ACTIVE) &&
+                              (raw_cdb0_valid || uop_is_mem_stub);
+
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                ucode_state     <= UC_IDLE;
+                iq_force_dequeue <= 1'b0;
+                macro_rob_tag   <= '0;
+                macro_opcode    <= 8'h0;
+                macro_is_0f     <= 1'b0;
+                macro_modrm_reg <= 3'd0;
+                macro_is_32bit  <= 1'b0;
+                macro_is_rep    <= 1'b0;
+                macro_is_repne  <= 1'b0;
+                macro_pc        <= 32'h0;
+            end else if (flush) begin
+                ucode_state     <= UC_IDLE;
+                iq_force_dequeue <= 1'b0;
+            end else begin
+                iq_force_dequeue <= 1'b0;  // Default: clear pulse
+
+                case (ucode_state)
+                    UC_IDLE: begin
+                        // Detect OP_MICROCODE issued from IQ
+                        if (iq_issue_valid && iq_issue_instr.op_cat == OP_MICROCODE) begin
+                            ucode_state      <= UC_DRAINING;
+                            iq_force_dequeue <= 1'b1;  // 1-cycle pulse
+                            // Latch macro-op info from IQ issue
+                            macro_rob_tag    <= iq_issue_instr.rob_tag;
+                            macro_opcode     <= iq_issue_instr.opcode;
+                            macro_is_0f      <= iq_issue_instr.is_0f;
+                            macro_modrm_reg  <= iq_issue_instr.modrm_reg;
+                            macro_is_32bit   <= iq_issue_instr.is_32bit;
+                            macro_is_rep     <= iq_issue_instr.is_rep;
+                            macro_is_repne   <= iq_issue_instr.is_repne;
+                            macro_pc         <= iq_issue_instr.pc;
+                        end
+                    end
+
+                    UC_DRAINING: begin
+                        // Wait for ROB head to reach macro-op (all prior retired)
+                        if (rob_head_ptr == macro_rob_tag) begin
+                            ucode_state <= UC_ACTIVE;
+                        end
+                    end
+
+                    UC_ACTIVE: begin
+                        // Sequencer done: return to idle
+                        if (!seq_busy) begin
+                            ucode_state <= UC_IDLE;
+                        end
+                    end
+
+                    default: ucode_state <= UC_IDLE;
+                endcase
+            end
+        end
+
+        assign ucode_active = (ucode_state != UC_IDLE);
+        assign dbg_ucode_state = ucode_state;
+
+        // ---------------------------------------------------------
+        // IQ exec_ready mux (section d)
+        // ---------------------------------------------------------
+        assign eff_iq_exec_ready =
+            iq_force_dequeue                        ? 1'b1 :  // Force dequeue macro-op
+            (ucode_state == UC_ACTIVE)              ? 1'b0 :  // Suppress IQ during sequencer
+            (exec_u_ready && !lsq_load_issue_stall);          // Normal
+
+        // ---------------------------------------------------------
+        // Execute u_valid mux (section f)
+        // ---------------------------------------------------------
+        // During UC_ACTIVE: sequencer drives valid (skipping memory stubs)
+        // On dequeue cycle: suppress (macro-op consumed, not executed)
+        assign eff_exec_u_valid =
+            (ucode_state == UC_ACTIVE) ? (seq_uop_valid && !uop_is_mem_stub) :
+            iq_force_dequeue           ? 1'b0 :
+            iq_issue_valid;
+
+        // ---------------------------------------------------------
+        // PRF read address mux (section g)
+        // ---------------------------------------------------------
+        // During UC_ACTIVE: read from committed physical registers
+        assign eff_prf_rd_addr_a = (ucode_state == UC_ACTIVE) ?
+            rename_com_map[seq_uop_src_a_reg] : src_phys_a;
+        assign eff_prf_rd_addr_b = (ucode_state == UC_ACTIVE) ?
+            rename_com_map[seq_uop_src_b_reg] : src_phys_b;
+
+        // ---------------------------------------------------------
+        // Execute u_instr override (section h)
+        // ---------------------------------------------------------
+        always_comb begin
+            if (ucode_state == UC_ACTIVE && seq_uop_valid) begin
+                eff_exec_u_instr.is_valid    = 1'b1;
+                eff_exec_u_instr.pc          = macro_pc;
+                eff_exec_u_instr.opcode      = {4'b0, seq_uop_alu_op};
+                eff_exec_u_instr.op_category = seq_uop_op_type;
+                eff_exec_u_instr.reg_dest    = seq_uop_dest_reg;
+                eff_exec_u_instr.reg_src_a   = seq_uop_src_a_reg;
+                eff_exec_u_instr.reg_src_b   = seq_uop_src_b_reg;
+                eff_exec_u_instr.rob_tag     = macro_rob_tag;
+                eff_exec_u_instr.br_tag      = '0;
+                eff_exec_u_instr.dest_valid  = !ucode_has_eflags_cmd;  // Pure EFLAGS cmds: no PRF write
+                eff_exec_u_instr.phys_dest   = rename_com_map[seq_uop_dest_reg];
+                eff_exec_u_instr.imm_value   = {16'h0, seq_uop_immediate};
+                eff_exec_u_instr.flags_in    = alu_flags_current;
+                eff_exec_u_instr.flags_mask  = (seq_uop_op_type == OP_ALU_REG ||
+                                                 seq_uop_op_type == OP_ALU_IMM)
+                                                ? (seq_uop_special_cmd != UCMD_NOP ? 6'b000000 : 6'b111111)
+                                                : 6'b000000;
+                eff_exec_u_instr.pred_taken  = 1'b0;
+                eff_exec_u_instr.pred_target = 32'd0;
+                eff_exec_u_instr.sem_tag     = SEM_NONE;
+            end else begin
+                eff_exec_u_instr = exec_u_instr;
+            end
+        end
+
+        // ---------------------------------------------------------
+        // Execute operand mux (section i)
+        // ---------------------------------------------------------
+        assign eff_u_op_a = (ucode_state == UC_ACTIVE) ? prf_data_a : iq_issue_instr.val_a;
+        assign eff_u_op_b = (ucode_state == UC_ACTIVE) ? prf_data_b : iq_issue_instr.val_b;
+
+        // ---------------------------------------------------------
+        // CDB0 signal split (section j)
+        // ---------------------------------------------------------
+        // Synthetic CDB0 for memory stubs: fires on the same cycle
+        wire ucode_synth_cdb0 = uop_is_mem_stub;
+
+        // ROB CDB0: suppress intermediate micro-ops, allow last + synthetic
+        wire ucode_suppress_rob = (ucode_state == UC_ACTIVE) && seq_busy && !seq_uop_is_last;
+
+        assign eff_rob_cdb0_valid = ucode_synth_cdb0  ? seq_uop_is_last :  // Synthetic: only last
+                                    ucode_suppress_rob ? 1'b0 :             // Intermediate: suppress
+                                    cdb0_valid;                              // Normal
+
+        assign eff_rob_cdb0_tag = (ucode_state == UC_ACTIVE) ? macro_rob_tag : cdb0_tag;
+
+        // ---------------------------------------------------------
+        // Interrupt block (section o)
+        // ---------------------------------------------------------
+        assign ucode_block_interrupt = seq_block_interrupt;
+
+        // ---------------------------------------------------------
+        // Special command routing (section m) — EFLAGS commands
+        // ---------------------------------------------------------
+        logic ucode_has_eflags_cmd;
+        assign ucode_has_eflags_cmd = (seq_uop_special_cmd inside {
+            UCMD_CLC, UCMD_STC, UCMD_CMC, UCMD_CLD, UCMD_STD});
+
+        always_comb begin
+            ucode_eflags_din  = 32'h0;
+            ucode_eflags_mask = 32'h0;
+            case (seq_uop_special_cmd)
+                UCMD_CLC: begin  // Clear CF
+                    ucode_eflags_mask[EFLAGS_CF] = 1'b1;
+                    ucode_eflags_din[EFLAGS_CF]  = 1'b0;
+                end
+                UCMD_STC: begin  // Set CF
+                    ucode_eflags_mask[EFLAGS_CF] = 1'b1;
+                    ucode_eflags_din[EFLAGS_CF]  = 1'b1;
+                end
+                UCMD_CMC: begin  // Complement CF
+                    ucode_eflags_mask[EFLAGS_CF] = 1'b1;
+                    ucode_eflags_din[EFLAGS_CF]  = ~sys_eflags[EFLAGS_CF];
+                end
+                UCMD_CLD: begin  // Clear DF
+                    ucode_eflags_mask[EFLAGS_DF] = 1'b1;
+                    ucode_eflags_din[EFLAGS_DF]  = 1'b0;
+                end
+                UCMD_STD: begin  // Set DF
+                    ucode_eflags_mask[EFLAGS_DF] = 1'b1;
+                    ucode_eflags_din[EFLAGS_DF]  = 1'b1;
+                end
+                default: begin end
+            endcase
+        end
+
+        assign ucode_eflags_we = ucode_exec_ack && ucode_has_eflags_cmd && !flush;
+
+        // Deferred special commands (sim-only log)
+        // synopsys translate_off
+        always_ff @(posedge clk) begin
+            if (ucode_state == UC_ACTIVE && seq_uop_valid && !flush) begin
+                if (seq_uop_special_cmd != UCMD_NOP && !ucode_has_eflags_cmd) begin
+                    case (seq_uop_special_cmd)
+                        UCMD_LOAD_CR, UCMD_STORE_CR,       // deferred P3.2
+                        UCMD_LOAD_DTR, UCMD_STORE_DTR,     // deferred P3.2
+                        UCMD_LOAD_SEG, UCMD_STORE_SEG,     // deferred P3.2
+                        UCMD_INT_ENTER, UCMD_INT_EXIT,     // deferred P3.2
+                        UCMD_PUSH_FLAGS, UCMD_POP_FLAGS,   // deferred P3.1b
+                        UCMD_LAHF, UCMD_SAHF,              // deferred P3.1b
+                        UCMD_CLI, UCMD_STI,                // deferred P3.2 (IOPL)
+                        UCMD_HALT: begin end                // deferred P3.2
+                        default: begin end
+                    endcase
+                end
+            end
+        end
+        // synopsys translate_on
+
+    end else begin : gen_no_microcode
+
+        // ---------------------------------------------------------
+        // Gate OFF: All signals passthrough (zero behavior change)
+        // ---------------------------------------------------------
+        assign ucode_active          = 1'b0;
+        assign dbg_ucode_state       = 2'd0;
+        assign eff_iq_exec_ready     = exec_u_ready && !lsq_load_issue_stall;
+        assign eff_exec_u_valid      = iq_issue_valid;
+        assign eff_exec_u_instr      = exec_u_instr;
+        assign eff_u_op_a            = iq_issue_instr.val_a;
+        assign eff_u_op_b            = iq_issue_instr.val_b;
+        assign eff_prf_rd_addr_a     = src_phys_a;
+        assign eff_prf_rd_addr_b     = src_phys_b;
+        assign eff_rob_cdb0_valid    = cdb0_valid;
+        assign eff_rob_cdb0_tag      = cdb0_tag;
+        assign ucode_block_interrupt = 1'b0;
+        assign ucode_eflags_din      = 32'h0;
+        assign ucode_eflags_mask     = 32'h0;
+        assign ucode_eflags_we       = 1'b0;
 
     end endgenerate
 

@@ -5,9 +5,6 @@
  * Must match micro_op_defs.py encoding.
  */
 
-`ifndef F386_MICROCODE_DEFS_SVH
-`define F386_MICROCODE_DEFS_SVH
-
 // Micro-op bit field positions (48-bit micro-op)
 localparam int UOP_OP_TYPE_HI    = 47;
 localparam int UOP_OP_TYPE_LO    = 44;
@@ -120,5 +117,3 @@ localparam logic [7:0] UCMD_STC         = 8'h42;
 localparam logic [7:0] UCMD_CMC         = 8'h43;
 localparam logic [7:0] UCMD_CLD         = 8'h44;
 localparam logic [7:0] UCMD_STD         = 8'h45;
-
-`endif

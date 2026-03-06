@@ -82,6 +82,7 @@ verilate(tb_ooo_core
         ${RTL_ROOT}/core/f386_execute_stage.sv
         ${RTL_ROOT}/core/f386_issue_queue.sv
         ${RTL_ROOT}/core/f386_microcode_rom.sv
+        ${RTL_ROOT}/core/f386_microcode_sequencer.sv
         ${RTL_ROOT}/core/f386_register_rename.sv
         ${RTL_ROOT}/core/f386_rob.sv
         ${RTL_ROOT}/core/f386_seg_cache.sv
@@ -89,6 +90,38 @@ verilate(tb_ooo_core
     TOP_MODULE f386_ooo_core_top
     CPP_SOURCES tb_ooo_core.cpp memory_model.h
     FLAGS ${VERILATOR_COMMON_FLAGS}
+    INCLUDE_DIRS ${RTL_INCLUDE_DIRS}
+)
+
+# ============================================================
+# Test: Core-Top Microcode Integration (CONF_ENABLE_MICROCODE=1)
+# ============================================================
+verilate(tb_ooo_core_ucode
+    SOURCES
+        ${RTL_ROOT}/top/f386_pkg.sv
+        ${RTL_ROOT}/primitives/f386_distributed_ram.sv
+        ${RTL_ROOT}/primitives/f386_block_ram.sv
+        ${RTL_ROOT}/primitives/f386_picker.sv
+        ${RTL_ROOT}/primitives/f386_freelist_multiwidth.sv
+        ${RTL_ROOT}/core/f386_alu.v
+        ${RTL_ROOT}/core/f386_alu_simd.sv
+        ${RTL_ROOT}/core/f386_branch_predict_gshare.sv
+        ${RTL_ROOT}/core/f386_branch_predict_hybrid.sv
+        ${RTL_ROOT}/core/f386_branch_predict.sv
+        ${RTL_ROOT}/core/f386_decode.sv
+        ${RTL_ROOT}/core/f386_decode_cache.sv
+        ${RTL_ROOT}/core/f386_dispatch.sv
+        ${RTL_ROOT}/core/f386_execute_stage.sv
+        ${RTL_ROOT}/core/f386_issue_queue.sv
+        ${RTL_ROOT}/core/f386_microcode_rom.sv
+        ${RTL_ROOT}/core/f386_microcode_sequencer.sv
+        ${RTL_ROOT}/core/f386_register_rename.sv
+        ${RTL_ROOT}/core/f386_rob.sv
+        ${RTL_ROOT}/core/f386_seg_cache.sv
+        ${RTL_ROOT}/core/f386_ooo_core_top.sv
+    TOP_MODULE f386_ooo_core_top
+    CPP_SOURCES test_ooo_core_ucode.cpp memory_model.h
+    FLAGS ${VERILATOR_COMMON_FLAGS} +define+VERILATOR_ENABLE_MICROCODE
     INCLUDE_DIRS ${RTL_INCLUDE_DIRS}
 )
 
@@ -121,6 +154,20 @@ verilate(test_l2_sp
 )
 
 # ============================================================
+# Test: Microcode Sequencer (P3.1a)
+# ============================================================
+verilate(test_microcode_seq
+    SOURCES
+        ${RTL_ROOT}/top/f386_pkg.sv
+        ${RTL_ROOT}/core/f386_microcode_sequencer.sv
+        ${CMAKE_CURRENT_SOURCE_DIR}/microcode_seq_tb.sv
+    TOP_MODULE microcode_seq_tb
+    CPP_SOURCES test_microcode_seq.cpp
+    FLAGS ${VERILATOR_COMMON_FLAGS}
+    INCLUDE_DIRS ${RTL_INCLUDE_DIRS}
+)
+
+# ============================================================
 # CTest integration
 # ============================================================
 enable_testing()
@@ -129,3 +176,5 @@ add_test(NAME branch    COMMAND test_branch)
 add_test(NAME ooo_core  COMMAND tb_ooo_core)
 add_test(NAME shim_flush_race COMMAND test_shim_flush_race)
 add_test(NAME l2_sp     COMMAND test_l2_sp)
+add_test(NAME microcode_seq COMMAND test_microcode_seq)
+add_test(NAME ooo_core_ucode COMMAND tb_ooo_core_ucode)

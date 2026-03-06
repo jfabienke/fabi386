@@ -90,7 +90,10 @@ module f386_register_rename (
     input  logic        pre_warm_valid,        // Pre-warm request
     input  logic [2:0]  pre_warm_arch_reg,     // Which arch reg to pre-warm
     input  logic [31:0] pre_warm_value,        // Value to preload
-    output logic        pre_warm_ready         // Pre-warm accepted
+    output logic        pre_warm_ready,        // Pre-warm accepted
+
+    // --- P3: Committed Map Export (for microcode sequencer) ---
+    output phys_reg_t   com_map_out [CONF_ARCH_REG_NUM]
 );
 
     // =========================================================
@@ -104,6 +107,7 @@ module f386_register_rename (
 
     // Committed map (from map table, used by free list for full-flush rebuild)
     phys_reg_t com_map_wire [CONF_ARCH_REG_NUM];
+    assign com_map_out = com_map_wire;
 
     // =========================================================
     // Feature-gated snapshot signals

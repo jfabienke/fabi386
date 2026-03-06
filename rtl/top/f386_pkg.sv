@@ -57,6 +57,13 @@ package f386_pkg;
     localparam int CONF_DEC_CACHE_ENTRIES   = 256;
     localparam int CONF_DEC_CACHE_IDX_W     = $clog2(CONF_DEC_CACHE_ENTRIES); // 8
 
+    // --- P3: Microcode ---
+`ifdef VERILATOR_ENABLE_MICROCODE
+    localparam bit CONF_ENABLE_MICROCODE  = 1'b1;
+`else
+    localparam bit CONF_ENABLE_MICROCODE  = 1'b0;
+`endif
+
     // --- P2: Memory Integration Gates ---
     localparam bit CONF_ENABLE_LSQ_MEMIF   = 1'b0;  // P2: LSQ split-phase wiring into core_top
     localparam bit CONF_ENABLE_MEM_FABRIC  = 1'b0;  // P2: split-phase L2 with MSHRs (requires LSQ_MEMIF + L2_CACHE)
@@ -272,6 +279,13 @@ package f386_pkg;
         logic           addr_index_valid;   // 1 = val_b is index register for AGU (loads only)
         logic [1:0]     addr_scale;         // AGU scale: 0=1x, 1=2x, 2=4x, 3=8x
         logic [1:0]     mem_size;           // Memory op size: 0=byte, 1=word, 2=dword
+
+        // P3: Microcode sequencer fields
+        logic           is_0f;              // Two-byte opcode (0F prefix)
+        logic [2:0]     modrm_reg;          // ModRM.reg field (group opcode extension)
+        logic           is_rep;             // REP/REPE prefix present
+        logic           is_repne;           // REPNE prefix (F2)
+        logic           is_32bit;           // 32-bit operand size
     } ooo_instr_t;
 
     // Per-pipe decoded output (trimmed for cache storage)

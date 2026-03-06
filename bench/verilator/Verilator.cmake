@@ -32,8 +32,8 @@ function(verilate TARGET_NAME)
         list(APPEND INCLUDE_FLAGS "-I${dir}")
     endforeach()
 
-    # Verilator output directory
-    set(VDIR ${CMAKE_CURRENT_BINARY_DIR}/V${V_TOP_MODULE})
+    # Verilator output directory (unique per target to avoid conflicts)
+    set(VDIR ${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_vdir)
 
     # Run Verilator to generate C++ from SystemVerilog
     set(VERILATOR_STAMP ${VDIR}/V${V_TOP_MODULE}.h)

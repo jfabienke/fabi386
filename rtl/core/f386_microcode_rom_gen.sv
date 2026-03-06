@@ -200,6 +200,10 @@ function automatic logic [47:0] microcode_rom_lookup(
         15'h6740: microcode_rom_lookup = 48'h700003800008;
         15'h6780: microcode_rom_lookup = 48'h700003800008;
         15'h67C0: microcode_rom_lookup = 48'h700003800008;
+        // CPUID (0F A2): 3 ALU micro-ops writing EAX, EBX, ECX
+        15'h6880: microcode_rom_lookup = 48'h100000000110;  // step 0: ALU_IMM dest=EAX imm=0x0011
+        15'h6881: microcode_rom_lookup = 48'h10600C000220;  // step 1: ALU_IMM dest=EBX imm=0x0022
+        15'h6882: microcode_rom_lookup = 48'h102004000338;  // step 2: ALU_IMM dest=ECX imm=0x0033 is_last
         15'h68C0: microcode_rom_lookup = 48'h200000000000;
         15'h68C1: microcode_rom_lookup = 48'h700002100008;
         15'h6900: microcode_rom_lookup = 48'h700002700008;
@@ -419,6 +423,7 @@ function automatic logic [5:0] microcode_max_step(
         9'h19D: microcode_max_step = 6'd1;
         9'h19E: microcode_max_step = 6'd1;
         9'h19F: microcode_max_step = 6'd1;
+        9'h1A2: microcode_max_step = 6'd3;  // CPUID
         9'h1A3: microcode_max_step = 6'd2;
         9'h1A4: microcode_max_step = 6'd1;
         9'h1A5: microcode_max_step = 6'd1;
@@ -498,6 +503,7 @@ function automatic logic microcode_is_atomic(
         9'h101: microcode_is_atomic = 1'b1;
         9'h120: microcode_is_atomic = 1'b1;
         9'h122: microcode_is_atomic = 1'b1;
+        9'h1A2: microcode_is_atomic = 1'b1;  // CPUID
         9'h1B0: microcode_is_atomic = 1'b1;
         9'h1B1: microcode_is_atomic = 1'b1;
         9'h1B2: microcode_is_atomic = 1'b1;

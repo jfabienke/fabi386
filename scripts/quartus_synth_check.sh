@@ -61,10 +61,12 @@ USAGE
 extract_summary_value() {
     local pattern="$1"
     local file="$2"
+    # Quartus report format: ; field_name ; value ;
+    # $1=empty, $2=field name, $3=value
     awk -F ';' -v pat="$pattern" '
         $0 ~ pat {
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
-            print $2
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
+            print $3
             exit
         }
     ' "$file"
@@ -319,15 +321,19 @@ echo ""
 
 if grep -q "Compilation Hierarchy Node" "$MAP_RPT"; then
     echo -e "${BOLD}  Per-Module Breakdown (ALUTs / Regs):${NC}"
-    grep -E '^;' "$MAP_RPT" | grep -E '(f386_|alu_)' | head -25 | \
-        while IFS=';' read -r _ name aluts regs _; do
-            name=$(echo "$name" | sed 's/|//g; s/^ *//; s/ *$//')
-            aluts=$(echo "$aluts" | sed 's/^ *//; s/ *$//')
-            regs=$(echo "$regs" | sed 's/^ *//; s/ *$//')
-            if [[ -n "$name" && -n "$aluts" ]]; then
-                printf "    %-45s %6s / %s\n" "$name" "$aluts" "$regs"
-            fi
-        done
+    # Use awk to avoid SIGPIPE from head in a pipe under set -e
+    awk -F ';' '
+        /Compilation Hierarchy Node/ { found=1; next }
+        found && /^\+/ { sep++; if (sep > 1) exit; next }
+        found && /^;/ && /(f386_|alu_)/ && count<25 {
+            name=$2; aluts=$3; regs=$4
+            gsub(/\|/, "", name); gsub(/^ +| +$/, "", name)
+            gsub(/^ +| +$/, "", aluts); gsub(/^ +| +$/, "", regs)
+            if (length(name) > 0 && length(aluts) > 0)
+                printf "    %-45s %6s / %s\n", name, aluts, regs
+            count++
+        }
+    ' "$MAP_RPT"
     echo ""
 fi
 

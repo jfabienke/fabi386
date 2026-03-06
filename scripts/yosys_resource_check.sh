@@ -45,10 +45,11 @@ MODULES=(
     [f386_microcode]="f386_microcode_sequencer|rtl/core/f386_microcode_sequencer.sv rtl/core/f386_microcode_rom_gen.sv"
     # NOTE: f386_lsq excluded — byte-granular CAM forwarding causes Yosys techmap to take >10 min
     # Resource usage: ~1,200 ALMs + 0 M10K (CAM-dominated logic, no BRAM)
-    # NOTE: f386_dcache, f386_tlb, f386_l2_cache excluded — their large mux trees
+    # NOTE: f386_dcache, f386_tlb, f386_l2_cache, f386_l2_cache_sp excluded — their large mux trees
     # (4-way PLRU, fully-associative CAM) cause Yosys proc pass to take >30 min.
     # These are BRAM-dominated; resource usage is predictable from parameterization:
-    #   dcache: ~950 ALMs + 5 M10K    tlb: ~1350 ALMs + 0 M10K    l2: ~300 ALMs + 64 M10K
+    #   dcache: ~950 ALMs + 5 M10K    tlb: ~1350 ALMs + 0 M10K
+    #   l2: ~300 ALMs + 64 M10K       l2_sp: ~2700 ALMs + 64 M10K (delta: MSHRs ~2400 ALMs)
     [f386_branch_predict]="f386_branch_predict_hybrid|rtl/core/f386_branch_predict.sv rtl/core/f386_branch_predict_gshare.sv rtl/core/f386_branch_predict_hybrid.sv rtl/core/f386_ras_unit.sv"
     [f386_sys_regs]="f386_sys_regs|rtl/core/f386_sys_regs.sv"
     [f386_seg_cache]="f386_seg_cache|rtl/core/f386_seg_cache.sv"
@@ -182,7 +183,7 @@ TOTAL_ALM=$(( (TOTAL_CELLS + 4) / 5 ))
 printf "  %-28s %8s %8s %8s %8s\n" "----------------------------" "--------" "--------" "--------" "--------"
 printf "  ${BOLD}%-28s %8s %8s %8s %8s${NC}\n" "SUM (with overlap)" "$TOTAL_CELLS" "" "$TOTAL_FFS" "~$TOTAL_ALM"
 echo ""
-echo -e "  ${DIM}Excluded (BRAM/CAM-heavy): dcache (~950), tlb (~1350), l2 (~300), lsq (~1200) = ~3,800 ALMs${NC}"
+echo -e "  ${DIM}Excluded (BRAM/CAM-heavy): dcache (~950), tlb (~1350), l2 (~300), l2_sp (~2700), lsq (~1200) = ~6,500 ALMs${NC}"
 echo -e "  ${DIM}Excluded (SV interface): dispatch (~200 ALMs)${NC}"
 echo -e "  ${DIM}Note: Sum overcounts ~10-15% vs real Quartus due to cross-module optimization${NC}"
 echo -e "  ${DIM}ALM estimate: cells/5 (rough Cyclone V approximation)${NC}"

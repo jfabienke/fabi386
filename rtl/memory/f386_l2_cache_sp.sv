@@ -1029,11 +1029,20 @@ module f386_l2_cache_sp (
         end
     end
 
-    // Response consumed watchdog
-    always @(posedge clk) if (rst_n) begin
-        for (int i = 0; i < NUM_MSHR; i++) begin
-            // Forward-progress: MSHR shouldn't stay in COMPLETE for >128 cycles
-        end
+    // MH_COMPLETE watchdog: 512-cycle threshold per MSHR
+    logic [9:0] mh_complete_cnt [NUM_MSHR];
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            for (int i = 0; i < NUM_MSHR; i++) mh_complete_cnt[i] <= 10'd0;
+        else
+            for (int i = 0; i < NUM_MSHR; i++) begin
+                if (mh_state[i] == MH_COMPLETE)
+                    mh_complete_cnt[i] <= mh_complete_cnt[i] + 10'd1;
+                else
+                    mh_complete_cnt[i] <= 10'd0;
+                if (mh_complete_cnt[i] == 10'd511)
+                    $fatal(1, "L2_SP: MSHR %0d stuck in COMPLETE for 512 cycles", i);
+            end
     end
 
     // Watchdog: no main FSM state stuck for > 1024 cycles
@@ -1080,8 +1089,72 @@ module f386_l2_cache_sp (
             else $error("L2_SP: multiple blocking client acks in same cycle");
 
     // Response buffer not overwritten while valid and not consumed
+    logic [CONF_MEM_REQ_ID_W-1:0] rsp_buf_id_prev;
+    logic                          rsp_buf_valid_prev;
+    logic                          rsp_buf_consumed_prev;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rsp_buf_id_prev       <= '0;
+            rsp_buf_valid_prev    <= 1'b0;
+            rsp_buf_consumed_prev <= 1'b0;
+        end else begin
+            rsp_buf_id_prev       <= rsp_buf.id;
+            rsp_buf_valid_prev    <= rsp_buf_valid;
+            rsp_buf_consumed_prev <= lk_rsp_wins && data_rsp_ready;
+        end
+    end
+    // If rsp_buf was valid last cycle and was NOT consumed, its ID must not change
     always @(posedge clk) if (rst_n) begin
-        // This is enforced by data_req_ready gating on !rsp_buf_valid
+        if (rsp_buf_valid_prev && rsp_buf_valid && !rsp_buf_consumed_prev)
+            assert (rsp_buf.id == rsp_buf_id_prev)
+                else $error("L2_SP: rsp_buf.id changed (%0h -> %0h) while valid and not consumed",
+                            rsp_buf_id_prev, rsp_buf.id);
+    end
+
+    // Valid-ready contract: accepted request must transition to expected state
+    logic        prev_data_accepted;
+    logic        prev_data_cacheable;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            prev_data_accepted  <= 1'b0;
+            prev_data_cacheable <= 1'b0;
+        end else begin
+            prev_data_accepted  <= data_req_valid && data_req_ready;
+            prev_data_cacheable <= data_req.cacheable;
+        end
+    end
+    always @(posedge clk) if (rst_n) begin
+        if (prev_data_accepted && prev_data_cacheable)
+            assert (lk_state == LK_TAG_RD)
+                else $error("L2_SP: cacheable req accepted but next state is %s (expected LK_TAG_RD)",
+                            lk_state.name());
+        if (prev_data_accepted && !prev_data_cacheable)
+            assert (lk_state == LK_UC_ISSUE)
+                else $error("L2_SP: uncacheable req accepted but next state is %s (expected LK_UC_ISSUE)",
+                            lk_state.name());
+    end
+
+    // UC progress-based watchdog: 512 cycles with no progress event
+    logic [9:0]    uc_watchdog;
+    lk_state_t     uc_state_prev;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            uc_watchdog   <= 10'd0;
+            uc_state_prev <= LK_IDLE;
+        end else begin
+            uc_state_prev <= lk_state;
+            if (lk_state inside {LK_UC_ISSUE, LK_UC_WAIT}) begin
+                // Reset on any progress event
+                if (ddram_rd || ddram_dout_ready || (lk_state != uc_state_prev))
+                    uc_watchdog <= 10'd0;
+                else
+                    uc_watchdog <= uc_watchdog + 10'd1;
+            end else begin
+                uc_watchdog <= 10'd0;
+            end
+            if (uc_watchdog == 10'd511)
+                $fatal(1, "L2_SP: uncacheable bypass stuck for 512 cycles with no progress event");
+        end
     end
 
 `endif

@@ -8,14 +8,13 @@
  * Test 5: Secondary Miss Stall (same-line conflict)
  * Test 6: Write-Allocate Merge
  * Test 7: Dirty Eviction via MSHR (writeback + fill)
+ * Test 8: Sub-Dword Byte Enable (1B/2B writes + read-back)
+ * Test 9: Response Backpressure (rsp_ready=0 stalls delivery)
+ * Test 10: Ifetch + PT Contention During Active MSHR
  *
  * Note: Flush coverage is N/A for L2_SP — the module has no flush input.
  * Flush is handled upstream by f386_mem_req_arbiter (force-consumes stale
  * responses). MSHRs always run their DDRAM transactions to completion.
- *
- * TODO: Sub-dword request sizes (1B/2B) — currently all requests use 4B.
- * TODO: Response backpressure (tb_data_rsp_ready=0) — currently always ready.
- * TODO: Ifetch and page-walker port coverage (currently tied off).
  */
 
 #include <cstdio>
@@ -56,7 +55,15 @@ public:
         top_->tb_data_cacheable = 1;
         top_->tb_data_id = 0;
         top_->tb_data_rsp_ready = 1;
+        top_->tb_data_size = 2;  // Default 4B
         top_->tb_ddram_latency = 2;
+        // Ifetch/PT off by default
+        top_->tb_ifetch_req  = 0;
+        top_->tb_ifetch_addr = 0;
+        top_->tb_pt_req   = 0;
+        top_->tb_pt_wr    = 0;
+        top_->tb_pt_addr  = 0;
+        top_->tb_pt_wdata = 0;
         top_->eval();
     }
 
@@ -154,7 +161,64 @@ public:
 
     void idle(int n) { for (int i = 0; i < n; i++) tick(); }
     void set_ddram_latency(int lat) { top_->tb_ddram_latency = lat; }
+    void set_size(int s) { top_->tb_data_size = s; }
     uint64_t cycle() const { return cycles_; }
+
+    // Hold ifetch_req high until ifetch_valid fires. Returns 128-bit data.
+    bool issue_ifetch_wait(uint32_t addr, uint64_t& data_lo, uint64_t& data_hi,
+                           int timeout = 3000) {
+        top_->tb_ifetch_req  = 1;
+        top_->tb_ifetch_addr = addr;
+        for (int i = 0; i < timeout; i++) {
+            tick();
+            if (top_->tb_ifetch_valid) {
+                data_lo = top_->tb_ifetch_data[0];
+                data_hi = top_->tb_ifetch_data[1];
+                top_->tb_ifetch_req = 0;
+                return true;
+            }
+        }
+        top_->tb_ifetch_req = 0;
+        return false;
+    }
+
+    // Hold pt_req high until pt_ack fires. Returns rdata.
+    bool issue_pt_read_wait(uint32_t addr, uint32_t& rdata, int timeout = 3000) {
+        top_->tb_pt_req  = 1;
+        top_->tb_pt_wr   = 0;
+        top_->tb_pt_addr = addr;
+        for (int i = 0; i < timeout; i++) {
+            tick();
+            if (top_->tb_pt_ack) {
+                rdata = top_->tb_pt_rdata;
+                top_->tb_pt_req = 0;
+                return true;
+            }
+        }
+        top_->tb_pt_req = 0;
+        return false;
+    }
+
+    // Hold pt_req high until pt_ack fires (write).
+    bool issue_pt_write_wait(uint32_t addr, uint32_t wdata, int timeout = 3000) {
+        top_->tb_pt_req   = 1;
+        top_->tb_pt_wr    = 1;
+        top_->tb_pt_addr  = addr;
+        top_->tb_pt_wdata = wdata;
+        for (int i = 0; i < timeout; i++) {
+            tick();
+            if (top_->tb_pt_ack) {
+                top_->tb_pt_req = 0;
+                return true;
+            }
+        }
+        top_->tb_pt_req = 0;
+        return false;
+    }
+
+    void set_rsp_ready(bool r) { top_->tb_data_rsp_ready = r ? 1 : 0; }
+    bool rsp_valid() const { return top_->tb_data_rsp_valid != 0; }
+    uint32_t rsp_cnt() const { return top_->tb_rsp_cnt; }
 
     void check(bool cond, const char* msg) {
         if (cond) pass_count_++;
@@ -450,6 +514,142 @@ static void test_dirty_eviction(L2SpTB& tb) {
 }
 
 // =====================================================================
+// Test 8: Sub-Dword Byte Enable
+// =====================================================================
+static void test_sub_dword(L2SpTB& tb) {
+    std::printf("Test 8: Sub-Dword Byte Enable\n");
+    tb.reset();
+    tb.set_ddram_latency(2);
+
+    uint32_t addr = make_addr(90, 90, 0);
+
+    // Prime line (miss → fill)
+    tb.check(tb.prime_line(addr, 0x50), "prime line");
+    tb.clear_log();
+
+    // Write 4B: byte_en=0x0F, wdata=0x44332211, size=2
+    tb.set_size(2);
+    tb.check(tb.issue_req_wait(addr, 0x51, true, 0x44332211ULL, 0x0F),
+             "write 4B");
+    tb.check(tb.wait_responses(1, 2000), "4B write ack");
+
+    // Write 1B to lane 0: byte_en=0x01, wdata=0x99, size=0
+    tb.set_size(0);
+    tb.check(tb.issue_req_wait(addr, 0x52, true, 0x00000099ULL, 0x01),
+             "write 1B lane 0");
+    tb.check(tb.wait_responses(2, 2000), "1B write ack");
+
+    // Write 2B to lanes 2-3: byte_en=0x0C, wdata with BB at byte2, AA at byte3
+    tb.set_size(1);
+    tb.check(tb.issue_req_wait(addr, 0x53, true, 0x00000000AABB0000ULL, 0x0C),
+             "write 2B lanes 2-3");
+    tb.check(tb.wait_responses(3, 2000), "2B write ack");
+
+    // Read back 4B: expect lower 32 = 0xAABB2299
+    tb.set_size(2);
+    tb.clear_log();
+    tb.check(tb.issue_req_wait(addr, 0x54), "readback 4B");
+    tb.check(tb.wait_responses(1, 2000), "readback response");
+
+    if (!tb.responses().empty()) {
+        uint32_t lower = tb.responses().back().rdata & 0xFFFFFFFF;
+        tb.check(lower == 0xAABB2299u,
+                 "sub-dword merge: byte0=99 byte1=22 byte2=BB byte3=AA");
+    }
+
+    tb.idle(10);
+}
+
+// =====================================================================
+// Test 9: Response Backpressure
+// =====================================================================
+static void test_backpressure(L2SpTB& tb) {
+    std::printf("Test 9: Response Backpressure\n");
+    tb.reset();
+    tb.set_ddram_latency(2);
+
+    tb.clear_log();
+
+    // Issue a miss to a fresh set
+    uint32_t addr = make_addr(95, 95, 0);
+    tb.check(tb.issue_req_wait(addr, 0x60), "issue miss");
+
+    // Immediately deassert rsp_ready
+    tb.set_rsp_ready(false);
+
+    // Wait for response to appear (valid asserted, not consumed)
+    bool saw_valid = false;
+    for (int i = 0; i < 200; i++) {
+        tb.idle(1);
+        if (tb.rsp_valid()) { saw_valid = true; break; }
+    }
+    tb.check(saw_valid, "rsp_valid asserted while rsp_ready=0");
+
+    // Hold backpressure for 20 cycles, verify valid stays asserted
+    bool held = true;
+    for (int i = 0; i < 20; i++) {
+        tb.idle(1);
+        if (!tb.rsp_valid()) { held = false; break; }
+    }
+    tb.check(held, "rsp_valid held for 20 cycles under backpressure");
+
+    // Check response not consumed (log should still be empty since tick only
+    // records when both valid && ready)
+    tb.check(tb.responses().empty(), "no response consumed while ready=0");
+
+    // Release backpressure — use HW counter to verify consumption because
+    // Verilator's eval settles FFs and comb in one pass: the MSHR transitions
+    // MH_COMPLETE→MH_FREE and data_rsp_valid drops within the same eval(),
+    // so the C++ tick() after-eval sampling never sees the handshake.
+    uint32_t cnt_before = tb.rsp_cnt();
+    tb.set_rsp_ready(true);
+    tb.idle(1);  // One tick to consume
+    tb.check(tb.rsp_cnt() == cnt_before + 1, "response consumed after ready=1 (HW counter)");
+
+    tb.idle(10);
+}
+
+// =====================================================================
+// Test 10: Ifetch + PT Contention During Active MSHR
+// =====================================================================
+static void test_ifetch_pt_contention(L2SpTB& tb) {
+    std::printf("Test 10: Ifetch + PT Contention During Active MSHR\n");
+    tb.reset();
+    tb.set_ddram_latency(8);  // Slow DDRAM to keep MSHR busy
+
+    tb.clear_log();
+    uint64_t start_cycle = tb.cycle();
+
+    // Issue a data miss (MSHR allocated, slow fill in flight)
+    // Note: ID must fit in 6-bit CONF_MEM_REQ_ID_W (0-63)
+    uint32_t data_addr = make_addr(100, 200, 0);
+    tb.check(tb.issue_req_wait(data_addr, 0x35), "issue data miss (MSHR)");
+
+    // While MSHR is active, issue an ifetch to a different set
+    // Ifetch uses the blocking path, should succeed alongside MSHR
+    uint32_t if_addr = make_addr(101, 201, 0);
+    uint64_t if_lo = 0, if_hi = 0;
+    tb.check(tb.issue_ifetch_wait(if_addr, if_lo, if_hi, 5000),
+             "ifetch completes during active MSHR");
+
+    // Issue a PT read to another set
+    uint32_t pt_addr_val = make_addr(102, 202, 0);
+    uint32_t pt_rd = 0;
+    tb.check(tb.issue_pt_read_wait(pt_addr_val, pt_rd, 5000),
+             "PT read completes during active MSHR");
+
+    // Wait for the original data miss response
+    tb.check(tb.wait_responses(1, 5000), "data miss response received");
+    tb.check(tb.responses().back().id == 0x35, "data response has correct ID");
+
+    // Verify MSHR was not starved (total < 200 cycles)
+    uint64_t elapsed = tb.cycle() - start_cycle;
+    tb.check(elapsed < 200, "total elapsed < 200 cycles (no MSHR starvation)");
+
+    tb.idle(10);
+}
+
+// =====================================================================
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
 
@@ -471,6 +671,9 @@ int main(int argc, char** argv) {
     run_test("Secondary Miss",   [](L2SpTB& t) { test_secondary_miss_stall(t); });
     run_test("Write-Allocate",   [](L2SpTB& t) { test_write_allocate(t); });
     run_test("Dirty Eviction",   [](L2SpTB& t) { test_dirty_eviction(t); });
+    run_test("Sub-Dword",        [](L2SpTB& t) { test_sub_dword(t); });
+    run_test("Backpressure",     [](L2SpTB& t) { test_backpressure(t); });
+    run_test("Ifetch+PT Contention", [](L2SpTB& t) { test_ifetch_pt_contention(t); });
 
     int total_fail = tb.fail_count();
     std::printf("============================================\n");

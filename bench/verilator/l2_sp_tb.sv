@@ -27,6 +27,23 @@ module l2_sp_tb (
     output logic [5:0]  tb_data_rsp_id,
     output logic [63:0] tb_data_rsp_rdata,
 
+    // --- Sub-dword size control ---
+    input  logic [1:0]  tb_data_size,       // 0=1B, 1=2B, 2=4B, 3=8B
+
+    // --- Ifetch test controls ---
+    input  logic        tb_ifetch_req,
+    input  logic [31:0] tb_ifetch_addr,
+    output logic        tb_ifetch_valid,
+    output logic [127:0] tb_ifetch_data,
+
+    // --- Page-walker test controls ---
+    input  logic        tb_pt_req,
+    input  logic        tb_pt_wr,
+    input  logic [31:0] tb_pt_addr,
+    input  logic [31:0] tb_pt_wdata,
+    output logic        tb_pt_ack,
+    output logic [31:0] tb_pt_rdata,
+
     // --- DDRAM model controls ---
     input  logic [3:0]  tb_ddram_latency,   // Fill latency in cycles per beat
 
@@ -68,13 +85,17 @@ module l2_sp_tb (
     logic         ddram_dout_ready;
     logic         ddram_busy;
 
-    // Tie off unused ports
-    assign ifetch_req  = 1'b0;
-    assign ifetch_addr = 32'd0;
-    assign pt_req      = 1'b0;
-    assign pt_wr       = 1'b0;
-    assign pt_addr     = 32'd0;
-    assign pt_wdata    = 32'd0;
+    // Wire ifetch/PT ports to test controls
+    assign ifetch_req  = tb_ifetch_req;
+    assign ifetch_addr = tb_ifetch_addr;
+    assign tb_ifetch_valid = ifetch_valid;
+    assign tb_ifetch_data  = ifetch_data;
+    assign pt_req   = tb_pt_req;
+    assign pt_wr    = tb_pt_wr;
+    assign pt_addr  = tb_pt_addr;
+    assign pt_wdata = tb_pt_wdata;
+    assign tb_pt_ack   = pt_ack;
+    assign tb_pt_rdata = pt_rdata;
 
     // Build mem_req_t from test inputs
     always_comb begin
@@ -82,7 +103,7 @@ module l2_sp_tb (
         data_req.id        = tb_data_id;
         data_req.op        = tb_data_wr ? MEM_OP_ST : MEM_OP_LD;
         data_req.addr      = tb_data_addr;
-        data_req.size      = 2'd2;  // 4B (TODO: expose as tb_data_size for sub-dword tests)
+        data_req.size      = tb_data_size;
         data_req.byte_en   = tb_data_byte_en;
         data_req.wdata     = tb_data_wdata;
         data_req.burst_len = 3'd0;

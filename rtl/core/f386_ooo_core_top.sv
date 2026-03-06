@@ -55,6 +55,14 @@ module f386_ooo_core_top (
     // --- A20 Gate (for AGU) ---
     input  logic         a20_gate,
 
+    // --- Page Walker Memory Port (always present, tied off when TLB gate OFF) ---
+    output logic [31:0]  pt_addr,
+    output logic [31:0]  pt_wdata,
+    input  logic [31:0]  pt_rdata,
+    output logic         pt_req,
+    output logic         pt_wr,
+    input  logic         pt_ack,
+
     // --- Telemetry Port (HARE Suite) ---
     output telemetry_pkt_t trace_out,
     output logic           trace_valid,
@@ -68,6 +76,35 @@ module f386_ooo_core_top (
 );
 
     `include "f386_microcode_defs.svh"
+
+    // =================================================================
+    // Feature Gate Overrides (Verilator test harnesses)
+    // =================================================================
+`ifdef VERILATOR_ENABLE_LSQ_MEMIF
+    localparam bit LOCAL_ENABLE_LSQ_MEMIF = 1'b1;
+`else
+    localparam bit LOCAL_ENABLE_LSQ_MEMIF = CONF_ENABLE_LSQ_MEMIF;
+`endif
+
+`ifdef VERILATOR_ENABLE_TLB
+    localparam bit LOCAL_ENABLE_TLB = 1'b1;
+`else
+    localparam bit LOCAL_ENABLE_TLB = CONF_ENABLE_TLB;
+`endif
+
+    // Static assertion: TLB requires LSQ memory interface
+`ifndef SYNTHESIS
+    initial if (LOCAL_ENABLE_TLB && !LOCAL_ENABLE_LSQ_MEMIF)
+        $fatal(1, "CONF_ENABLE_TLB requires CONF_ENABLE_LSQ_MEMIF");
+`endif
+
+    // Page walker tie-offs when TLB gate OFF (unconditional — generate blocks override when ON)
+    generate if (!LOCAL_ENABLE_TLB) begin : gen_no_tlb_tieoff
+        assign pt_addr  = 32'd0;
+        assign pt_wdata = 32'd0;
+        assign pt_req   = 1'b0;
+        assign pt_wr    = 1'b0;
+    end endgenerate
 
     // =================================================================
     // Internal Wiring
@@ -272,6 +309,10 @@ module f386_ooo_core_top (
 
     // --- LSQ load issue stall (gates IQ exec_ready to prevent load dequeue when LD_WAIT busy) ---
     logic lsq_load_issue_stall;
+
+    // --- DTLB fault signals (driven by gen_dtlb or gen_no_dtlb, read by sys_regs CR2) ---
+    logic        dtlb_fault;
+    logic [31:0] dtlb_fault_addr;
 
     // --- LSQ ↔ ROB wiring (driven by gen_lsq_memif, stubbed when gate OFF) ---
     lq_idx_t  rob_dispatch_u_lq_idx;
@@ -1079,8 +1120,8 @@ module f386_ooo_core_top (
         .cr_we           (1'b0),
 
         // Page fault CR2 (undriven until MMU)
-        .pf_cr2_din      (32'h0),
-        .pf_cr2_we       (1'b0),
+        .pf_cr2_din      (dtlb_fault_addr),
+        .pf_cr2_we       (dtlb_fault),
 
         // EFLAGS write port (microcode special commands)
         .eflags_din      (ucode_eflags_din),
@@ -1344,11 +1385,11 @@ module f386_ooo_core_top (
     // =================================================================
     // 14. Data Memory Interface — LSQ Integration (P2 Step 2a)
     // =================================================================
-    // When CONF_ENABLE_LSQ_MEMIF is ON: full LSQ pipeline with AGU,
+    // When LOCAL_ENABLE_LSQ_MEMIF is ON: full LSQ pipeline with AGU,
     // shim, CDB mux, dispatch backpressure, and retirement wiring.
     // When OFF: legacy stub (no behavioral change).
 
-    generate if (CONF_ENABLE_LSQ_MEMIF) begin : gen_lsq_memif
+    generate if (LOCAL_ENABLE_LSQ_MEMIF) begin : gen_lsq_memif
 
         // ---------------------------------------------------------
         // Dispatch wiring: detect memory ops
@@ -1563,34 +1604,225 @@ module f386_ooo_core_top (
         // Set on AGU load fire, cleared on LSQ or IO CDB completion.
         // ---------------------------------------------------------
         logic ld_in_flight;
-        always_ff @(posedge clk or negedge rst_n) begin
-            if (!rst_n)
-                ld_in_flight <= 1'b0;
-            else if (flush)
-                ld_in_flight <= 1'b0;
-            else if (lsq_ld_cdb_valid || io_ld_cdb_valid)
-                ld_in_flight <= 1'b0;  // Load completed
-            else if (iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD) && !ld_in_flight
-                     && (!ea_is_mmio || io_path_ld_ready))
-                ld_in_flight <= 1'b1;  // New load issued
+
+        // ---------------------------------------------------------
+        // Muxed fire/address/data signals (driven by gen_dtlb or gen_no_dtlb)
+        // ---------------------------------------------------------
+        logic        eff_ld_fire;       // Cacheable load fire
+        logic        eff_ld_mmio_fire;  // MMIO load fire
+        logic        eff_st_fire;       // Store fire
+        logic [31:0] eff_ld_addr;       // Physical address for loads
+        lq_idx_t     eff_ld_idx;
+        logic [1:0]  eff_ld_size;
+        logic [3:0]  eff_ld_byte_en;
+        logic [31:0] eff_st_addr;       // Physical address for stores
+        sq_idx_t     eff_st_idx;
+        logic [31:0] eff_st_data;
+        logic [1:0]  eff_st_size;
+        logic [3:0]  eff_st_byte_en;
+        logic [31:0] eff_io_addr;       // MMIO load address
+        logic [1:0]  eff_io_size;
+        rob_id_t     eff_io_rob_tag;
+        lq_idx_t     eff_io_lq_idx;
+        logic        eff_is_mmio;       // MMIO classification for routing
+
+        // DTLB signals (driven by gen_dtlb, tied off by gen_no_dtlb)
+        // dtlb_fault and dtlb_fault_addr are at module scope (for CR2 wiring)
+        logic        dtlb_busy;
+        logic        dtlb_resp_valid;
+        logic [31:0] dtlb_paddr;
+        logic [3:0]  dtlb_fault_code;
+
+        // ---------------------------------------------------------
+        // DTLB Integration (P3.TLB.a)
+        // ---------------------------------------------------------
+        if (LOCAL_ENABLE_TLB) begin : gen_dtlb
+
+            // Translation context latch — captured on DTLB request acceptance,
+            // consumed on resp_valid. Only one outstanding translation (IQ stalled).
+            typedef struct packed {
+                logic                         is_load;
+                logic                         is_store;
+                rob_id_t                      rob_tag;
+                lq_idx_t                      lq_idx;
+                sq_idx_t                      sq_idx;
+                logic [1:0]                   mem_size;
+                logic [31:0]                  store_data;
+                logic [31:0]                  linear_addr;
+                logic                         addr_index_valid;
+            } xlat_ctx_t;
+
+            xlat_ctx_t xlat_ctx;
+
+            // DTLB request fires when IQ issues a memory op and DTLB is ready
+            wire xlat_req_fire = iq_issue_valid && !dtlb_busy
+                                 && (iq_issue_instr.op_cat inside {OP_LOAD, OP_STORE})
+                                 && !indexed_store_block && !misaligned_store_block;
+
+            f386_dtlb_frontend u_dtlb (
+                .clk              (clk),
+                .rst_n            (rst_n),
+                .flush            (flush),
+                .req_valid        (xlat_req_fire),
+                .req_addr_linear  (computed_ea),
+                .req_write        (iq_issue_instr.op_cat == OP_STORE),
+                .req_user         (sys_cpl == 2'b11 || v86_mode),
+                .resp_valid       (dtlb_resp_valid),
+                .resp_paddr       (dtlb_paddr),
+                .resp_fault       (dtlb_fault),
+                .resp_fault_addr  (dtlb_fault_addr),
+                .resp_fault_code  (dtlb_fault_code),
+                .busy             (dtlb_busy),
+                .paging_enabled   (sys_pg_mode),
+                .flush_all        (cr3_write_flush),
+                .invlpg_valid     (1'b0),               // deferred
+                .invlpg_vaddr     (32'd0),
+                .cr3              (sys_cr3),
+                .pt_addr          (pt_addr),
+                .pt_wdata         (pt_wdata),
+                .pt_rdata         (pt_rdata),
+                .pt_req           (pt_req),
+                .pt_wr            (pt_wr),
+                .pt_ack           (pt_ack)
+            );
+
+            // Latch context on DTLB request acceptance
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    xlat_ctx <= '0;
+                else if (flush)
+                    xlat_ctx <= '0;
+                else if (xlat_req_fire) begin
+                    xlat_ctx.is_load          <= (iq_issue_instr.op_cat == OP_LOAD);
+                    xlat_ctx.is_store         <= (iq_issue_instr.op_cat == OP_STORE);
+                    xlat_ctx.rob_tag          <= iq_issue_instr.rob_tag;
+                    xlat_ctx.lq_idx           <= iq_issue_instr.lq_idx;
+                    xlat_ctx.sq_idx           <= iq_issue_instr.sq_idx;
+                    xlat_ctx.mem_size         <= iq_issue_instr.mem_size;
+                    xlat_ctx.store_data       <= iq_issue_instr.val_b;
+                    xlat_ctx.linear_addr      <= computed_ea;
+                    xlat_ctx.addr_index_valid <= iq_issue_instr.addr_index_valid;
+                end
+            end
+
+            // MMIO classification: route on linear address for first pass
+            wire xlat_is_mmio = is_mmio_addr(xlat_ctx.linear_addr);
+
+            // MMIO hazard assertions (sim-only)
+            `ifndef SYNTHESIS
+            always @(posedge clk) begin
+                if (dtlb_resp_valid && sys_pg_mode) begin
+                    if (is_mmio_addr(xlat_ctx.linear_addr) && dtlb_paddr != xlat_ctx.linear_addr)
+                        $warning("MMIO linear address remapped by paging");
+                    if (!is_mmio_addr(xlat_ctx.linear_addr) && is_mmio_addr(dtlb_paddr))
+                        $warning("Non-MMIO linear address maps to physical MMIO range");
+                end
+            end
+            `endif
+
+            // Store fault policy: provisional
+            `ifndef SYNTHESIS
+            always @(posedge clk) begin
+                if (dtlb_resp_valid && dtlb_fault && xlat_ctx.is_store)
+                    $fatal(1, "Store page fault (provisional — not yet handled)");
+            end
+            `endif
+
+            // Drive muxed fire signals from latched context + translation response
+            assign eff_ld_fire      = dtlb_resp_valid && !dtlb_fault
+                                      && xlat_ctx.is_load && !xlat_is_mmio;
+            assign eff_ld_mmio_fire = dtlb_resp_valid && !dtlb_fault
+                                      && xlat_ctx.is_load && xlat_is_mmio && io_path_ld_ready;
+            assign eff_st_fire      = dtlb_resp_valid && !dtlb_fault
+                                      && xlat_ctx.is_store;
+
+            assign eff_ld_addr    = dtlb_paddr;
+            assign eff_ld_idx     = xlat_ctx.lq_idx;
+            assign eff_ld_size    = xlat_ctx.mem_size;
+            assign eff_ld_byte_en = ld_byte_en(xlat_ctx.mem_size, dtlb_paddr[1:0]);
+            assign eff_st_addr    = dtlb_paddr;
+            assign eff_st_idx     = xlat_ctx.sq_idx;
+            assign eff_st_data    = xlat_ctx.store_data;
+            assign eff_st_size    = xlat_ctx.mem_size;
+            assign eff_st_byte_en = st_byte_en(xlat_ctx.mem_size, dtlb_paddr[1:0]);
+            assign eff_io_addr    = dtlb_paddr;
+            assign eff_io_size    = xlat_ctx.mem_size;
+            assign eff_io_rob_tag = xlat_ctx.rob_tag;
+            assign eff_io_lq_idx  = xlat_ctx.lq_idx;
+            assign eff_is_mmio    = xlat_is_mmio;
+
+            // Load in-flight: set on DTLB request acceptance for loads
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    ld_in_flight <= 1'b0;
+                else if (flush)
+                    ld_in_flight <= 1'b0;
+                else if (lsq_ld_cdb_valid || io_ld_cdb_valid)
+                    ld_in_flight <= 1'b0;
+                else if (xlat_req_fire && (iq_issue_instr.op_cat == OP_LOAD))
+                    ld_in_flight <= 1'b1;
+            end
+
+            // IQ stall: translation busy, or load in-flight, or existing guards
+            assign lsq_load_issue_stall =
+                dtlb_busy ||
+                ((iq_issue_instr.op_cat == OP_LOAD) && ld_in_flight) ||
+                indexed_store_block || misaligned_store_block;
+
+        end else begin : gen_no_dtlb
+
+            // Passthrough: physical = linear, no latch needed
+            assign dtlb_paddr      = computed_ea;
+            assign dtlb_resp_valid = iq_issue_valid
+                                     && (iq_issue_instr.op_cat inside {OP_LOAD, OP_STORE});
+            assign dtlb_fault      = 1'b0;
+            assign dtlb_fault_addr = 32'd0;
+            assign dtlb_fault_code = 4'd0;
+            assign dtlb_busy       = 1'b0;
+
+            // Direct fire signals (existing behavior)
+            assign eff_ld_fire      = iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD)
+                                      && !ld_in_flight && !ea_is_mmio;
+            assign eff_ld_mmio_fire = iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD)
+                                      && !ld_in_flight && ea_is_mmio && io_path_ld_ready;
+            assign eff_st_fire      = iq_issue_valid && (iq_issue_instr.op_cat == OP_STORE)
+                                      && !indexed_store_block && !misaligned_store_block;
+
+            assign eff_ld_addr    = computed_ea;
+            assign eff_ld_idx     = iq_issue_instr.lq_idx;
+            assign eff_ld_size    = iq_issue_instr.mem_size;
+            assign eff_ld_byte_en = ld_byte_en(iq_issue_instr.mem_size, computed_ea[1:0]);
+            assign eff_st_addr    = computed_ea;
+            assign eff_st_idx     = iq_issue_instr.sq_idx;
+            assign eff_st_data    = iq_issue_instr.val_b;
+            assign eff_st_size    = iq_issue_instr.mem_size;
+            assign eff_st_byte_en = st_byte_en(iq_issue_instr.mem_size, computed_ea[1:0]);
+            assign eff_io_addr    = computed_ea;
+            assign eff_io_size    = iq_issue_instr.mem_size;
+            assign eff_io_rob_tag = iq_issue_instr.rob_tag;
+            assign eff_io_lq_idx  = iq_issue_instr.lq_idx;
+            assign eff_is_mmio    = ea_is_mmio;
+
+            // Load in-flight (original logic)
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    ld_in_flight <= 1'b0;
+                else if (flush)
+                    ld_in_flight <= 1'b0;
+                else if (lsq_ld_cdb_valid || io_ld_cdb_valid)
+                    ld_in_flight <= 1'b0;
+                else if (iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD) && !ld_in_flight
+                         && (!ea_is_mmio || io_path_ld_ready))
+                    ld_in_flight <= 1'b1;
+            end
+
+            // IQ stall (original logic)
+            assign lsq_load_issue_stall =
+                ((iq_issue_instr.op_cat == OP_LOAD) &&
+                 (ld_in_flight || (ea_is_mmio && !io_path_ld_ready))) ||
+                indexed_store_block || misaligned_store_block;
+
         end
-
-        // ---------------------------------------------------------
-        // AGU fire detection (split MMIO vs cacheable)
-        // ---------------------------------------------------------
-        wire agu_ld_fire      = iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD)
-                                && !ld_in_flight && !ea_is_mmio;
-        wire agu_ld_mmio_fire = iq_issue_valid && (iq_issue_instr.op_cat == OP_LOAD)
-                                && !ld_in_flight && ea_is_mmio && io_path_ld_ready;
-        wire agu_st_fire      = iq_issue_valid && (iq_issue_instr.op_cat == OP_STORE)
-                                && !indexed_store_block && !misaligned_store_block;
-
-        // Gate IQ exec_ready: stall on in-flight load, MMIO load when IO not ready,
-        // indexed store (needs microcode), or misaligned cross-dword store (needs split)
-        assign lsq_load_issue_stall =
-            ((iq_issue_instr.op_cat == OP_LOAD) &&
-             (ld_in_flight || (ea_is_mmio && !io_path_ld_ready))) ||
-            indexed_store_block || misaligned_store_block;
 
         // ROB retirement signals come from top-level wires
         // (rob_retire_u_sq_idx_w, rob_retire_u_is_store_w)
@@ -1644,20 +1876,20 @@ module f386_ooo_core_top (
             .sq_full          (lsq_sq_full),
 
             // AGU load (cacheable only — MMIO goes to IO path)
-            .agu_ld_valid     (agu_ld_fire),
-            .agu_ld_idx       (iq_issue_instr.lq_idx),
-            .agu_ld_addr      (computed_ea),
-            .agu_ld_size      (iq_issue_instr.mem_size),
-            .agu_ld_byte_en   (ld_byte_en(iq_issue_instr.mem_size, computed_ea[1:0])),
+            .agu_ld_valid     (eff_ld_fire),
+            .agu_ld_idx       (eff_ld_idx),
+            .agu_ld_addr      (eff_ld_addr),
+            .agu_ld_size      (eff_ld_size),
+            .agu_ld_byte_en   (eff_ld_byte_en),
             .agu_ld_signed    (1'b0),   // TODO: carry sign info from decode
 
             // AGU store (all stores — MMIO classification on drain)
-            .agu_st_valid     (agu_st_fire),
-            .agu_st_idx       (iq_issue_instr.sq_idx),
-            .agu_st_addr      (computed_ea),
-            .agu_st_data      (iq_issue_instr.val_b),
-            .agu_st_size      (iq_issue_instr.mem_size),
-            .agu_st_byte_en   (st_byte_en(iq_issue_instr.mem_size, computed_ea[1:0])),
+            .agu_st_valid     (eff_st_fire),
+            .agu_st_idx       (eff_st_idx),
+            .agu_st_addr      (eff_st_addr),
+            .agu_st_data      (eff_st_data),
+            .agu_st_size      (eff_st_size),
+            .agu_st_byte_en   (eff_st_byte_en),
 
             // CDB load result
             .ld_cdb_valid     (lsq_ld_cdb_valid),
@@ -1709,13 +1941,13 @@ module f386_ooo_core_top (
             .flush            (flush),
 
             // Upstream: MMIO load request
-            .ld_req_valid     (agu_ld_mmio_fire),
+            .ld_req_valid     (eff_ld_mmio_fire),
             .ld_req_ready     (io_path_ld_ready),
-            .ld_req_addr      (computed_ea),
-            .ld_req_size      (iq_issue_instr.mem_size),
+            .ld_req_addr      (eff_io_addr),
+            .ld_req_size      (eff_io_size),
             .ld_req_signed    (1'b0),   // TODO: carry sign info from decode
-            .ld_req_rob_tag   (iq_issue_instr.rob_tag),
-            .ld_req_lq_idx    (iq_issue_instr.lq_idx),
+            .ld_req_rob_tag   (eff_io_rob_tag),
+            .ld_req_lq_idx    (eff_io_lq_idx),
 
             // TSO ordering
             .sq_empty         (lsq_sq_empty),
@@ -1867,6 +2099,8 @@ module f386_ooo_core_top (
         assign lsq_load_issue_stall   = 1'b0;
         assign rob_dispatch_u_lq_idx  = '0;
         assign rob_dispatch_u_sq_idx  = '0;
+        assign dtlb_fault             = 1'b0;
+        assign dtlb_fault_addr        = 32'd0;
 
         assign mem_addr         = 32'd0;
         assign mem_wdata        = 64'd0;

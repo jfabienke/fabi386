@@ -297,6 +297,13 @@ module f386_emu (
 
         .a20_gate        (a20_gate),
 
+        .pt_addr         (pt_addr),
+        .pt_wdata        (pt_wdata),
+        .pt_rdata        (pt_rdata),
+        .pt_req          (pt_req),
+        .pt_wr           (pt_wr),
+        .pt_ack          (pt_ack),
+
         .trace_out       (trace_out),
         .trace_valid     (trace_valid),
 
@@ -307,13 +314,9 @@ module f386_emu (
     // =====================================================================
     //  Memory Controller (DDRAM Bridge)
     // =====================================================================
-    // Page walker memory port (directly from TLB/page walker, stub for now)
+    // Page walker memory port (driven by core_top — tied off when TLB gate OFF)
     logic [31:0] pt_addr, pt_wdata, pt_rdata;
     logic        pt_req, pt_wr, pt_ack;
-    assign pt_addr  = 32'd0;
-    assign pt_wdata = 32'd0;
-    assign pt_req   = 1'b0;
-    assign pt_wr    = 1'b0;
 
     generate
     if (CONF_ENABLE_MEM_FABRIC) begin : gen_l2_sp

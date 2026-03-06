@@ -218,7 +218,7 @@ info "Preparing Quartus job $JOB_ID (backend=$BACKEND, host=$HOST)"
 info "Running sv2v..."
 mapfile -t top_files < <(find rtl/top -maxdepth 1 -name '*.sv' ! -name 'f386_pkg.sv' | sort)
 
-if ! sv2v -I rtl/core \
+if ! sv2v -DSYNTHESIS -I rtl/core \
     "$PKG_FILE" \
     rtl/primitives/*.sv \
     rtl/core/*.sv \

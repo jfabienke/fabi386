@@ -292,7 +292,10 @@ module f386_ooo_core_top (
     // Track FTQ index alongside each dispatched ROB entry so branch resolution
     // can recover prediction-time metadata (e.g. GHR snapshot).
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            for (int i = 0; i < CONF_ROB_ENTRIES; i++)
+                rob_ftq_idx_tbl[i] <= '0;
+        end else if (flush) begin
             for (int i = 0; i < CONF_ROB_ENTRIES; i++)
                 rob_ftq_idx_tbl[i] <= '0;
         end else begin

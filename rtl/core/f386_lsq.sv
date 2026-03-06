@@ -185,7 +185,14 @@ module f386_lsq (
     // Load Queue Dispatch + AGU Writeback
     // =========================================================
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            lq_valid      <= '0;
+            lq_addr_valid <= '0;
+            lq_executed   <= '0;
+            lq_head       <= '0;
+            lq_tail       <= '0;
+            lq_count      <= '0;
+        end else if (flush) begin
             lq_valid      <= '0;
             lq_addr_valid <= '0;
             lq_executed   <= '0;
@@ -230,7 +237,15 @@ module f386_lsq (
     // Store Queue Dispatch + AGU Writeback + Retire + Drain
     // =========================================================
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            sq_valid      <= '0;
+            sq_addr_valid <= '0;
+            sq_data_valid <= '0;
+            sq_committed  <= '0;
+            sq_head       <= '0;
+            sq_tail       <= '0;
+            sq_count      <= '0;
+        end else if (flush) begin
             sq_valid      <= '0;
             sq_addr_valid <= '0;
             sq_data_valid <= '0;
@@ -329,7 +344,9 @@ module f386_lsq (
     logic [31:0] ld_pipe_fwd_data_r;
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            ld_pipe_valid_r <= 1'b0;
+        end else if (flush) begin
             ld_pipe_valid_r <= 1'b0;
         end else begin
             ld_pipe_valid_r     <= agu_ld_valid && lq_valid[agu_ld_idx];
@@ -416,7 +433,10 @@ module f386_lsq (
 
             // Load execution FSM (dcache path — same structure, dcache response)
             always_ff @(posedge clk or negedge rst_n) begin
-                if (!rst_n || flush) begin
+                if (!rst_n) begin
+                    ld_state     <= LD_IDLE;
+                    ld_cdb_valid <= 1'b0;
+                end else if (flush) begin
                     ld_state     <= LD_IDLE;
                     ld_cdb_valid <= 1'b0;
                 end else begin
@@ -584,7 +604,12 @@ module f386_lsq (
 
             // ---- Response Handling (registered) ----
             always_ff @(posedge clk or negedge rst_n) begin
-                if (!rst_n || flush) begin
+                if (!rst_n) begin
+                    be_resp_valid      <= 1'b0;
+                    be_resp_data       <= 32'd0;
+                    be_resp_fault      <= 1'b0;
+                    store_drain_ack_be <= 1'b0;
+                end else if (flush) begin
                     be_resp_valid      <= 1'b0;
                     be_resp_data       <= 32'd0;
                     be_resp_fault      <= 1'b0;
@@ -683,7 +708,11 @@ module f386_lsq (
             // it clears on the same cycle ld_state leaves LD_WAIT, preventing a
             // 1-cycle window where a duplicate load could be re-issued.
             always_ff @(posedge clk or negedge rst_n) begin
-                if (!rst_n || flush) begin
+                if (!rst_n) begin
+                    ld_state      <= LD_IDLE;
+                    ld_cdb_valid  <= 1'b0;
+                    ld_req_issued <= 1'b0;
+                end else if (flush) begin
                     ld_state      <= LD_IDLE;
                     ld_cdb_valid  <= 1'b0;
                     ld_req_issued <= 1'b0;

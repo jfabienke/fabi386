@@ -2,7 +2,8 @@
 
 **Last updated:** 2026-03-02
 **Commit:** `a4843cb` — Fix maptable bypass, dest_valid gating, br_tag propagation
-**Tool:** Quartus Prime 21.1 Lite (Analysis & Synthesis, `--parallel=1`, Rosetta VM)
+**Tool (historical baseline):** Quartus Prime 21.1 Lite (Analysis & Synthesis, `--parallel=1`, Rosetta VM)
+**Current build pipeline:** NAS build server via `scripts/quartus_synth_check.sh --backend nas`
 
 ## Device Capacity
 
@@ -215,8 +216,11 @@ After each feature implementation:
 sv2v -I rtl/core rtl/top/f386_pkg.sv rtl/primitives/*.sv rtl/core/*.sv \
      rtl/memory/*.sv rtl/soc/*.sv rtl/top/*.sv > build/f386_sv2v_full.v
 
-# 2. Quartus synthesis (on Quartus VM, ~2 min)
-./scripts/quartus_synth_check.sh [VM_IP]
+# 2. Quartus synthesis (preferred: NAS backend)
+./scripts/quartus_synth_check.sh --backend nas --host <nas-host>
+
+# VM fallback
+./scripts/quartus_synth_check.sh --backend vm --host <vm-ip>
 
 # 3. Update this document with real numbers from the report
 ```

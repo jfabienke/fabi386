@@ -10,11 +10,11 @@
 
 ## Prerequisites
 
-- Quartus 21.1 Lite in UTM VM (Ubuntu ARM64 + Rosetta). **Not 25.1** (AVX crash).
+- Quartus NAS build server configured. See [quartus_nas_build.md](/Users/jvindahl/Development/fabi386/docs/quartus_nas_build.md).
 - sv2v installed locally (ARM, via Homebrew).
-- `sshpass` installed: `brew install hudochenkov/sshpass/sshpass`
 - DE10-Nano board with USB-Blaster connected.
-- VM IP known (changes on reboot): `ssh quartus@<IP>` and verify with `ip addr show enp0s1`.
+- NAS reachable via `ssh admin@<host>`.
+- VM backend is still available as fallback, but NAS is now the preferred path.
 
 ---
 
@@ -36,42 +36,34 @@ grep -q "CONF_ENABLE_LSQ_MEMIF.*1'b1"  "$tmp_pkg" || echo "ERROR: sed failed"
 grep -q "CONF_ENABLE_L2_CACHE.*1'b1"   "$tmp_pkg" || echo "ERROR: sed failed"
 ```
 
-## Step 2: sv2v Conversion
+## Step 2: Build with temp pkg override
 
 ```bash
-top_files=$(ls rtl/top/*.sv | grep -v f386_pkg.sv)
+QUARTUS_HOST=192.168.50.100  # adjust for your NAS
 
-sv2v -I rtl/core \
-    "$tmp_pkg" rtl/primitives/*.sv rtl/core/*.sv \
-    rtl/memory/*.sv rtl/soc/*.sv $top_files \
-    > build/f386_sv2v_fabric.v
+# Preferred: use the wrapper with the temp patched pkg. This keeps the working
+# tree unchanged while still building the gate-on configuration.
+./scripts/quartus_synth_check.sh \
+    --backend nas \
+    --host "${QUARTUS_HOST}" \
+    --pkg "$tmp_pkg" \
+    --job-name mem_fabric_smoke
 ```
 
-## Step 3: Quartus Synthesis on VM
+## Step 3: Full Compile (optional)
 
 ```bash
-VM_IP=192.168.64.4  # check actual IP
-
-# Copy to VM tmpfs ramdisk (VirtIO shared mount is too slow)
-sshpass -p 'quartus' scp -o PubkeyAuthentication=no \
-    build/f386_sv2v_fabric.v rtl/core/f386_alu.v rtl/core/f386_fpu_spatial.v \
-    quartus@${VM_IP}:/tmp/ramdisk/
-
-# Run synthesis (--parallel=1 required — Rosetta deadlocks on IPC pipes)
-sshpass -p 'quartus' ssh -o PubkeyAuthentication=no quartus@${VM_IP} \
-    "cd /tmp/ramdisk && quartus_map f386_sv2v --parallel=1"
-```
-
-## Step 4: Full Compile (optional)
-
-```bash
-sshpass -p 'quartus' ssh -o PubkeyAuthentication=no quartus@${VM_IP} \
-    "cd /tmp/ramdisk && quartus_sh --flow compile f386_sv2v --parallel=1"
+./scripts/quartus_synth_check.sh \
+    --backend nas \
+    --host "${QUARTUS_HOST}" \
+    --pkg "$tmp_pkg" \
+    --full \
+    --job-name mem_fabric_smoke_full
 ```
 
 Check timing report for violations after completion.
 
-## Step 5: Flash DE10
+## Step 4: Flash DE10
 
 Option A — USB-Blaster (direct):
 ```bash
@@ -81,7 +73,7 @@ quartus_pgm -c USB-Blaster -m JTAG -o "p;output_files/f386_sv2v.sof"
 Option B — MiSTer `.rbf` copy:
 Copy the generated `.rbf` to the MiSTer SD card and load via OSD.
 
-## Step 6: Smoke Tests
+## Step 5: Smoke Tests
 
 Run each test from the DOS prompt. All 5 must complete without hang:
 
@@ -117,9 +109,9 @@ All 5 tests complete without hang. Record:
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Quartus hangs during compile | Rosetta deadlock on IPC pipes | Use `--parallel=1` |
-| Compile extremely slow (~30 min) | Using VirtIO shared mount | Run from `/tmp/ramdisk` |
-| SSH connection refused | VM IP changed on reboot | Re-check with `ip addr show enp0s1` |
+| SSH connection refused | NAS IP / key / `AllowUsers` mismatch | Verify `ssh admin@<host>` first |
+| Quartus backend says container missing | NAS container not running | Start `quartus` in Container Station |
+| Compile unexpectedly slow | NAS load or overly high parallelism | Retry with `QUARTUS_PARALLEL=4` |
 | Boot hangs (no DOS prompt) | Microcode deadlock (OP_MICROCODE in ROB) | Known P3 gap — avoid complex instructions |
 | Hang during EDIT/DIR | MSHR exhaustion or response deadlock | Check debug signals below |
 

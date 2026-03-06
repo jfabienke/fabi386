@@ -6,8 +6,8 @@
 set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE 5CSEBA6U23I7
 set_global_assignment -name TOP_LEVEL_ENTITY f386_emu
-set_global_assignment -name ORIGINAL_QUARTUS_VERSION "21.1"
-set_global_assignment -name LAST_QUARTUS_VERSION "21.1.0 Lite Edition"
+set_global_assignment -name ORIGINAL_QUARTUS_VERSION "17.0"
+set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Lite Edition"
 
 # Source files
 set_global_assignment -name VERILOG_FILE build/f386_sv2v_full.v
@@ -18,7 +18,8 @@ set_global_assignment -name VERILOG_FILE rtl/core/f386_fpu_spatial.v
 set_global_assignment -name SDC_FILE f386.sdc
 
 # Minimal synthesis — just get resource numbers fast
-set_global_assignment -name OPTIMIZATION_MODE "BALANCED"
+# OPTIMIZATION_MODE "BALANCED" — may not exist in Quartus 17.0; individual settings below cover intent
+# set_global_assignment -name OPTIMIZATION_MODE "BALANCED"
 set_global_assignment -name ALLOW_REGISTER_RETIMING OFF
 set_global_assignment -name ALLOW_REGISTER_DUPLICATION OFF
 set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF

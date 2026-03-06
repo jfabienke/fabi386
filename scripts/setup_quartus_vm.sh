@@ -2,6 +2,9 @@
 # ============================================================================
 # fabi386: Quartus VM Setup — UTM + Ubuntu ARM64 + Rosetta + Quartus Lite
 # ============================================================================
+# STATUS: Fallback only. The NAS build server is now the primary Quartus path.
+# See docs/quartus_nas_build.md for the preferred workflow.
+# ============================================================================
 # Creates an Ubuntu ARM64 VM with Rosetta x86_64 translation for running
 # Intel Quartus Prime Lite (x86_64) on Apple Silicon.
 #

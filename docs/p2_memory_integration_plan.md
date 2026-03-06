@@ -191,3 +191,40 @@ No alignment or masking at the LSQ. Downstream adapter (shim, DDRAM bridge) is r
 2. Micro-op → AGU → LSQ path (each uop gets its own LQ/SQ entry).
 3. Micro-op CDB writeback (final uop retires the macro-op in ROB).
 4. Flush/rollback of partial micro-op sequences.
+
+---
+
+## MiSTer Hardware Smoke Test Procedure (`CONF_ENABLE_MEM_FABRIC=1`)
+
+**Purpose:** Validate the split-phase L2 + MSHR path on real hardware after simulation tests pass.
+
+### Steps
+
+1. **Set feature gates** in `rtl/top/f386_pkg.sv`:
+   - `CONF_ENABLE_LSQ_MEMIF = 1'b1`
+   - `CONF_ENABLE_L2_CACHE = 1'b1`
+   - `CONF_ENABLE_MEM_FABRIC = 1'b1`
+
+2. **Build bitstream:**
+   - sv2v translate → Quartus compile via `quartus_synth_check.sh`
+   - Preferred backend: NAS (`--backend nas --host <nas-host>`)
+   - VM backend remains available as fallback
+   - Verify Quartus reports no timing violations on critical paths
+
+3. **Load bitstream** on DE10-Nano via MiSTer OSD
+
+4. **Boot test:** DOS prompt must be responsive (confirms fetch → decode → execute → memory path end-to-end through L2_SP)
+
+5. **Smoke tests:**
+   - `FDISK /STATUS` — exercises sequential reads (disk metadata)
+   - `DIR` — exercises load/store/ifetch interleaving
+   - Simple `EDIT` session — exercises mixed read/write/ifetch under interactive load
+   - `MEM` — exercises memory map reporting (MMIO reads)
+
+6. **If any hang:** VCD capture via MiSTer debug bridge, inspect:
+   - `lk_state` (main FSM stuck?)
+   - `mh_state[0:3]` (MSHR stuck in COMPLETE/WB/FILL?)
+   - `dd_owner` (DDRAM ownership deadlock?)
+   - `rsp_buf_valid` (response buffer backpressure?)
+
+**Status:** Manual test, deferred until Verilator tests and sv2v build are green.

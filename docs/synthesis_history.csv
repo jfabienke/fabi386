@@ -1,0 +1,2 @@
+date,phase,alms,regs,dsp,block_mem_bits,elapsed_sec,notes
+2026-03-06,,11871,5633,9,128,126,quartus_synth_check:nas

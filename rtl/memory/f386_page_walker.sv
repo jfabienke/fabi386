@@ -16,6 +16,7 @@ import f386_pkg::*;
 module f386_page_walker (
     input  logic         clk,
     input  logic         rst_n,
+    input  logic         flush,        // Cancel in-flight walk, quiesce pt_mem_*
 
     // --- Walk Request (from TLB miss) ---
     input  logic         walk_req,
@@ -88,6 +89,12 @@ module f386_page_walker (
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            state       <= IDLE;
+            walk_done   <= 1'b0;
+            walk_fault  <= 1'b0;
+            pt_mem_req  <= 1'b0;
+            pt_mem_wr   <= 1'b0;
+        end else if (flush) begin
             state       <= IDLE;
             walk_done   <= 1'b0;
             walk_fault  <= 1'b0;

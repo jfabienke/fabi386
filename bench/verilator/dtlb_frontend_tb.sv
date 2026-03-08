@@ -35,12 +35,17 @@ module dtlb_frontend_tb (
     // Page table memory write port (from C++ testbench)
     input  logic        tb_pt_mem_write,
     input  logic [31:0] tb_pt_mem_write_addr,
-    input  logic [31:0] tb_pt_mem_write_data
+    input  logic [31:0] tb_pt_mem_write_data,
+
+    // Observability: page walker memory request (for flush quiescence check)
+    output logic        tb_pt_req
 );
 
     // Page walker memory interface
     logic [31:0] pt_addr, pt_wdata, pt_rdata;
     logic        pt_req, pt_wr, pt_ack;
+
+    assign tb_pt_req = pt_req;
 
     f386_dtlb_frontend u_dtlb (
         .clk              (clk),
@@ -56,6 +61,7 @@ module dtlb_frontend_tb (
         .resp_fault_addr  (tb_resp_fault_addr),
         .resp_fault_code  (tb_resp_fault_code),
         .busy             (tb_busy),
+        .resp_hold        (1'b0),              // No backpressure in standalone tests
         .paging_enabled   (tb_paging_enabled),
         .flush_all        (tb_flush_all),
         .invlpg_valid     (tb_invlpg_valid),

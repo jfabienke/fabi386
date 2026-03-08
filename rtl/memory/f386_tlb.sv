@@ -196,9 +196,11 @@ module f386_tlb (
     // Update PLRU tree on access
     task automatic update_plru(input int idx);
         // Walk from leaf to root, setting bits to point away
+        // Unrolled to fixed $clog2(N) iterations for Quartus 17 compatibility
         int node;
         node = idx + (N - 1);
-        while (node > 0) begin
+        for (int level = 0; level < $clog2(N); level++) begin
+            if (node <= 0) break;
             if (node[0]) begin // Left child
                 plru_tree[(node - 1) / 2] <= 1'b1; // Point right (away)
             end else begin     // Right child

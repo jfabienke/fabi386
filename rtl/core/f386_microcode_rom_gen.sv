@@ -326,6 +326,11 @@ function automatic logic [47:0] microcode_rom_lookup(
         15'h7AC2: microcode_rom_lookup = 48'h700000E0000C;
         15'h7B00: microcode_rom_lookup = 48'h200000000000;
         15'h7B01: microcode_rom_lookup = 48'h308008000008;
+        `ifdef VERILATOR
+        // Test opcode 0xD6: PUSH EAX → POP EBX (microcode mem bring-up)
+        15'h3580: microcode_rom_lookup = 48'h308008000000;  // step 0: PUSH EAX (UCMD_PUSH_PRE)
+        15'h3581: microcode_rom_lookup = 48'h207008100008;  // step 1: POP EBX (UCMD_POP_POST, is_last)
+        `endif
         default:    microcode_rom_lookup = 48'h000000000000;
     endcase
 endfunction
@@ -381,6 +386,9 @@ function automatic logic [5:0] microcode_max_step(
         9'h0CF: microcode_max_step = 6'd4;
         9'h0D4: microcode_max_step = 6'd1;
         9'h0D5: microcode_max_step = 6'd1;
+        `ifdef VERILATOR
+        9'h0D6: microcode_max_step = 6'd2;  // Test opcode: PUSH+POP
+        `endif
         9'h0D7: microcode_max_step = 6'd1;
         9'h0E0: microcode_max_step = 6'd1;
         9'h0E1: microcode_max_step = 6'd1;

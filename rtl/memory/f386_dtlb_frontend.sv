@@ -34,6 +34,9 @@ module f386_dtlb_frontend (
     output logic [3:0]  resp_fault_code,   // {RSVD, U/S, W/R, P}
     output logic        busy,
 
+    // Backpressure: hold response until consumer accepts
+    input  logic        resp_hold,
+
     // Control
     input  logic        paging_enabled,    // CR0.PG
     input  logic        flush_all,         // CR3 write
@@ -148,9 +151,13 @@ module f386_dtlb_frontend (
     logic        walker_writable;
     logic        walker_busy;
 
+    // Walker must be flushed on pipeline flush OR CR3 write (stale page tables)
+    wire walker_flush = flush || flush_all;
+
     f386_page_walker u_walker (
         .clk             (clk),
         .rst_n           (rst_n),
+        .flush           (walker_flush),
         .walk_req        (walker_walk_req),
         .walk_vaddr      (r_linear_addr),
         .walk_write      (r_write),
@@ -232,7 +239,7 @@ module f386_dtlb_frontend (
                 tlb_fill_valid    = 1'b1;
                 tlb_fill_vpn      = r_linear_addr[31:12];
                 tlb_fill_ppn      = r_resp_paddr[31:12];
-                tlb_fill_dirty    = r_resp_fault ? 1'b0 : 1'b1;  // Use walker result
+                tlb_fill_dirty    = walker_dirty;
                 tlb_fill_accessed = 1'b1;
                 tlb_fill_user     = walker_user_out;
                 tlb_fill_writable = walker_writable;
@@ -260,7 +267,7 @@ module f386_dtlb_frontend (
             r_resp_fault      <= 1'b0;
             r_resp_fault_addr <= 32'd0;
             r_resp_fault_code <= 4'd0;
-        end else if (flush) begin
+        end else if (flush || flush_all) begin
             state             <= XL_IDLE;
         end else begin
             case (state)
@@ -340,8 +347,9 @@ module f386_dtlb_frontend (
                 end
 
                 XL_RESP: begin
-                    // Response driven combinationally; return to idle
-                    state <= XL_IDLE;
+                    // Hold response until consumer accepts (MMIO backpressure)
+                    if (!resp_hold)
+                        state <= XL_IDLE;
                 end
 
                 default: state <= XL_IDLE;
@@ -356,7 +364,7 @@ module f386_dtlb_frontend (
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             walk_req_sent <= 1'b0;
-        else if (flush)
+        else if (flush || flush_all)
             walk_req_sent <= 1'b0;
         else if (state == XL_WAIT_LOOKUP && !tlb_hit && !tlb_fault)
             walk_req_sent <= 1'b0;  // Entering XL_WALK next cycle

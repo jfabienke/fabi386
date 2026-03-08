@@ -81,7 +81,7 @@ HOST="${QUARTUS_HOST:-}"
 FULL_COMPILE=0
 JOB_NAME=""
 POSITIONAL_HOST=""
-PARALLEL="${QUARTUS_PARALLEL:-auto}"
+PARALLEL="${QUARTUS_PARALLEL:-2}"
 PKG_FILE="${QUARTUS_PKG:-rtl/top/f386_pkg.sv}"
 
 while [[ $# -gt 0 ]]; do
@@ -220,7 +220,7 @@ info "Preparing Quartus job $JOB_ID (backend=$BACKEND, host=$HOST)"
 info "Running sv2v..."
 mapfile -t top_files < <(find rtl/top -maxdepth 1 -name '*.sv' ! -name 'f386_pkg.sv' | sort)
 
-if ! sv2v -DSYNTHESIS -I rtl/core \
+if ! sv2v -DSYNTHESIS -DSYNTHESIS_ENABLE_MEMORY -I rtl/core \
     "$PKG_FILE" \
     rtl/primitives/*.sv \
     rtl/core/*.sv \
@@ -235,6 +235,8 @@ fi
 
 cp rtl/core/f386_alu.v "$LOCAL_JOB_DIR/rtl/core/"
 cp rtl/core/f386_fpu_spatial.v "$LOCAL_JOB_DIR/rtl/core/"
+mkdir -p "$LOCAL_JOB_DIR/rtl/primitives"
+cp rtl/primitives/f386_bram_sdp.v "$LOCAL_JOB_DIR/rtl/primitives/"
 cp f386.sdc "$LOCAL_JOB_DIR/"
 cp "${PROJECT}.qsf" "$LOCAL_JOB_DIR/"
 cp "${PROJECT}.qpf" "$LOCAL_JOB_DIR/"

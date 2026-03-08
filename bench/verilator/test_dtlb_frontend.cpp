@@ -6,10 +6,11 @@
  *   2. Paging ON, TLB hit → correct paddr (after initial walk fills TLB)
  *   3. Paging ON, TLB cold → miss → walk → fill → resp
  *   4. Back-to-back: second request waits until first completes
- *   5. Flush during XL_WALK → clean abort
+ *   5. Flush during XL_WALK → clean abort + walker quiesced
  *   6. Flush during XL_WAIT_LOOKUP → clean abort
  *   7. Page fault from walker → resp_fault=1
  *   8. CR3 write flush → next access re-walks
+ *   9. CR3 write during walk → clean abort + walker quiesced
  */
 
 #include <cstdio>
@@ -264,6 +265,7 @@ void test_flush_during_walk(DtlbTB &tb) {
     tb.tick();
 
     CHECK(tb.dut->tb_busy == 0, "frontend returned to idle after flush");
+    CHECK(tb.dut->tb_pt_req == 0, "walker pt_req quiesced after flush");
 
     // Verify no stale response appears
     bool got_resp = false;
@@ -362,6 +364,53 @@ void test_cr3_flush(DtlbTB &tb) {
           "new mapping used after CR3 flush");
 }
 
+// ================================================================
+// Test 9: CR3 write during walk → clean abort + walker quiesced
+// ================================================================
+void test_cr3_flush_during_walk(DtlbTB &tb) {
+    printf("Test 9: CR3 write during walk\n");
+    tb.reset();
+    tb.dut->tb_paging_enabled = 1;
+
+    uint32_t vaddr = 0x00000000;
+    tb.setup_mapping(0x0000, vaddr, 0x300,
+                     PTE_P | PTE_RW | PTE_US,
+                     PTE_P | PTE_RW | PTE_US | PTE_A | PTE_D);
+
+    // Start request
+    tb.dut->tb_req_valid = 1;
+    tb.dut->tb_req_addr = vaddr;
+    tb.dut->tb_req_write = 0;
+    tb.dut->tb_req_user = 0;
+    tb.tick();
+    tb.dut->tb_req_valid = 0;
+
+    // Wait for TLB miss → enter walk
+    tb.tick();
+    tb.tick();
+    tb.tick();
+
+    // CR3 write (flush_all) during walk
+    tb.dut->tb_flush_all = 1;
+    tb.tick();
+    tb.dut->tb_flush_all = 0;
+    tb.tick();
+
+    CHECK(tb.dut->tb_busy == 0, "frontend returned to idle after CR3 flush during walk");
+    CHECK(tb.dut->tb_pt_req == 0, "walker pt_req quiesced after CR3 flush");
+
+    // Verify no stale response
+    bool got_resp = false;
+    for (int i = 0; i < 30; i++) {
+        if (tb.dut->tb_resp_valid) {
+            got_resp = true;
+            break;
+        }
+        tb.tick();
+    }
+    CHECK(!got_resp, "no stale response after CR3 flush during walk");
+}
+
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
 
@@ -375,6 +424,7 @@ int main(int argc, char **argv) {
     test_flush_during_lookup(tb);
     test_page_fault(tb);
     test_cr3_flush(tb);
+    test_cr3_flush_during_walk(tb);
 
     printf("\n=== DTLB Frontend Tests: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? EXIT_FAILURE : EXIT_SUCCESS;

@@ -46,6 +46,16 @@ module f386_lsq (
     output logic         lq_full,
     output logic         sq_full,
 
+    // --- Microcode Sideband Dispatch (mutually exclusive with normal dispatch) ---
+    input  logic         uc_ld_dispatch_valid,
+    input  logic         uc_st_dispatch_valid,
+    input  rob_id_t      uc_dispatch_rob_tag,
+    output lq_idx_t      uc_ld_dispatch_idx,
+    output sq_idx_t      uc_st_dispatch_idx,
+    input  logic         uc_retire_st_valid,
+    input  sq_idx_t      uc_retire_st_idx,
+    output logic         uc_store_drain_done,
+
     // --- Address from AGU (cycle 1 input) ---
     input  logic         agu_ld_valid,
     input  lq_idx_t      agu_ld_idx,
@@ -174,12 +184,43 @@ module f386_lsq (
     assign lq_full = (lq_count >= LQ_N[LQ_ID_WIDTH:0]);
     assign sq_full = (sq_count >= SQ_N[SQ_ID_WIDTH:0]);
     assign sq_empty = (sq_count == 0);
-    assign ld_dispatch_idx = lq_tail;
-    assign st_dispatch_idx = sq_tail;
+    assign ld_dispatch_idx    = lq_tail;
+    assign st_dispatch_idx    = sq_tail;
+    assign uc_ld_dispatch_idx = lq_tail;
+    assign uc_st_dispatch_idx = sq_tail;
 
     // Default MDP signals
     assign mdp_violation    = 1'b0;  // TODO: detect ordering violations at execute
     assign mdp_violation_pc = 32'd0;
+
+    // =========================================================
+    // Load Completion Combinational Signals
+    // =========================================================
+    // Merge all lq_executed/lq_data writes into the dispatch block to avoid
+    // multi-driver issues after sv2v flattening (Quartus 17 compatibility).
+    logic        ld_exec_set;      // Load execution completed this cycle
+    lq_idx_t     ld_exec_idx;      // Which LQ entry
+    logic [31:0] ld_exec_data;     // Result data
+
+    always_comb begin
+        ld_exec_set  = 1'b0;
+        ld_exec_idx  = '0;
+        ld_exec_data = 32'd0;
+
+        if (ld_state == LD_IDLE && ld_pipe_valid_r && ld_pipe_fwd_hit_r) begin
+            // Store-to-load forwarding hit
+            automatic logic [4:0]  fwd_shift   = {ld_pipe_addr_r[1:0], 3'b000};
+            automatic logic [31:0] fwd_shifted  = ld_pipe_fwd_data_r >> fwd_shift;
+            ld_exec_set  = 1'b1;
+            ld_exec_idx  = ld_pipe_idx_r;
+            ld_exec_data = sign_zero_extend(fwd_shifted, ld_pipe_size_r, ld_pipe_signed_r);
+        end else if (ld_state == LD_WAIT && mem_resp_valid) begin
+            // Memory/cache response
+            ld_exec_set  = 1'b1;
+            ld_exec_idx  = ld_result_idx;
+            ld_exec_data = mem_resp_data;
+        end
+    end
 
     // =========================================================
     // Load Queue Dispatch + AGU Writeback
@@ -200,12 +241,13 @@ module f386_lsq (
             lq_tail       <= '0;
             lq_count      <= '0;
         end else begin
-            // Dispatch new load
-            if (ld_dispatch_valid && !lq_full) begin
+            // Dispatch new load (normal or microcode sideband — mutually exclusive)
+            if ((ld_dispatch_valid || uc_ld_dispatch_valid) && !lq_full) begin
                 lq_valid[lq_tail]      <= 1'b1;
                 lq_addr_valid[lq_tail] <= 1'b0;
                 lq_executed[lq_tail]   <= 1'b0;
-                lq_rob_tag[lq_tail]    <= ld_dispatch_rob_tag;
+                lq_rob_tag[lq_tail]    <= uc_ld_dispatch_valid ? uc_dispatch_rob_tag
+                                                               : ld_dispatch_rob_tag;
                 lq_tail                <= lq_tail + lq_idx_t'(1);
                 lq_count               <= lq_count + (LQ_ID_WIDTH+1)'(1);
             end
@@ -222,6 +264,12 @@ module f386_lsq (
             if (io_ld_complete_valid && lq_valid[io_ld_complete_idx]) begin
                 lq_executed[io_ld_complete_idx] <= 1'b1;
                 lq_data[io_ld_complete_idx]     <= io_ld_complete_data;
+            end
+
+            // Load execution completion (forwarding hit or memory response)
+            if (ld_exec_set) begin
+                lq_executed[ld_exec_idx] <= 1'b1;
+                lq_data[ld_exec_idx]     <= ld_exec_data;
             end
 
             // Retire (dequeue) completed loads
@@ -254,13 +302,14 @@ module f386_lsq (
             sq_tail       <= '0;
             sq_count      <= '0;
         end else begin
-            // Dispatch new store
-            if (st_dispatch_valid && !sq_full) begin
+            // Dispatch new store (normal or microcode sideband — mutually exclusive)
+            if ((st_dispatch_valid || uc_st_dispatch_valid) && !sq_full) begin
                 sq_valid[sq_tail]      <= 1'b1;
                 sq_addr_valid[sq_tail] <= 1'b0;
                 sq_data_valid[sq_tail] <= 1'b0;
                 sq_committed[sq_tail]  <= 1'b0;
-                sq_rob_tag[sq_tail]    <= st_dispatch_rob_tag;
+                sq_rob_tag[sq_tail]    <= uc_st_dispatch_valid ? uc_dispatch_rob_tag
+                                                               : st_dispatch_rob_tag;
                 sq_tail                <= sq_tail + sq_idx_t'(1);
                 sq_count               <= sq_count + (SQ_ID_WIDTH+1)'(1);
             end
@@ -275,9 +324,11 @@ module f386_lsq (
                 sq_data_valid[agu_st_idx] <= 1'b1;
             end
 
-            // Mark store as committed at retirement
+            // Mark store as committed at retirement (normal or microcode sideband)
             if (retire_st_valid && sq_valid[retire_st_idx])
                 sq_committed[retire_st_idx] <= 1'b1;
+            if (uc_retire_st_valid && sq_valid[uc_retire_st_idx])
+                sq_committed[uc_retire_st_idx] <= 1'b1;
 
             // Dequeue committed store after cache/memory write completes
             if (store_drain_ack && sq_valid[sq_head] && sq_committed[sq_head]) begin
@@ -380,6 +431,9 @@ module f386_lsq (
     // Store drain acknowledge
     logic store_drain_ack;
 
+    // Microcode store drain feedback (any drain completion — core_top qualifies by idx)
+    assign uc_store_drain_done = store_drain_ack;
+
     // Cache vs memory response mux
     logic        mem_resp_valid;
     logic [31:0] mem_resp_data;
@@ -455,8 +509,7 @@ module f386_lsq (
                                     ld_cdb_valid  <= 1'b1;
                                     ld_cdb_tag    <= lq_rob_tag[ld_pipe_idx_r];
                                     ld_cdb_data   <= fwd_extended;
-                                    lq_data[ld_pipe_idx_r]     <= fwd_extended;
-                                    lq_executed[ld_pipe_idx_r] <= 1'b1;
+                                    // lq_data/lq_executed driven by dispatch block via ld_exec_*
                                 end else begin
                                     ld_state        <= LD_WAIT;
                                     ld_result_idx   <= ld_pipe_idx_r;
@@ -474,8 +527,7 @@ module f386_lsq (
                                 ld_cdb_valid <= 1'b1;
                                 ld_cdb_tag   <= lq_rob_tag[ld_result_idx];
                                 ld_cdb_data  <= mem_resp_data;
-                                lq_data[ld_result_idx]     <= mem_resp_data;
-                                lq_executed[ld_result_idx] <= 1'b1;
+                                // lq_data/lq_executed driven by dispatch block via ld_exec_*
                                 ld_state     <= LD_IDLE;
                             end
                         end
@@ -736,8 +788,7 @@ module f386_lsq (
                                     ld_cdb_valid  <= 1'b1;
                                     ld_cdb_tag    <= lq_rob_tag[ld_pipe_idx_r];
                                     ld_cdb_data   <= fwd_extended;
-                                    lq_data[ld_pipe_idx_r]     <= fwd_extended;
-                                    lq_executed[ld_pipe_idx_r] <= 1'b1;
+                                    // lq_data/lq_executed driven by dispatch block via ld_exec_*
                                 end else begin
                                     ld_state        <= LD_WAIT;
                                     ld_result_idx   <= ld_pipe_idx_r;
@@ -755,8 +806,7 @@ module f386_lsq (
                                 ld_cdb_valid <= 1'b1;
                                 ld_cdb_tag   <= lq_rob_tag[ld_result_idx];
                                 ld_cdb_data  <= mem_resp_data;
-                                lq_data[ld_result_idx]     <= mem_resp_data;
-                                lq_executed[ld_result_idx] <= 1'b1;
+                                // lq_data/lq_executed driven by dispatch block via ld_exec_*
                                 ld_state      <= LD_IDLE;
                                 ld_req_issued <= 1'b0;  // Clear HERE, same cycle as LD_WAIT→LD_IDLE
                             end
@@ -912,5 +962,19 @@ module f386_lsq (
 
         end
     endgenerate
+
+    // =========================================================
+    // Microcode Sideband Mutual Exclusion (sim-only)
+    // =========================================================
+    `ifndef SYNTHESIS
+    always_ff @(posedge clk) if (rst_n && !flush) begin
+        assert (!(ld_dispatch_valid && uc_ld_dispatch_valid))
+            else $fatal(1, "LSQ: normal and microcode load dispatch conflict");
+        assert (!(st_dispatch_valid && uc_st_dispatch_valid))
+            else $fatal(1, "LSQ: normal and microcode store dispatch conflict");
+        assert (!(retire_st_valid && uc_retire_st_valid))
+            else $fatal(1, "LSQ: normal and microcode store retire conflict");
+    end
+    `endif
 
 endmodule

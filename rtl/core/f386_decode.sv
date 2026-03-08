@@ -1119,6 +1119,11 @@ module f386_decode (
             default: ;
         endcase
 
+        `ifdef VERILATOR
+        // Test opcode 0xD6: microcode mem bring-up (PUSH EAX → POP EBX)
+        if (pd.opcode == 8'hD6) return OP_MICROCODE;
+        `endif
+
         // Microcode (complex multi-cycle)
         case (pd.opcode)
             8'h60, 8'h61:                            // PUSHA/POPA
@@ -2005,6 +2010,14 @@ module f386_decode (
             ru.writes_esp = 1;
             return ru;
         end
+
+        `ifdef VERILATOR
+        // Test opcode 0xD6: PUSH+POP (microcode mem bring-up)
+        if (pd.opcode == 8'hD6) begin
+            ru.writes_esp = 1;
+            return ru;
+        end
+        `endif
 
         // PUSH imm (68/6A)
         if (pd.opcode == 8'h68 || pd.opcode == 8'h6A) begin

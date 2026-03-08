@@ -1,5 +1,5 @@
 /*
- * fabi386: Split-Phase L2 Cache with MSHR Support (v2.0)
+ * fabi386: Split-Phase L2 Cache with MSHR Support (v2.1)
  * -------------------------------------------------------
  * Non-blocking unified L2 cache with split-phase data port.
  * Replaces shim+L2 pair when CONF_ENABLE_MEM_FABRIC=1.
@@ -15,6 +15,11 @@
  *       serviced by the lookup pipeline via dedicated states.
  *       Ifetch/PT misses use the blocking path (no MSHR).
  *       No secondary miss coalescing — stall on same-line conflict.
+ *
+ * v2.1: Replaced inferred 2D/3D arrays (tag_mem, data_mem) with explicit
+ *       per-way f386_bram_sdp instances.  4 tag BRAMs (1 per way) and
+ *       16 data BRAMs (4 ways x 4 words).  tag_valid and plru_bits remain
+ *       in flip-flops.
  *
  * Feature-gated by CONF_ENABLE_MEM_FABRIC.
  */
@@ -146,13 +151,15 @@ module f386_l2_cache_sp (
     endfunction
 
     // =========================================================================
-    // SRAM Arrays
+    // SRAM — Flip-Flop arrays (NOT BRAM)
     // =========================================================================
     logic [NUM_WAYS-1:0] tag_valid [NUM_SETS];
+    logic [PLRU_BITS-1:0] plru_bits [NUM_SETS];
 
+    // =========================================================================
+    // SRAM — Tag / Data BRAM port signals
+    // =========================================================================
     localparam int TAG_MEM_W = 1 + TAG_W;  // dirty + tag
-    (* ramstyle = "M10K, no_rw_check" *)
-    logic [TAG_MEM_W-1:0] tag_mem [NUM_SETS][NUM_WAYS];
 
     function automatic logic tm_dirty(input logic [TAG_MEM_W-1:0] e);
         return e[TAG_MEM_W-1];
@@ -166,10 +173,60 @@ module f386_l2_cache_sp (
         return {d, t};
     endfunction
 
-    (* ramstyle = "M10K, no_rw_check" *)
-    logic [63:0] data_mem [NUM_SETS][NUM_WAYS][WORDS_PER_LINE];
+    // --- Tag BRAM port signals (4 BRAMs, one per way) ---
+    logic [INDEX_W-1:0]   tm_rd_addr;
+    logic [INDEX_W-1:0]   tm_wr_addr;
+    logic [TAG_MEM_W-1:0] tm_wr_data  [NUM_WAYS];
+    logic                 tm_wr_en    [NUM_WAYS];
+    logic [TAG_MEM_W-1:0] tm_rd_data  [NUM_WAYS];   // BRAM output (registered)
 
-    logic [PLRU_BITS-1:0] plru_bits [NUM_SETS];
+    // --- Data BRAM port signals (4 ways x 4 words = 16 BRAMs) ---
+    logic [INDEX_W-1:0]   dm_rd_addr;
+    logic [INDEX_W-1:0]   dm_wr_addr;
+    logic [63:0]          dm_wr_data  [NUM_WAYS][WORDS_PER_LINE];
+    logic                 dm_wr_en    [NUM_WAYS][WORDS_PER_LINE];
+    logic [63:0]          dm_rd_data  [NUM_WAYS][WORDS_PER_LINE]; // BRAM output (registered)
+
+    // =========================================================================
+    // BRAM Instantiation (generate)
+    // =========================================================================
+    genvar gw, gwd;
+
+    // 4 tag BRAMs — one per way
+    generate
+        for (gw = 0; gw < NUM_WAYS; gw++) begin : gen_tag_bram
+            f386_bram_sdp #(
+                .ADDR_W (INDEX_W),
+                .DATA_W (TAG_MEM_W)
+            ) u_tag (
+                .clk     (clk),
+                .wr_addr (tm_wr_addr),
+                .wr_data (tm_wr_data[gw]),
+                .wr_en   (tm_wr_en[gw]),
+                .rd_addr (tm_rd_addr),
+                .rd_data (tm_rd_data[gw])
+            );
+        end
+    endgenerate
+
+    // 16 data BRAMs — 4 ways x 4 words
+    generate
+        for (gw = 0; gw < NUM_WAYS; gw++) begin : gen_data_way
+            for (gwd = 0; gwd < WORDS_PER_LINE; gwd++) begin : gen_data_word
+                f386_bram_sdp #(
+                    .ADDR_W (INDEX_W),
+                    .DATA_W (64)
+                ) u_data (
+                    .clk     (clk),
+                    .wr_addr (dm_wr_addr),
+                    .wr_data (dm_wr_data[gw][gwd]),
+                    .wr_en   (dm_wr_en[gw][gwd]),
+                    .rd_addr (dm_rd_addr),
+                    .rd_data (dm_rd_data[gw][gwd])
+                );
+            end
+        end
+    endgenerate
 
     // =========================================================================
     // Source Selection
@@ -248,7 +305,7 @@ module f386_l2_cache_sp (
     logic        arb_cacheable;
     logic [CONF_MEM_REQ_ID_W-1:0] arb_req_id;
 
-    logic [TAG_MEM_W-1:0] tag_rd [NUM_WAYS];
+    // tag_rd eliminated — replaced by tm_rd_data (BRAM registered output)
     logic [NUM_WAYS-1:0]  tag_valid_rd;
     logic [63:0]          data_rd_word;
 
@@ -432,13 +489,13 @@ module f386_l2_cache_sp (
     end
 
     // =========================================================================
-    // Tag Compare (combinational)
+    // Tag Compare (combinational) — uses BRAM output directly
     // =========================================================================
     always_comb begin
         any_hit = 1'b0;
         hit_way = 2'd0;
         for (int w = 0; w < NUM_WAYS; w++)
-            hit_vec[w] = tag_valid_rd[w] && (tm_tag(tag_rd[w]) == addr_tag(arb_addr));
+            hit_vec[w] = tag_valid_rd[w] && (tm_tag(tm_rd_data[w]) == addr_tag(arb_addr));
         for (int w = 0; w < NUM_WAYS; w++) begin
             if (hit_vec[w]) begin
                 any_hit = 1'b1;
@@ -462,6 +519,141 @@ module f386_l2_cache_sp (
         any_mshr_active = 1'b0;
         for (int i = 0; i < NUM_MSHR; i++)
             if (mh_state[i] != MH_FREE) any_mshr_active = 1'b1;
+    end
+
+    // =========================================================================
+    // BRAM Read Address Logic (combinational)
+    // =========================================================================
+    // The read address is presented every cycle. The BRAM output reflects the
+    // address from the PREVIOUS cycle (1-cycle registered read latency).
+    //
+    // Address schedule:
+    //   LK_TAG_RD / TAG_CMP / HIT_RD / etc  →  addr_index(arb_addr)
+    //   LK_MSHR_EVICT / LK_MSHR_INST        →  mh_set_idx[lk_mshr_id]
+    //   LK_IDLE (→ MSHR_EVICT)               →  mh_set_idx[mshr_evict_id]
+    //   LK_IDLE (→ MSHR_INST)                →  mh_set_idx[mshr_inst_id]
+    //
+    // LK_IDLE pre-presents the MSHR set index one cycle early so that
+    // the BRAM output is valid on the first cycle of MSHR_EVICT/MSHR_INST.
+    // For TAG_RD transitions, the address is presented in TAG_RD itself
+    // (arb_addr is registered at the IDLE→TAG_RD edge), and the output
+    // is consumed in TAG_CMP — so no pre-presentation is needed.
+    always_comb begin
+        case (lk_state)
+            LK_IDLE: begin
+                // Pre-present MSHR set index when about to transition
+                // to an MSHR service state. Priority matches LK_IDLE FSM.
+                if (!pt_req && mshr_inst_pend) begin
+                    tm_rd_addr = mh_set_idx[mshr_inst_id];
+                    dm_rd_addr = mh_set_idx[mshr_inst_id];
+                end else if (!pt_req && !mshr_inst_pend && mshr_evict_pend) begin
+                    tm_rd_addr = mh_set_idx[mshr_evict_id];
+                    dm_rd_addr = mh_set_idx[mshr_evict_id];
+                end else begin
+                    tm_rd_addr = addr_index(arb_addr);
+                    dm_rd_addr = addr_index(arb_addr);
+                end
+            end
+            LK_MSHR_EVICT,
+            LK_MSHR_INST: begin
+                tm_rd_addr = mh_set_idx[lk_mshr_id];
+                dm_rd_addr = mh_set_idx[lk_mshr_id];
+            end
+            default: begin
+                tm_rd_addr = addr_index(arb_addr);
+                dm_rd_addr = addr_index(arb_addr);
+            end
+        endcase
+    end
+
+    // =========================================================================
+    // BRAM Write Address + Enable + Data Logic (combinational)
+    // =========================================================================
+    // Decodes the FSM state to produce BRAM write controls.  Exactly mirrors
+    // the original always_ff assignments to data_mem/tag_mem, but expressed
+    // as combinational port signals consumed by the BRAM instances.
+    always_comb begin
+        // Defaults: no writes, address follows read address
+        tm_wr_addr = addr_index(arb_addr);
+        dm_wr_addr = addr_index(arb_addr);
+        for (int w = 0; w < NUM_WAYS; w++) begin
+            tm_wr_en[w]   = 1'b0;
+            tm_wr_data[w] = '0;
+            for (int wd = 0; wd < WORDS_PER_LINE; wd++) begin
+                dm_wr_en[w][wd]   = 1'b0;
+                dm_wr_data[w][wd] = 64'd0;
+            end
+        end
+
+        case (lk_state)
+            // -----------------------------------------------------------
+            // HIT_RD: hit-store writes (SRC_DATA or SRC_PT)
+            // -----------------------------------------------------------
+            LK_HIT_RD: begin
+                if (arb_wr && (arb_source == SRC_DATA || arb_source == SRC_PT)) begin
+                    // Data write: merged word
+                    dm_wr_en[hit_way][addr_word(arb_addr)]   = 1'b1;
+                    dm_wr_data[hit_way][addr_word(arb_addr)] =
+                        byte_merge64(data_rd_word, arb_wdata, arb_byte_en);
+                    // Tag write: mark dirty
+                    tm_wr_en[hit_way]   = 1'b1;
+                    tm_wr_data[hit_way] = make_tm_entry(1'b1, addr_tag(arb_addr));
+                end
+            end
+
+            // -----------------------------------------------------------
+            // FILL_INSTALL: blocking miss (ifetch/PT) fill install
+            // -----------------------------------------------------------
+            LK_FILL_INSTALL: begin
+                // Write all 4 fill words into victim way
+                for (int wd = 0; wd < WORDS_PER_LINE; wd++) begin
+                    dm_wr_en[victim_way][wd]   = 1'b1;
+                    dm_wr_data[victim_way][wd] = fill_buf[wd];
+                end
+
+                if (arb_wr && arb_source == SRC_PT) begin
+                    // Write-allocate merge: overwrite one word with store data
+                    dm_wr_data[victim_way][addr_word(arb_addr)] =
+                        byte_merge64(fill_buf[addr_word(arb_addr)], arb_wdata, arb_byte_en);
+                    tm_wr_en[victim_way]   = 1'b1;
+                    tm_wr_data[victim_way] = make_tm_entry(1'b1, addr_tag(arb_addr));
+                end else begin
+                    tm_wr_en[victim_way]   = 1'b1;
+                    tm_wr_data[victim_way] = make_tm_entry(1'b0, addr_tag(arb_addr));
+                end
+            end
+
+            // -----------------------------------------------------------
+            // MSHR_INST: MSHR fill install
+            // -----------------------------------------------------------
+            LK_MSHR_INST: begin
+                tm_wr_addr = mh_set_idx[lk_mshr_id];
+                dm_wr_addr = mh_set_idx[lk_mshr_id];
+
+                // Write all 4 fill words into victim way
+                for (int wd = 0; wd < WORDS_PER_LINE; wd++) begin
+                    dm_wr_en[mh_victim_way[lk_mshr_id]][wd]   = 1'b1;
+                    dm_wr_data[mh_victim_way[lk_mshr_id]][wd] = mh_fill_buf[lk_mshr_id][wd];
+                end
+
+                if (mh_is_write[lk_mshr_id]) begin
+                    // Write-allocate merge: overwrite one word with store data
+                    dm_wr_data[mh_victim_way[lk_mshr_id]][mh_word_ofs[lk_mshr_id]] =
+                        byte_merge64(
+                            mh_fill_buf[lk_mshr_id][mh_word_ofs[lk_mshr_id]],
+                            mh_wdata[lk_mshr_id],
+                            mh_byte_en[lk_mshr_id]
+                        );
+                    tm_wr_en[mh_victim_way[lk_mshr_id]]   = 1'b1;
+                    tm_wr_data[mh_victim_way[lk_mshr_id]] = make_tm_entry(1'b1, mh_tag[lk_mshr_id]);
+                end else begin
+                    tm_wr_en[mh_victim_way[lk_mshr_id]]   = 1'b1;
+                    tm_wr_data[mh_victim_way[lk_mshr_id]] = make_tm_entry(1'b0, mh_tag[lk_mshr_id]);
+                end
+            end
+
+            default: ;
+        endcase
     end
 
     // =========================================================================
@@ -594,17 +786,20 @@ module f386_l2_cache_sp (
                 end
 
                 // -------------------------------------------------------
-                // TAG_RD: Read tag SRAM (1-cycle M10K latency)
+                // TAG_RD: Wait for BRAM read (1-cycle M10K latency).
+                //   Read address was set combinationally (tm_rd_addr/dm_rd_addr).
+                //   BRAM outputs (tm_rd_data, dm_rd_data) will be valid
+                //   at the start of the next cycle (TAG_CMP).
                 // -------------------------------------------------------
                 LK_TAG_RD: begin
-                    for (int w = 0; w < NUM_WAYS; w++)
-                        tag_rd[w] <= tag_mem[addr_index(arb_addr)][w];
                     tag_valid_rd <= tag_valid[addr_index(arb_addr)];
                     lk_state <= LK_TAG_CMP;
                 end
 
                 // -------------------------------------------------------
                 // TAG_CMP: Hit/miss decision
+                //   Tag BRAM outputs (tm_rd_data) are valid this cycle.
+                //   Data BRAM outputs (dm_rd_data) are valid this cycle.
                 // -------------------------------------------------------
                 LK_TAG_CMP: begin
                     if (any_hit) begin
@@ -618,15 +813,15 @@ module f386_l2_cache_sp (
 
                         case (arb_source)
                             SRC_DATA: begin
-                                data_rd_word <= data_mem[addr_index(arb_addr)][hit_way][addr_word(arb_addr)];
+                                data_rd_word <= dm_rd_data[hit_way][addr_word(arb_addr)];
                                 lk_state <= arb_wr ? LK_HIT_RD : LK_RESPOND;
                             end
                             SRC_PT: begin
-                                data_rd_word <= data_mem[addr_index(arb_addr)][hit_way][addr_word(arb_addr)];
+                                data_rd_word <= dm_rd_data[hit_way][addr_word(arb_addr)];
                                 lk_state <= arb_wr ? LK_HIT_RD : LK_RESPOND;
                             end
                             SRC_IFETCH: begin
-                                data_rd_word <= data_mem[addr_index(arb_addr)][hit_way][addr_word(arb_addr)];
+                                data_rd_word <= dm_rd_data[hit_way][addr_word(arb_addr)];
                                 lk_state <= LK_HIT_RD;
                             end
                             default: lk_state <= LK_IDLE;
@@ -645,7 +840,7 @@ module f386_l2_cache_sp (
                             mh_byte_en[mshr_free_id]     <= arb_byte_en;
                             mh_victim_way[mshr_free_id]  <= mh_victim_tmp;
                             mh_evict_dirty[mshr_free_id] <= mh_evict_dirty_tmp;
-                            mh_evict_tag[mshr_free_id]   <= tm_tag(tag_rd[mh_victim_tmp]);
+                            mh_evict_tag[mshr_free_id]   <= tm_tag(tm_rd_data[mh_victim_tmp]);
                             mh_evict_cnt[mshr_free_id]   <= 2'd0;
                             mh_wb_cnt[mshr_free_id]      <= 2'd0;
                             mh_fill_cnt[mshr_free_id]    <= 2'd0;
@@ -657,9 +852,9 @@ module f386_l2_cache_sp (
                             // ifetch/PT miss: blocking path
                             // Prefer invalid way on cold sets; fall back to PLRU.
                             victim_way  <= select_victim(tag_valid_rd, plru_bits[addr_index(arb_addr)]);
-                            evict_tag   <= tm_tag(tag_rd[select_victim(tag_valid_rd, plru_bits[addr_index(arb_addr)])]);
+                            evict_tag   <= tm_tag(tm_rd_data[select_victim(tag_valid_rd, plru_bits[addr_index(arb_addr)])]);
                             evict_dirty <= tag_valid_rd[select_victim(tag_valid_rd, plru_bits[addr_index(arb_addr)])] &&
-                                           tm_dirty(tag_rd[select_victim(tag_valid_rd, plru_bits[addr_index(arb_addr)])]);
+                                           tm_dirty(tm_rd_data[select_victim(tag_valid_rd, plru_bits[addr_index(arb_addr)])]);
                             evict_rd_cnt <= 2'd0;
                             lk_state <= LK_EVICT_RD;
                         end
@@ -667,16 +862,15 @@ module f386_l2_cache_sp (
                 end
 
                 // -------------------------------------------------------
-                // HIT_RD: Process hit (SRAM data available)
+                // HIT_RD: Process hit (SRAM data available in data_rd_word,
+                //         BRAM outputs still valid for same set).
+                //   Writes are driven by the always_comb BRAM write block.
                 // -------------------------------------------------------
                 LK_HIT_RD: begin
                     case (arb_source)
                         SRC_DATA: begin
                             if (arb_wr) begin
-                                data_mem[addr_index(arb_addr)][hit_way][addr_word(arb_addr)] <=
-                                    byte_merge64(data_rd_word, arb_wdata, arb_byte_en);
-                                tag_mem[addr_index(arb_addr)][hit_way] <=
-                                    make_tm_entry(1'b1, addr_tag(arb_addr));
+                                // Data+tag BRAM writes driven by always_comb block
                                 rsp_buf_valid    <= 1'b1;
                                 rsp_buf.id       <= arb_req_id;
                                 rsp_buf.rdata    <= 128'd0;
@@ -688,10 +882,7 @@ module f386_l2_cache_sp (
                         end
                         SRC_PT: begin
                             if (arb_wr) begin
-                                data_mem[addr_index(arb_addr)][hit_way][addr_word(arb_addr)] <=
-                                    byte_merge64(data_rd_word, arb_wdata, arb_byte_en);
-                                tag_mem[addr_index(arb_addr)][hit_way] <=
-                                    make_tm_entry(1'b1, addr_tag(arb_addr));
+                                // Data+tag BRAM writes driven by always_comb block
                                 pt_ack   <= 1'b1;
                                 lk_state <= LK_IDLE;
                             end
@@ -704,7 +895,9 @@ module f386_l2_cache_sp (
                                 if (ifetch_cross_line) begin
                                     lk_state <= LK_IFETCH_XLINE;
                                 end else begin
-                                    data_rd_word <= data_mem[addr_index(arb_addr)][hit_way][addr_word(arb_addr) + 2'd1];
+                                    // All data BRAM outputs still valid (same set from TAG_RD).
+                                    // Read word+1 from the BRAM output directly.
+                                    data_rd_word <= dm_rd_data[hit_way][addr_word(arb_addr) + 2'd1];
                                     lk_state <= LK_HIT_RD2;
                                 end
                             end
@@ -751,7 +944,9 @@ module f386_l2_cache_sp (
                 // Blocking miss path (ifetch/PT only)
                 // -------------------------------------------------------
                 LK_EVICT_RD: begin
-                    evict_buf[evict_rd_cnt] <= data_mem[addr_index(arb_addr)][victim_way][evict_rd_cnt];
+                    // BRAM outputs are valid for addr_index(arb_addr) — all
+                    // 4 words of victim_way are available every cycle.
+                    evict_buf[evict_rd_cnt] <= dm_rd_data[victim_way][evict_rd_cnt];
                     if (evict_rd_cnt == 2'd3) begin
                         if (evict_dirty) begin
                             wb_beat_cnt <= 2'd0;
@@ -804,19 +999,12 @@ module f386_l2_cache_sp (
                 end
 
                 LK_FILL_INSTALL: begin
-                    for (int i = 0; i < WORDS_PER_LINE; i++)
-                        data_mem[addr_index(arb_addr)][victim_way][i] <= fill_buf[i];
+                    // Data+tag BRAM writes driven by always_comb block
                     tag_valid[addr_index(arb_addr)][victim_way] <= 1'b1;
 
                     if (arb_wr && arb_source == SRC_PT) begin
-                        data_mem[addr_index(arb_addr)][victim_way][addr_word(arb_addr)] <=
-                            byte_merge64(fill_buf[addr_word(arb_addr)], arb_wdata, arb_byte_en);
-                        tag_mem[addr_index(arb_addr)][victim_way] <=
-                            make_tm_entry(1'b1, addr_tag(arb_addr));
                         pt_ack <= 1'b1;
                     end else begin
-                        tag_mem[addr_index(arb_addr)][victim_way] <=
-                            make_tm_entry(1'b0, addr_tag(arb_addr));
                         data_rd_word <= fill_buf[addr_word(arb_addr)];
                     end
 
@@ -873,10 +1061,12 @@ module f386_l2_cache_sp (
 
                 // -------------------------------------------------------
                 // MSHR SRAM service: evict read (4 cycles)
+                //   BRAM outputs valid for mh_set_idx[lk_mshr_id] — all
+                //   4 words of victim way available every cycle.
                 // -------------------------------------------------------
                 LK_MSHR_EVICT: begin
                     mh_evict_buf[lk_mshr_id][lk_mshr_cnt] <=
-                        data_mem[mh_set_idx[lk_mshr_id]][mh_victim_way[lk_mshr_id]][lk_mshr_cnt];
+                        dm_rd_data[mh_victim_way[lk_mshr_id]][lk_mshr_cnt];
                     if (lk_mshr_cnt == 2'd3) begin
                         mh_state[lk_mshr_id] <= MH_WB_REQ;
                         lk_state <= LK_IDLE;
@@ -885,33 +1075,13 @@ module f386_l2_cache_sp (
                 end
 
                 // -------------------------------------------------------
-                // MSHR SRAM service: fill install (1 cycle, matches L2 FILL_INSTALL)
+                // MSHR SRAM service: fill install (1 cycle)
+                //   Data+tag BRAM writes driven by always_comb block.
                 // -------------------------------------------------------
                 LK_MSHR_INST: begin
-                    // Write all 4 fill words in one cycle
-                    for (int i = 0; i < WORDS_PER_LINE; i++)
-                        data_mem[mh_set_idx[lk_mshr_id]][mh_victim_way[lk_mshr_id]][i] <=
-                            mh_fill_buf[lk_mshr_id][i];
-
                     tag_valid[mh_set_idx[lk_mshr_id]][mh_victim_way[lk_mshr_id]] <= 1'b1;
                     plru_bits[mh_set_idx[lk_mshr_id]] <=
                         plru_update(plru_bits[mh_set_idx[lk_mshr_id]], mh_victim_way[lk_mshr_id]);
-
-                    if (mh_is_write[lk_mshr_id]) begin
-                        // Write-allocate: merge store data over fill
-                        // Last assignment wins — overwrites the for-loop write
-                        data_mem[mh_set_idx[lk_mshr_id]][mh_victim_way[lk_mshr_id]][mh_word_ofs[lk_mshr_id]] <=
-                            byte_merge64(
-                                mh_fill_buf[lk_mshr_id][mh_word_ofs[lk_mshr_id]],
-                                mh_wdata[lk_mshr_id],
-                                mh_byte_en[lk_mshr_id]
-                            );
-                        tag_mem[mh_set_idx[lk_mshr_id]][mh_victim_way[lk_mshr_id]] <=
-                            make_tm_entry(1'b1, mh_tag[lk_mshr_id]);
-                    end else begin
-                        tag_mem[mh_set_idx[lk_mshr_id]][mh_victim_way[lk_mshr_id]] <=
-                            make_tm_entry(1'b0, mh_tag[lk_mshr_id]);
-                    end
 
                     mh_state[lk_mshr_id] <= MH_COMPLETE;
                     lk_state <= LK_IDLE;
@@ -986,7 +1156,7 @@ module f386_l2_cache_sp (
     // Victim way and dirty computation for MSHR allocation (combinational)
     wire [1:0] mh_victim_tmp = select_victim(tag_valid_rd, plru_bits[addr_index(arb_addr)]);
     wire mh_evict_dirty_tmp  = tag_valid_rd[mh_victim_tmp] &&
-                                tm_dirty(tag_rd[mh_victim_tmp]);
+                                tm_dirty(tm_rd_data[mh_victim_tmp]);
 
     // =========================================================================
     // Assertions (sim-only)

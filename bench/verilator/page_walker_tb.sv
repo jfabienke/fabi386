@@ -49,6 +49,7 @@ module page_walker_tb (
     f386_page_walker u_walker (
         .clk             (clk),
         .rst_n           (rst_n),
+        .flush           (1'b0),           // No flush in standalone walker tests
         .walk_req        (tb_walk_req),
         .walk_vaddr      (tb_walk_vaddr),
         .walk_write      (tb_walk_write),

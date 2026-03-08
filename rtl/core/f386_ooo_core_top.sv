@@ -323,12 +323,44 @@ module f386_ooo_core_top (
     // --- P3: Microcode active (driven by gen_microcode, 0 when gate OFF) ---
     logic ucode_active;
 
+    // --- P3.1b: Microcode memory engine bridge (gen_microcode ↔ gen_lsq_memif) ---
+    // From gen_microcode → gen_lsq_memif
+    logic        uc_mem_ld_fire;           // Load AGU fire
+    logic        uc_mem_st_fire;           // Store AGU fire
+    logic [31:0] uc_mem_addr;             // Memory address
+    lq_idx_t     uc_mem_lq_idx;           // Load queue index
+    sq_idx_t     uc_mem_sq_idx;           // Store queue index
+    logic [31:0] uc_mem_st_data;          // Store data
+    logic [1:0]  uc_mem_size;             // Memory size (2=dword)
+    logic [3:0]  uc_mem_byte_en;          // Byte enables
+    logic        uc_mem_ld_dispatch;       // LQ sideband dispatch
+    logic        uc_mem_st_dispatch;       // SQ sideband dispatch
+    rob_id_t     uc_mem_dispatch_rob_tag;  // Dispatch ROB tag
+    logic        uc_mem_retire_st;         // SQ sideband commitment
+    sq_idx_t     uc_mem_retire_sq_idx;     // SQ commitment index
+    logic        uc_mem_load_waiting;      // In UM_LOAD_WAIT (for CDB1 override)
+    phys_reg_t   uc_mem_cdb1_phys_dest;    // CDB1 dest for microcode loads
+    logic        uc_mem_esp_cdb0_fire;     // ESP update CDB0
+    logic [31:0] uc_mem_esp_cdb0_data;     // ESP new value
+    phys_reg_t   uc_mem_esp_phys_dest;     // ESP physical register
+    // From gen_lsq_memif → gen_microcode
+    lq_idx_t     uc_lsq_ld_alloc_idx;     // Allocated LQ index
+    sq_idx_t     uc_lsq_st_alloc_idx;     // Allocated SQ index
+    logic        uc_lsq_lq_full;          // LQ full
+    logic        uc_lsq_sq_full;          // SQ full
+
     // --- Dispatch Valid (derived signals used across sections) ---
+    // V-pipe suppressed when U-pipe is OP_MICROCODE or OP_SYS_CALL:
+    // execute stage gates V-pipe on u_ready, which is 0 for these ops,
+    // so the V-pipe instruction would dispatch but never get CDB writeback.
     logic dispatch_u_valid, dispatch_v_valid;
+    wire u_stalls_vpipe = dec_instr_u_valid &&
+                          (dec_instr_u.op_cat == OP_MICROCODE ||
+                           dec_instr_u.op_cat == OP_SYS_CALL);
     assign dispatch_u_valid = dec_instr_u_valid && rename_ready && !rob_full && !lsq_dispatch_blocked
                               && !ucode_active;
     assign dispatch_v_valid = dec_instr_v_valid && rename_ready && !rob_full && rename_v_alloc_valid
-                              && !lsq_cdb1_active && !ucode_active;
+                              && !lsq_cdb1_active && !ucode_active && !u_stalls_vpipe;
 
     // Track FTQ index alongside each dispatched ROB entry so branch resolution
     // can recover prediction-time metadata (e.g. GHR snapshot).
@@ -653,7 +685,7 @@ module f386_ooo_core_top (
         .phys_dest_u   (rename_phys_u),
         .can_rename    (rename_ready),
 
-        .dest_valid_u  (dec_instr_u.dest_valid),
+        .dest_valid_u  (dec_instr_u.dest_valid && !ucode_dest_suppress),
         .dest_valid_v  (dec_instr_v.dest_valid),
 
         .arch_dest_v   (dec_instr_v.p_dest[2:0]),
@@ -1402,6 +1434,10 @@ module f386_ooo_core_top (
         lq_idx_t lsq_ld_dispatch_idx;
         sq_idx_t lsq_st_dispatch_idx;
 
+        // Export to module scope for microcode memory engine
+        assign uc_lsq_lq_full = lsq_lq_full;
+        assign uc_lsq_sq_full = lsq_sq_full;
+
         // ---------------------------------------------------------
         // Dispatch backpressure (Finding #7)
         // ---------------------------------------------------------
@@ -1421,14 +1457,15 @@ module f386_ooo_core_top (
         wire cdb0_suppress_load = (iq_issue_instr.op_cat == OP_LOAD);
 
         // cdb0: suppress OP_LOAD broadcast (LSQ delivers load data on cdb1)
-        assign cdb0_valid      = raw_cdb0_valid && !cdb0_suppress_load;
-        assign cdb0_tag        = raw_cdb0_tag;
-        assign cdb0_data       = raw_cdb0_data;
-        assign cdb0_flags      = raw_cdb0_flags;
-        assign cdb0_flags_mask = raw_cdb0_flags_mask;
-        assign cdb0_exception  = raw_cdb0_exception;
-        assign cdb0_phys_dest  = raw_cdb0_phys_dest;
-        assign cdb0_dest_valid = raw_cdb0_dest_valid;
+        // OR in microcode ESP CDB0 synthesis (mutually exclusive with exec CDB0)
+        assign cdb0_valid      = (raw_cdb0_valid && !cdb0_suppress_load) || uc_mem_esp_cdb0_fire;
+        assign cdb0_tag        = uc_mem_esp_cdb0_fire ? uc_mem_dispatch_rob_tag : raw_cdb0_tag;
+        assign cdb0_data       = uc_mem_esp_cdb0_fire ? uc_mem_esp_cdb0_data    : raw_cdb0_data;
+        assign cdb0_flags      = uc_mem_esp_cdb0_fire ? 6'd0                    : raw_cdb0_flags;
+        assign cdb0_flags_mask = uc_mem_esp_cdb0_fire ? 6'd0                    : raw_cdb0_flags_mask;
+        assign cdb0_exception  = uc_mem_esp_cdb0_fire ? 1'b0                    : raw_cdb0_exception;
+        assign cdb0_phys_dest  = uc_mem_esp_cdb0_fire ? uc_mem_esp_phys_dest    : raw_cdb0_phys_dest;
+        assign cdb0_dest_valid = uc_mem_esp_cdb0_fire ? 1'b1                    : raw_cdb0_dest_valid;
 
         // ---------------------------------------------------------
         // LSQ CDB load result
@@ -1465,6 +1502,11 @@ module f386_ooo_core_top (
             if (dispatch_v_valid) begin
                 rob_phys_dest_tbl [rob_tag_v] <= patched_v.p_dest;
                 rob_dest_valid_tbl[rob_tag_v] <= patched_v.dest_valid;
+            end
+            // Microcode load dispatch: override phys_dest for CDB1 writeback
+            if (uc_mem_ld_dispatch) begin
+                rob_phys_dest_tbl [uc_mem_dispatch_rob_tag] <= uc_mem_cdb1_phys_dest;
+                rob_dest_valid_tbl[uc_mem_dispatch_rob_tag] <= 1'b1;
             end
         end
 
@@ -1659,6 +1701,10 @@ module f386_ooo_core_top (
                                  && (iq_issue_instr.op_cat inside {OP_LOAD, OP_STORE})
                                  && !indexed_store_block && !misaligned_store_block;
 
+            // Hold DTLB response when MMIO load can't fire (IO path not ready)
+            wire dtlb_resp_hold = dtlb_resp_valid && !dtlb_fault
+                                  && xlat_ctx.is_load && xlat_is_mmio && !io_path_ld_ready;
+
             f386_dtlb_frontend u_dtlb (
                 .clk              (clk),
                 .rst_n            (rst_n),
@@ -1673,6 +1719,7 @@ module f386_ooo_core_top (
                 .resp_fault_addr  (dtlb_fault_addr),
                 .resp_fault_code  (dtlb_fault_code),
                 .busy             (dtlb_busy),
+                .resp_hold        (dtlb_resp_hold),
                 .paging_enabled   (sys_pg_mode),
                 .flush_all        (cr3_write_flush),
                 .invlpg_valid     (1'b0),               // deferred
@@ -1875,21 +1922,31 @@ module f386_ooo_core_top (
             .lq_full          (lsq_lq_full),
             .sq_full          (lsq_sq_full),
 
-            // AGU load (cacheable only — MMIO goes to IO path)
-            .agu_ld_valid     (eff_ld_fire),
-            .agu_ld_idx       (eff_ld_idx),
-            .agu_ld_addr      (eff_ld_addr),
-            .agu_ld_size      (eff_ld_size),
-            .agu_ld_byte_en   (eff_ld_byte_en),
+            // Microcode sideband dispatch/retirement
+            .uc_ld_dispatch_valid (uc_mem_ld_dispatch),
+            .uc_st_dispatch_valid (uc_mem_st_dispatch),
+            .uc_dispatch_rob_tag  (uc_mem_dispatch_rob_tag),
+            .uc_ld_dispatch_idx   (uc_lsq_ld_alloc_idx),
+            .uc_st_dispatch_idx   (uc_lsq_st_alloc_idx),
+            .uc_retire_st_valid   (uc_mem_retire_st),
+            .uc_retire_st_idx     (uc_mem_retire_sq_idx),
+            .uc_store_drain_done  (),
+
+            // AGU load (normal | microcode — MMIO goes to IO path)
+            .agu_ld_valid     (eff_ld_fire | uc_mem_ld_fire),
+            .agu_ld_idx       (uc_mem_ld_fire ? uc_mem_lq_idx  : eff_ld_idx),
+            .agu_ld_addr      (uc_mem_ld_fire ? uc_mem_addr    : eff_ld_addr),
+            .agu_ld_size      (uc_mem_ld_fire ? uc_mem_size    : eff_ld_size),
+            .agu_ld_byte_en   (uc_mem_ld_fire ? uc_mem_byte_en : eff_ld_byte_en),
             .agu_ld_signed    (1'b0),   // TODO: carry sign info from decode
 
-            // AGU store (all stores — MMIO classification on drain)
-            .agu_st_valid     (eff_st_fire),
-            .agu_st_idx       (eff_st_idx),
-            .agu_st_addr      (eff_st_addr),
-            .agu_st_data      (eff_st_data),
-            .agu_st_size      (eff_st_size),
-            .agu_st_byte_en   (eff_st_byte_en),
+            // AGU store (normal | microcode — MMIO classification on drain)
+            .agu_st_valid     (eff_st_fire | uc_mem_st_fire),
+            .agu_st_idx       (uc_mem_st_fire ? uc_mem_sq_idx   : eff_st_idx),
+            .agu_st_addr      (uc_mem_st_fire ? uc_mem_addr     : eff_st_addr),
+            .agu_st_data      (uc_mem_st_fire ? uc_mem_st_data  : eff_st_data),
+            .agu_st_size      (uc_mem_st_fire ? uc_mem_size     : eff_st_size),
+            .agu_st_byte_en   (uc_mem_st_fire ? uc_mem_byte_en  : eff_st_byte_en),
 
             // CDB load result
             .ld_cdb_valid     (lsq_ld_cdb_valid),
@@ -2097,6 +2154,10 @@ module f386_ooo_core_top (
         assign lsq_dispatch_blocked   = 1'b0;
         assign lsq_cdb1_active        = 1'b0;
         assign lsq_load_issue_stall   = 1'b0;
+        assign uc_lsq_lq_full         = 1'b1;   // Always full (no LSQ)
+        assign uc_lsq_sq_full         = 1'b1;
+        assign uc_lsq_ld_alloc_idx    = '0;
+        assign uc_lsq_st_alloc_idx    = '0;
         assign rob_dispatch_u_lq_idx  = '0;
         assign rob_dispatch_u_sq_idx  = '0;
         assign dtlb_fault             = 1'b0;
@@ -2169,8 +2230,11 @@ module f386_ooo_core_top (
         logic        macro_is_repne;
         logic [31:0] macro_pc;
 
-        // Force dequeue: 1-cycle pulse to consume macro-op from IQ
-        logic iq_force_dequeue;
+        // Force dequeue: combinational — fires same cycle as OP_MICROCODE IQ issue
+        // so the IQ clears the correct entry (not a later-issuing instruction)
+        wire iq_force_dequeue = (ucode_state == UC_IDLE)
+                             && iq_issue_valid
+                             && (iq_issue_instr.op_cat == OP_MICROCODE);
 
         // Sequencer signals
         logic        seq_uop_valid;
@@ -2224,19 +2288,152 @@ module f386_ooo_core_top (
         );
 
         // ---------------------------------------------------------
+        // Microcode Memory Engine (P3.1b)
+        // ---------------------------------------------------------
+        // Replaces synthetic memory stub with real AGU→LSQ path.
+        // Stack-form micro-ops only (UCMD_PUSH_PRE, UCMD_POP_POST).
+
+        // Detect memory micro-op from sequencer
+        wire uop_is_mem = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
+                          (seq_uop_op_type == OP_LOAD || seq_uop_op_type == OP_STORE);
+
+        // Detect PUSH (needs ESP on PRF port B)
+        wire uop_is_push = uop_is_mem && (seq_uop_special_cmd == UCMD_PUSH_PRE);
+
+        typedef enum logic [1:0] {
+            UM_IDLE      = 2'd0,
+            UM_ALLOC     = 2'd1,
+            UM_ISSUE     = 2'd2,
+            UM_LOAD_WAIT = 2'd3
+        } uc_mem_state_t;
+
+        uc_mem_state_t uc_mem_state;
+
+        // Latched context
+        logic        uc_mem_is_load_r;
+        logic [31:0] uc_mem_addr_r;
+        logic [31:0] uc_mem_data_r;
+        lq_idx_t     uc_mem_lq_idx_r;
+        sq_idx_t     uc_mem_sq_idx_r;
+        logic [7:0]  uc_mem_special_r;
+        phys_reg_t   uc_mem_phys_dest_r;
+        logic [31:0] uc_mem_esp_new_r;
+
+        // Size constant: dword for 32-bit stack ops
+        localparam logic [1:0] UC_MEM_SIZE = 2'd2;
+        localparam logic [3:0] UC_MEM_BYTE_EN = 4'b1111;
+        localparam logic [31:0] ESP_DELTA = 32'd4;
+
+        // Memory engine done pulse (for exec_ack)
+        wire uc_mem_done = (uc_mem_state == UM_ISSUE && !uc_mem_is_load_r) ||
+                           (uc_mem_state == UM_LOAD_WAIT && lsq_cdb1_active);
+
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                uc_mem_state      <= UM_IDLE;
+                uc_mem_is_load_r  <= 1'b0;
+                uc_mem_addr_r     <= 32'd0;
+                uc_mem_data_r     <= 32'd0;
+                uc_mem_lq_idx_r   <= '0;
+                uc_mem_sq_idx_r   <= '0;
+                uc_mem_special_r  <= 8'd0;
+                uc_mem_phys_dest_r<= '0;
+                uc_mem_esp_new_r  <= 32'd0;
+            end else if (flush) begin
+                uc_mem_state <= UM_IDLE;
+            end else begin
+                case (uc_mem_state)
+                    UM_IDLE: begin
+                        if (uop_is_mem) begin
+                            uc_mem_state     <= UM_ALLOC;
+                            uc_mem_is_load_r <= (seq_uop_op_type == OP_LOAD);
+                            uc_mem_special_r <= seq_uop_special_cmd;
+                            uc_mem_phys_dest_r <= rename_com_map[seq_uop_dest_reg];
+
+                            case (seq_uop_special_cmd)
+                                UCMD_PUSH_PRE: begin
+                                    // prf_data_b = ESP (via PRF override below)
+                                    uc_mem_addr_r    <= prf_data_b - ESP_DELTA;
+                                    uc_mem_data_r    <= prf_data_a;  // register to push
+                                    uc_mem_esp_new_r <= prf_data_b - ESP_DELTA;
+                                end
+                                UCMD_POP_POST: begin
+                                    // prf_data_a = ESP (src_a_reg = ESP in microcode)
+                                    uc_mem_addr_r    <= prf_data_a;
+                                    uc_mem_data_r    <= 32'd0;
+                                    uc_mem_esp_new_r <= prf_data_a + ESP_DELTA;
+                                end
+                                default: begin
+                                    uc_mem_addr_r    <= prf_data_a;
+                                    uc_mem_data_r    <= prf_data_b;
+                                    uc_mem_esp_new_r <= 32'd0;
+                                end
+                            endcase
+                        end
+                    end
+
+                    UM_ALLOC: begin
+                        if (uc_mem_is_load_r && !uc_lsq_lq_full) begin
+                            uc_mem_lq_idx_r <= uc_lsq_ld_alloc_idx;
+                            uc_mem_state    <= UM_ISSUE;
+                        end else if (!uc_mem_is_load_r && !uc_lsq_sq_full) begin
+                            uc_mem_sq_idx_r <= uc_lsq_st_alloc_idx;
+                            uc_mem_state    <= UM_ISSUE;
+                        end
+                    end
+
+                    UM_ISSUE: begin
+                        if (uc_mem_is_load_r)
+                            uc_mem_state <= UM_LOAD_WAIT;
+                        else
+                            uc_mem_state <= UM_IDLE;  // Store: done at issue
+                    end
+
+                    UM_LOAD_WAIT: begin
+                        if (lsq_cdb1_active)
+                            uc_mem_state <= UM_IDLE;
+                    end
+
+                    default: uc_mem_state <= UM_IDLE;
+                endcase
+            end
+        end
+
+        // Drive bridge signals
+        assign uc_mem_ld_dispatch      = (uc_mem_state == UM_ALLOC) && uc_mem_is_load_r && !uc_lsq_lq_full;
+        assign uc_mem_st_dispatch      = (uc_mem_state == UM_ALLOC) && !uc_mem_is_load_r && !uc_lsq_sq_full;
+        assign uc_mem_dispatch_rob_tag = macro_rob_tag;
+        assign uc_mem_ld_fire          = (uc_mem_state == UM_ISSUE) && uc_mem_is_load_r;
+        assign uc_mem_st_fire          = (uc_mem_state == UM_ISSUE) && !uc_mem_is_load_r;
+        assign uc_mem_addr             = uc_mem_addr_r;
+        assign uc_mem_lq_idx           = uc_mem_lq_idx_r;
+        assign uc_mem_sq_idx           = uc_mem_sq_idx_r;
+        assign uc_mem_st_data          = uc_mem_data_r;
+        assign uc_mem_size             = UC_MEM_SIZE;
+        assign uc_mem_byte_en          = UC_MEM_BYTE_EN;
+        assign uc_mem_retire_st        = (uc_mem_state == UM_ISSUE) && !uc_mem_is_load_r;
+        assign uc_mem_retire_sq_idx    = uc_mem_sq_idx_r;
+        assign uc_mem_load_waiting     = (uc_mem_state == UM_LOAD_WAIT);
+        assign uc_mem_cdb1_phys_dest   = uc_mem_phys_dest_r;
+
+        // ESP CDB0 synthesis
+        wire esp_is_push = (uc_mem_special_r == UCMD_PUSH_PRE);
+        wire esp_is_pop  = (uc_mem_special_r == UCMD_POP_POST);
+        assign uc_mem_esp_cdb0_fire = (uc_mem_state == UM_ISSUE && !uc_mem_is_load_r && esp_is_push) ||
+                                       (uc_mem_state == UM_LOAD_WAIT && lsq_cdb1_active && esp_is_pop);
+        assign uc_mem_esp_cdb0_data = uc_mem_esp_new_r;
+        assign uc_mem_esp_phys_dest = rename_com_map[3'd4];  // ESP = arch reg 4
+
+        // ---------------------------------------------------------
         // Drain FSM
         // ---------------------------------------------------------
-        // Microcode exec_ack: CDB0 fires for ALU ops, or immediate for stubs
-        wire uop_is_mem_stub = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
-                               (seq_uop_op_type == OP_LOAD || seq_uop_op_type == OP_STORE);
-
+        // Microcode exec_ack: CDB0 for ALU ops, UM done for memory ops
         wire ucode_exec_ack = (ucode_state == UC_ACTIVE) &&
-                              (raw_cdb0_valid || uop_is_mem_stub);
+                              (raw_cdb0_valid || uc_mem_done);
 
         always_ff @(posedge clk or negedge rst_n) begin
             if (!rst_n) begin
                 ucode_state     <= UC_IDLE;
-                iq_force_dequeue <= 1'b0;
                 macro_rob_tag   <= '0;
                 macro_opcode    <= 8'h0;
                 macro_is_0f     <= 1'b0;
@@ -2247,16 +2444,12 @@ module f386_ooo_core_top (
                 macro_pc        <= 32'h0;
             end else if (flush) begin
                 ucode_state     <= UC_IDLE;
-                iq_force_dequeue <= 1'b0;
             end else begin
-                iq_force_dequeue <= 1'b0;  // Default: clear pulse
-
                 case (ucode_state)
                     UC_IDLE: begin
                         // Detect OP_MICROCODE issued from IQ
                         if (iq_issue_valid && iq_issue_instr.op_cat == OP_MICROCODE) begin
                             ucode_state      <= UC_DRAINING;
-                            iq_force_dequeue <= 1'b1;  // 1-cycle pulse
                             // Latch macro-op info from IQ issue
                             macro_rob_tag    <= iq_issue_instr.rob_tag;
                             macro_opcode     <= iq_issue_instr.opcode;
@@ -2302,10 +2495,10 @@ module f386_ooo_core_top (
         // ---------------------------------------------------------
         // Execute u_valid mux (section f)
         // ---------------------------------------------------------
-        // During UC_ACTIVE: sequencer drives valid (skipping memory stubs)
+        // During UC_ACTIVE: sequencer drives valid (skipping memory ops)
         // On dequeue cycle: suppress (macro-op consumed, not executed)
         assign eff_exec_u_valid =
-            (ucode_state == UC_ACTIVE) ? (seq_uop_valid && !uop_is_mem_stub) :
+            (ucode_state == UC_ACTIVE) ? (seq_uop_valid && !uop_is_mem) :
             iq_force_dequeue           ? 1'b0 :
             iq_issue_valid;
 
@@ -2313,10 +2506,12 @@ module f386_ooo_core_top (
         // PRF read address mux (section g)
         // ---------------------------------------------------------
         // During UC_ACTIVE: read from committed physical registers
+        // PUSH override: port B reads ESP for address computation
         assign eff_prf_rd_addr_a = (ucode_state == UC_ACTIVE) ?
             rename_com_map[seq_uop_src_a_reg] : src_phys_a;
         assign eff_prf_rd_addr_b = (ucode_state == UC_ACTIVE) ?
-            rename_com_map[seq_uop_src_b_reg] : src_phys_b;
+            (uop_is_push ? rename_com_map[3'd4] :  // ESP = arch reg 4
+             rename_com_map[seq_uop_src_b_reg]) : src_phys_b;
 
         // ---------------------------------------------------------
         // Execute u_instr override (section h)
@@ -2357,15 +2552,13 @@ module f386_ooo_core_top (
         // ---------------------------------------------------------
         // CDB0 signal split (section j)
         // ---------------------------------------------------------
-        // Synthetic CDB0 for memory stubs: fires on the same cycle
-        wire ucode_synth_cdb0 = uop_is_mem_stub;
-
-        // ROB CDB0: suppress intermediate micro-ops, allow last + synthetic
+        // ROB CDB0: suppress intermediate micro-ops, allow last
+        // cdb0_valid now includes both execute CDB0 (ALU ops) and
+        // ESP CDB0 synthesis (memory ops via gen_lsq_memif mux)
         wire ucode_suppress_rob = (ucode_state == UC_ACTIVE) && seq_busy && !seq_uop_is_last;
 
-        assign eff_rob_cdb0_valid = ucode_synth_cdb0  ? seq_uop_is_last :  // Synthetic: only last
-                                    ucode_suppress_rob ? 1'b0 :             // Intermediate: suppress
-                                    cdb0_valid;                              // Normal
+        assign eff_rob_cdb0_valid = ucode_suppress_rob ? 1'b0 :    // Intermediate: suppress
+                                    cdb0_valid;                      // Normal + ESP CDB0
 
         assign eff_rob_cdb0_tag = (ucode_state == UC_ACTIVE) ? macro_rob_tag : cdb0_tag;
 
@@ -2415,7 +2608,9 @@ module f386_ooo_core_top (
         // synopsys translate_off
         always_ff @(posedge clk) begin
             if (ucode_state == UC_ACTIVE && seq_uop_valid && !flush) begin
-                if (seq_uop_special_cmd != UCMD_NOP && !ucode_has_eflags_cmd) begin
+                if (seq_uop_special_cmd != UCMD_NOP && !ucode_has_eflags_cmd
+                    && seq_uop_special_cmd != UCMD_PUSH_PRE
+                    && seq_uop_special_cmd != UCMD_POP_POST) begin
                     case (seq_uop_special_cmd)
                         UCMD_LOAD_CR, UCMD_STORE_CR,       // deferred P3.2
                         UCMD_LOAD_DTR, UCMD_STORE_DTR,     // deferred P3.2
@@ -2439,6 +2634,25 @@ module f386_ooo_core_top (
         // ---------------------------------------------------------
         assign ucode_active          = 1'b0;
         assign dbg_ucode_state       = 2'd0;
+        // Microcode memory engine bridge tie-offs
+        assign uc_mem_ld_fire          = 1'b0;
+        assign uc_mem_st_fire          = 1'b0;
+        assign uc_mem_addr             = 32'd0;
+        assign uc_mem_lq_idx           = '0;
+        assign uc_mem_sq_idx           = '0;
+        assign uc_mem_st_data          = 32'd0;
+        assign uc_mem_size             = 2'd0;
+        assign uc_mem_byte_en          = 4'd0;
+        assign uc_mem_ld_dispatch      = 1'b0;
+        assign uc_mem_st_dispatch      = 1'b0;
+        assign uc_mem_dispatch_rob_tag = '0;
+        assign uc_mem_retire_st        = 1'b0;
+        assign uc_mem_retire_sq_idx    = '0;
+        assign uc_mem_load_waiting     = 1'b0;
+        assign uc_mem_cdb1_phys_dest   = '0;
+        assign uc_mem_esp_cdb0_fire    = 1'b0;
+        assign uc_mem_esp_cdb0_data    = 32'd0;
+        assign uc_mem_esp_phys_dest    = '0;
         assign eff_iq_exec_ready     = exec_u_ready && !lsq_load_issue_stall;
         assign eff_exec_u_valid      = iq_issue_valid;
         assign eff_exec_u_instr      = exec_u_instr;

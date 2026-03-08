@@ -65,10 +65,21 @@ package f386_pkg;
 `endif
 
     // --- P2: Memory Integration Gates ---
-    localparam bit CONF_ENABLE_LSQ_MEMIF   = 1'b0;  // P2: LSQ split-phase wiring into core_top
+`ifdef SYNTHESIS_ENABLE_MEMORY
+    localparam bit CONF_ENABLE_LSQ_MEMIF   = 1'b1;  // P2: LSQ split-phase wiring into core_top
+    localparam bit CONF_ENABLE_MEM_FABRIC  = 1'b1;  // P2: split-phase L2 with MSHRs (requires LSQ_MEMIF + L2_CACHE)
+    localparam bit CONF_ENABLE_L2_CACHE    = 1'b1;  // L2: 128KB unified cache (replaces mem_ctrl)
+    localparam bit CONF_ENABLE_TLB         = 1'b1;  // P3.TLB.a: data-side paging translation
+`else
+ `ifdef VERILATOR_ENABLE_LSQ_MEMIF
+    localparam bit CONF_ENABLE_LSQ_MEMIF   = 1'b1;
+ `else
+    localparam bit CONF_ENABLE_LSQ_MEMIF   = 1'b0;
+ `endif
     localparam bit CONF_ENABLE_MEM_FABRIC  = 1'b0;  // P2: split-phase L2 with MSHRs (requires LSQ_MEMIF + L2_CACHE)
     localparam bit CONF_ENABLE_L2_CACHE    = 1'b0;  // L2: 128KB unified cache (replaces mem_ctrl)
     localparam bit CONF_ENABLE_TLB         = 1'b0;  // P3.TLB.a: data-side paging translation
+`endif
 
     // --- L2 Split-Phase / MSHR ---
     localparam int CONF_L2_NUM_MSHR   = 4;

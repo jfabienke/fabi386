@@ -13,6 +13,7 @@ set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Lite Edition"
 set_global_assignment -name VERILOG_FILE build/f386_sv2v_full.v
 set_global_assignment -name VERILOG_FILE rtl/core/f386_alu.v
 set_global_assignment -name VERILOG_FILE rtl/core/f386_fpu_spatial.v
+set_global_assignment -name VERILOG_FILE rtl/primitives/f386_bram_sdp.v
 
 # Timing constraints
 set_global_assignment -name SDC_FILE f386.sdc

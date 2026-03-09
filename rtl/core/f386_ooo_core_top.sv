@@ -343,6 +343,17 @@ module f386_ooo_core_top (
     logic        uc_mem_esp_cdb0_fire;     // ESP update CDB0
     logic [31:0] uc_mem_esp_cdb0_data;     // ESP new value
     phys_reg_t   uc_mem_esp_phys_dest;     // ESP physical register
+    // Microcode register-only CDB0 synthesis (LOAD_CR / STORE_CR)
+    logic        uc_regonly_cdb0_fire;
+    logic [31:0] uc_regonly_cdb0_data;
+    phys_reg_t   uc_regonly_phys_dest;
+    logic        uc_regonly_dest_valid;
+    // Microcode special command bridge (gen_microcode → gen_lsq_memif)
+    logic [7:0]  uc_mem_special_cmd;         // Current UM FSM special command
+    // Microcode CR write port
+    cr_idx_t     ucode_cr_idx;
+    logic [31:0] ucode_cr_din;
+    logic        ucode_cr_we;
     // From gen_lsq_memif → gen_microcode
     lq_idx_t     uc_lsq_ld_alloc_idx;     // Allocated LQ index
     sq_idx_t     uc_lsq_st_alloc_idx;     // Allocated SQ index
@@ -1146,10 +1157,10 @@ module f386_ooo_core_top (
         .clk             (clk),
         .rst_n           (rst_n),
 
-        // CR write port (undriven until microcode sequencer)
-        .cr_idx          (CR_0),
-        .cr_din          (32'h0),
-        .cr_we           (1'b0),
+        // CR write port (driven by microcode STORE_CR)
+        .cr_idx          (ucode_cr_idx),
+        .cr_din          (ucode_cr_din),
+        .cr_we           (ucode_cr_we),
 
         // Page fault CR2 (undriven until MMU)
         .pf_cr2_din      (dtlb_fault_addr),
@@ -1457,15 +1468,19 @@ module f386_ooo_core_top (
         wire cdb0_suppress_load = (iq_issue_instr.op_cat == OP_LOAD);
 
         // cdb0: suppress OP_LOAD broadcast (LSQ delivers load data on cdb1)
-        // OR in microcode ESP CDB0 synthesis (mutually exclusive with exec CDB0)
-        assign cdb0_valid      = (raw_cdb0_valid && !cdb0_suppress_load) || uc_mem_esp_cdb0_fire;
-        assign cdb0_tag        = uc_mem_esp_cdb0_fire ? uc_mem_dispatch_rob_tag : raw_cdb0_tag;
-        assign cdb0_data       = uc_mem_esp_cdb0_fire ? uc_mem_esp_cdb0_data    : raw_cdb0_data;
-        assign cdb0_flags      = uc_mem_esp_cdb0_fire ? 6'd0                    : raw_cdb0_flags;
-        assign cdb0_flags_mask = uc_mem_esp_cdb0_fire ? 6'd0                    : raw_cdb0_flags_mask;
-        assign cdb0_exception  = uc_mem_esp_cdb0_fire ? 1'b0                    : raw_cdb0_exception;
-        assign cdb0_phys_dest  = uc_mem_esp_cdb0_fire ? uc_mem_esp_phys_dest    : raw_cdb0_phys_dest;
-        assign cdb0_dest_valid = uc_mem_esp_cdb0_fire ? 1'b1                    : raw_cdb0_dest_valid;
+        // OR in microcode CDB0 synthesis (ESP / regonly, mutually exclusive with exec CDB0)
+        wire uc_synth_cdb0 = uc_mem_esp_cdb0_fire || uc_regonly_cdb0_fire;
+        assign cdb0_valid      = (raw_cdb0_valid && !cdb0_suppress_load) || uc_synth_cdb0;
+        assign cdb0_tag        = uc_synth_cdb0         ? uc_mem_dispatch_rob_tag : raw_cdb0_tag;
+        assign cdb0_data       = uc_regonly_cdb0_fire  ? uc_regonly_cdb0_data    :
+                                 uc_mem_esp_cdb0_fire   ? uc_mem_esp_cdb0_data    : raw_cdb0_data;
+        assign cdb0_flags      = uc_synth_cdb0         ? 6'd0                    : raw_cdb0_flags;
+        assign cdb0_flags_mask = uc_synth_cdb0         ? 6'd0                    : raw_cdb0_flags_mask;
+        assign cdb0_exception  = uc_synth_cdb0         ? 1'b0                    : raw_cdb0_exception;
+        assign cdb0_phys_dest  = uc_regonly_cdb0_fire  ? uc_regonly_phys_dest    :
+                                 uc_mem_esp_cdb0_fire   ? uc_mem_esp_phys_dest    : raw_cdb0_phys_dest;
+        assign cdb0_dest_valid = uc_regonly_cdb0_fire  ? uc_regonly_dest_valid   :
+                                 uc_mem_esp_cdb0_fire   ? 1'b1                    : raw_cdb0_dest_valid;
 
         // ---------------------------------------------------------
         // LSQ CDB load result
@@ -1504,11 +1519,15 @@ module f386_ooo_core_top (
                 rob_dest_valid_tbl[rob_tag_v] <= patched_v.dest_valid;
             end
             // Microcode load dispatch: override phys_dest for CDB1 writeback
+            // POP_FLAGS: suppress PRF write (loaded value goes to EFLAGS, not GPR)
             if (uc_mem_ld_dispatch) begin
                 rob_phys_dest_tbl [uc_mem_dispatch_rob_tag] <= uc_mem_cdb1_phys_dest;
-                rob_dest_valid_tbl[uc_mem_dispatch_rob_tag] <= 1'b1;
+                rob_dest_valid_tbl[uc_mem_dispatch_rob_tag] <= (uc_mem_special_cmd != UCMD_POP_FLAGS);
             end
         end
+
+        // Microcode regonly CDB0 phys_dest (needs rob_phys_dest_tbl from this generate block)
+        assign uc_regonly_phys_dest = rob_phys_dest_tbl[uc_mem_dispatch_rob_tag];
 
         // cdb1: IO path > LSQ > V-pipe execute priority
         wire any_ld_cdb = io_ld_cdb_valid || lsq_ld_cdb_valid;
@@ -2176,6 +2195,9 @@ module f386_ooo_core_top (
         assign sp_data_req       = '0;
         assign sp_data_rsp_ready = 1'b0;
 
+        // Microcode regonly CDB0 phys_dest stub
+        assign uc_regonly_phys_dest = '0;
+
         // CDB passthrough (no muxing)
         assign cdb0_valid      = raw_cdb0_valid;
         assign cdb0_tag        = raw_cdb0_tag;
@@ -2294,11 +2316,23 @@ module f386_ooo_core_top (
         // Stack-form micro-ops only (UCMD_PUSH_PRE, UCMD_POP_POST).
 
         // Detect memory micro-op from sequencer
+        // PUSH_FLAGS/POP_FLAGS are OP_SYS_CALL in ROM but need the memory path
         wire uop_is_mem = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
-                          (seq_uop_op_type == OP_LOAD || seq_uop_op_type == OP_STORE);
+                          (seq_uop_op_type == OP_LOAD || seq_uop_op_type == OP_STORE ||
+                           seq_uop_special_cmd == UCMD_PUSH_FLAGS ||
+                           seq_uop_special_cmd == UCMD_POP_FLAGS);
 
-        // Detect PUSH (needs ESP on PRF port B)
-        wire uop_is_push = uop_is_mem && (seq_uop_special_cmd == UCMD_PUSH_PRE);
+        // Detect PUSH variants (needs ESP on PRF port B)
+        wire uop_is_push = uop_is_mem && (seq_uop_special_cmd == UCMD_PUSH_PRE ||
+                                           seq_uop_special_cmd == UCMD_PUSH_FLAGS);
+
+        // Detect register-only special commands (bypass execute, self-completing)
+        wire uop_is_regonly_cmd = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
+            (seq_uop_special_cmd == UCMD_STORE_CR || seq_uop_special_cmd == UCMD_LOAD_CR);
+
+        // PRF port B needs ESP for PUSH variants and POP_FLAGS
+        wire uop_needs_esp_b = uop_is_push ||
+                               (uop_is_mem && seq_uop_special_cmd == UCMD_POP_FLAGS);
 
         typedef enum logic [1:0] {
             UM_IDLE      = 2'd0,
@@ -2318,6 +2352,11 @@ module f386_ooo_core_top (
         logic [7:0]  uc_mem_special_r;
         phys_reg_t   uc_mem_phys_dest_r;
         logic [31:0] uc_mem_esp_new_r;
+
+        // PUSHA original ESP latch: x86 PUSHA pushes the ESP value
+        // from *before* the instruction began (not the decremented value).
+        logic [31:0] uc_orig_esp_r;
+        logic        uc_orig_esp_latched;
 
         // Size constant: dword for 32-bit stack ops
         localparam logic [1:0] UC_MEM_SIZE = 2'd2;
@@ -2339,14 +2378,21 @@ module f386_ooo_core_top (
                 uc_mem_special_r  <= 8'd0;
                 uc_mem_phys_dest_r<= '0;
                 uc_mem_esp_new_r  <= 32'd0;
+                uc_orig_esp_r     <= 32'd0;
+                uc_orig_esp_latched <= 1'b0;
             end else if (flush) begin
-                uc_mem_state <= UM_IDLE;
+                uc_mem_state      <= UM_IDLE;
+                uc_orig_esp_latched <= 1'b0;
             end else begin
                 case (uc_mem_state)
                     UM_IDLE: begin
+                        // Clear PUSHA ESP latch when microcode sequence ends
+                        if (ucode_state == UC_IDLE)
+                            uc_orig_esp_latched <= 1'b0;
                         if (uop_is_mem) begin
                             uc_mem_state     <= UM_ALLOC;
-                            uc_mem_is_load_r <= (seq_uop_op_type == OP_LOAD);
+                            uc_mem_is_load_r <= (seq_uop_op_type == OP_LOAD) ||
+                                               (seq_uop_special_cmd == UCMD_POP_FLAGS);
                             uc_mem_special_r <= seq_uop_special_cmd;
                             uc_mem_phys_dest_r <= rename_com_map[seq_uop_dest_reg];
 
@@ -2354,14 +2400,33 @@ module f386_ooo_core_top (
                                 UCMD_PUSH_PRE: begin
                                     // prf_data_b = ESP (via PRF override below)
                                     uc_mem_addr_r    <= prf_data_b - ESP_DELTA;
-                                    uc_mem_data_r    <= prf_data_a;  // register to push
                                     uc_mem_esp_new_r <= prf_data_b - ESP_DELTA;
+                                    // PUSHA: latch original ESP on first PUSH of sequence
+                                    if (!uc_orig_esp_latched) begin
+                                        uc_orig_esp_r       <= prf_data_b;
+                                        uc_orig_esp_latched <= 1'b1;
+                                    end
+                                    // PUSHA step 4: push original ESP, not decremented value
+                                    uc_mem_data_r <= (seq_uop_src_a_reg == 3'd4) ?
+                                                      uc_orig_esp_r : prf_data_a;
+                                end
+                                UCMD_PUSH_FLAGS: begin
+                                    // PUSHF: push EFLAGS to stack (ESP-4)
+                                    uc_mem_addr_r    <= prf_data_b - ESP_DELTA;
+                                    uc_mem_esp_new_r <= prf_data_b - ESP_DELTA;
+                                    uc_mem_data_r    <= sys_eflags;
                                 end
                                 UCMD_POP_POST: begin
                                     // prf_data_a = ESP (src_a_reg = ESP in microcode)
                                     uc_mem_addr_r    <= prf_data_a;
                                     uc_mem_data_r    <= 32'd0;
                                     uc_mem_esp_new_r <= prf_data_a + ESP_DELTA;
+                                end
+                                UCMD_POP_FLAGS: begin
+                                    // POPF: load from stack to EFLAGS (ESP via port B)
+                                    uc_mem_addr_r    <= prf_data_b;
+                                    uc_mem_data_r    <= 32'd0;
+                                    uc_mem_esp_new_r <= prf_data_b + ESP_DELTA;
                                 end
                                 default: begin
                                     uc_mem_addr_r    <= prf_data_a;
@@ -2417,19 +2482,37 @@ module f386_ooo_core_top (
         assign uc_mem_cdb1_phys_dest   = uc_mem_phys_dest_r;
 
         // ESP CDB0 synthesis
-        wire esp_is_push = (uc_mem_special_r == UCMD_PUSH_PRE);
-        wire esp_is_pop  = (uc_mem_special_r == UCMD_POP_POST);
+        wire esp_is_push = (uc_mem_special_r == UCMD_PUSH_PRE) ||
+                           (uc_mem_special_r == UCMD_PUSH_FLAGS);
+        wire esp_is_pop  = (uc_mem_special_r == UCMD_POP_POST) ||
+                           (uc_mem_special_r == UCMD_POP_FLAGS);
         assign uc_mem_esp_cdb0_fire = (uc_mem_state == UM_ISSUE && !uc_mem_is_load_r && esp_is_push) ||
                                        (uc_mem_state == UM_LOAD_WAIT && lsq_cdb1_active && esp_is_pop);
         assign uc_mem_esp_cdb0_data = uc_mem_esp_new_r;
         assign uc_mem_esp_phys_dest = rename_com_map[3'd4];  // ESP = arch reg 4
 
+        // Bridge uc_mem_special_r to module level for gen_lsq_memif
+        assign uc_mem_special_cmd = uc_mem_special_r;
+
         // ---------------------------------------------------------
         // Drain FSM
         // ---------------------------------------------------------
-        // Microcode exec_ack: CDB0 for ALU ops, UM done for memory ops
+        // Register-only special command self-completing path (1-cycle delay)
+        logic uc_regonly_pending_r;
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n)      uc_regonly_pending_r <= 1'b0;
+            else if (flush)  uc_regonly_pending_r <= 1'b0;
+            else             uc_regonly_pending_r <= uop_is_regonly_cmd && !uc_regonly_pending_r;
+        end
+        wire uc_regonly_done = uc_regonly_pending_r;
+
+        // Microcode exec_ack: CDB0 for ALU ops, UM done for memory ops,
+        // regonly done for register-only special commands
         wire ucode_exec_ack = (ucode_state == UC_ACTIVE) &&
-                              (raw_cdb0_valid || uc_mem_done);
+                              (raw_cdb0_valid || uc_mem_done || uc_regonly_done);
+
+        // Latched operand value for STORE_CR (source GPR value from IQ issue)
+        logic [31:0] macro_val_a;
 
         always_ff @(posedge clk or negedge rst_n) begin
             if (!rst_n) begin
@@ -2442,6 +2525,7 @@ module f386_ooo_core_top (
                 macro_is_rep    <= 1'b0;
                 macro_is_repne  <= 1'b0;
                 macro_pc        <= 32'h0;
+                macro_val_a     <= 32'h0;
             end else if (flush) begin
                 ucode_state     <= UC_IDLE;
             end else begin
@@ -2459,6 +2543,7 @@ module f386_ooo_core_top (
                             macro_is_rep     <= iq_issue_instr.is_rep;
                             macro_is_repne   <= iq_issue_instr.is_repne;
                             macro_pc         <= iq_issue_instr.pc;
+                            macro_val_a      <= iq_issue_instr.val_a;
                         end
                     end
 
@@ -2495,10 +2580,10 @@ module f386_ooo_core_top (
         // ---------------------------------------------------------
         // Execute u_valid mux (section f)
         // ---------------------------------------------------------
-        // During UC_ACTIVE: sequencer drives valid (skipping memory ops)
+        // During UC_ACTIVE: sequencer drives valid (skipping memory + regonly ops)
         // On dequeue cycle: suppress (macro-op consumed, not executed)
         assign eff_exec_u_valid =
-            (ucode_state == UC_ACTIVE) ? (seq_uop_valid && !uop_is_mem) :
+            (ucode_state == UC_ACTIVE) ? (seq_uop_valid && !uop_is_mem && !uop_is_regonly_cmd) :
             iq_force_dequeue           ? 1'b0 :
             iq_issue_valid;
 
@@ -2506,11 +2591,11 @@ module f386_ooo_core_top (
         // PRF read address mux (section g)
         // ---------------------------------------------------------
         // During UC_ACTIVE: read from committed physical registers
-        // PUSH override: port B reads ESP for address computation
+        // ESP override: port B reads ESP for PUSH/PUSH_FLAGS/POP_FLAGS
         assign eff_prf_rd_addr_a = (ucode_state == UC_ACTIVE) ?
             rename_com_map[seq_uop_src_a_reg] : src_phys_a;
         assign eff_prf_rd_addr_b = (ucode_state == UC_ACTIVE) ?
-            (uop_is_push ? rename_com_map[3'd4] :  // ESP = arch reg 4
+            (uop_needs_esp_b ? rename_com_map[3'd4] :  // ESP = arch reg 4
              rename_com_map[seq_uop_src_b_reg]) : src_phys_b;
 
         // ---------------------------------------------------------
@@ -2572,7 +2657,8 @@ module f386_ooo_core_top (
         // ---------------------------------------------------------
         logic ucode_has_eflags_cmd;
         assign ucode_has_eflags_cmd = (seq_uop_special_cmd inside {
-            UCMD_CLC, UCMD_STC, UCMD_CMC, UCMD_CLD, UCMD_STD});
+            UCMD_CLC, UCMD_STC, UCMD_CMC, UCMD_CLD, UCMD_STD,
+            UCMD_POP_FLAGS});
 
         always_comb begin
             ucode_eflags_din  = 32'h0;
@@ -2598,11 +2684,43 @@ module f386_ooo_core_top (
                     ucode_eflags_mask[EFLAGS_DF] = 1'b1;
                     ucode_eflags_din[EFLAGS_DF]  = 1'b1;
                 end
+                UCMD_POP_FLAGS: begin  // Pop EFLAGS from stack
+                    // Writable: CF,PF,AF,ZF,SF,TF,IF,DF,OF,IOPL,NT,AC,ID
+                    ucode_eflags_mask = 32'h0024_4FD5;
+                    ucode_eflags_din  = cdb1_data[31:0];  // Loaded value from LSQ
+                end
                 default: begin end
             endcase
         end
 
         assign ucode_eflags_we = ucode_exec_ack && ucode_has_eflags_cmd && !flush;
+
+        // ---------------------------------------------------------
+        // Special command routing (section n) — CR access
+        // ---------------------------------------------------------
+        // CR read mux (combinational, for LOAD_CR CDB0 data)
+        logic [31:0] cr_read_mux;
+        always_comb begin
+            case (macro_modrm_reg)
+                3'd0:    cr_read_mux = sys_cr0;
+                3'd2:    cr_read_mux = sys_cr2;
+                3'd3:    cr_read_mux = sys_cr3;
+                3'd4:    cr_read_mux = sys_cr4;
+                default: cr_read_mux = 32'd0;
+            endcase
+        end
+
+        // Register-only CDB0 synthesis (LOAD_CR / STORE_CR)
+        assign uc_regonly_cdb0_fire = uc_regonly_done;
+        assign uc_regonly_cdb0_data = (seq_uop_special_cmd == UCMD_LOAD_CR) ? cr_read_mux : 32'd0;
+        // uc_regonly_phys_dest assigned in gen_lsq_memif (where rob_phys_dest_tbl lives)
+        assign uc_regonly_dest_valid = (seq_uop_special_cmd == UCMD_LOAD_CR);
+
+        // CR write port (STORE_CR: write macro_val_a to CR[macro_modrm_reg])
+        // Note: no !flush gate — CR3 write itself causes flush (avoid comb loop)
+        assign ucode_cr_we  = uc_regonly_done && (seq_uop_special_cmd == UCMD_STORE_CR);
+        assign ucode_cr_idx = cr_idx_t'(macro_modrm_reg);
+        assign ucode_cr_din = macro_val_a;
 
         // Deferred special commands (sim-only log)
         // synopsys translate_off
@@ -2610,16 +2728,17 @@ module f386_ooo_core_top (
             if (ucode_state == UC_ACTIVE && seq_uop_valid && !flush) begin
                 if (seq_uop_special_cmd != UCMD_NOP && !ucode_has_eflags_cmd
                     && seq_uop_special_cmd != UCMD_PUSH_PRE
-                    && seq_uop_special_cmd != UCMD_POP_POST) begin
+                    && seq_uop_special_cmd != UCMD_POP_POST
+                    && seq_uop_special_cmd != UCMD_PUSH_FLAGS
+                    && seq_uop_special_cmd != UCMD_LOAD_CR
+                    && seq_uop_special_cmd != UCMD_STORE_CR) begin
                     case (seq_uop_special_cmd)
-                        UCMD_LOAD_CR, UCMD_STORE_CR,       // deferred P3.2
-                        UCMD_LOAD_DTR, UCMD_STORE_DTR,     // deferred P3.2
-                        UCMD_LOAD_SEG, UCMD_STORE_SEG,     // deferred P3.2
-                        UCMD_INT_ENTER, UCMD_INT_EXIT,     // deferred P3.2
-                        UCMD_PUSH_FLAGS, UCMD_POP_FLAGS,   // deferred P3.1b
-                        UCMD_LAHF, UCMD_SAHF,              // deferred P3.1b
-                        UCMD_CLI, UCMD_STI,                // deferred P3.2 (IOPL)
-                        UCMD_HALT: begin end                // deferred P3.2
+                        UCMD_LOAD_DTR, UCMD_STORE_DTR,     // deferred P3.2+
+                        UCMD_LOAD_SEG, UCMD_STORE_SEG,     // deferred P3.2+
+                        UCMD_INT_ENTER, UCMD_INT_EXIT,     // deferred P3.3
+                        UCMD_LAHF, UCMD_SAHF,              // deferred
+                        UCMD_CLI, UCMD_STI,                // deferred P3.2+ (IOPL)
+                        UCMD_HALT: begin end                // deferred P3.2+
                         default: begin end
                     endcase
                 end
@@ -2653,6 +2772,14 @@ module f386_ooo_core_top (
         assign uc_mem_esp_cdb0_fire    = 1'b0;
         assign uc_mem_esp_cdb0_data    = 32'd0;
         assign uc_mem_esp_phys_dest    = '0;
+        assign uc_mem_special_cmd      = 8'd0;
+        assign uc_regonly_cdb0_fire    = 1'b0;
+        assign uc_regonly_cdb0_data    = 32'd0;
+        // uc_regonly_phys_dest assigned in gen_lsq_memif / gen_no_lsq_memif
+        assign uc_regonly_dest_valid   = 1'b0;
+        assign ucode_cr_we            = 1'b0;
+        assign ucode_cr_idx           = CR_0;
+        assign ucode_cr_din           = 32'd0;
         assign eff_iq_exec_ready     = exec_u_ready && !lsq_load_issue_stall;
         assign eff_exec_u_valid      = iq_issue_valid;
         assign eff_exec_u_instr      = exec_u_instr;

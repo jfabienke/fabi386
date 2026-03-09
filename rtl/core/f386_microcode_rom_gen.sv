@@ -26,7 +26,7 @@ function automatic logic [47:0] microcode_rom_lookup(
         15'h1840: microcode_rom_lookup = 48'h20F008100004;
         15'h1841: microcode_rom_lookup = 48'h20D008100004;
         15'h1842: microcode_rom_lookup = 48'h20B008100004;
-        15'h1843: microcode_rom_lookup = 48'h700000000004;
+        15'h1843: microcode_rom_lookup = 48'h201008100004;
         15'h1844: microcode_rom_lookup = 48'h207008100004;
         15'h1845: microcode_rom_lookup = 48'h205008100004;
         15'h1846: microcode_rom_lookup = 48'h203008100004;
@@ -200,10 +200,6 @@ function automatic logic [47:0] microcode_rom_lookup(
         15'h6740: microcode_rom_lookup = 48'h700003800008;
         15'h6780: microcode_rom_lookup = 48'h700003800008;
         15'h67C0: microcode_rom_lookup = 48'h700003800008;
-        // CPUID (0F A2): 3 ALU micro-ops writing EAX, EBX, ECX
-        15'h6880: microcode_rom_lookup = 48'h100000000110;  // step 0: ALU_IMM dest=EAX imm=0x0011
-        15'h6881: microcode_rom_lookup = 48'h10600C000220;  // step 1: ALU_IMM dest=EBX imm=0x0022
-        15'h6882: microcode_rom_lookup = 48'h102004000338;  // step 2: ALU_IMM dest=ECX imm=0x0033 is_last
         15'h68C0: microcode_rom_lookup = 48'h200000000000;
         15'h68C1: microcode_rom_lookup = 48'h700002100008;
         15'h6900: microcode_rom_lookup = 48'h700002700008;
@@ -295,38 +291,42 @@ function automatic logic [47:0] microcode_rom_lookup(
         15'h7741: microcode_rom_lookup = 48'h700002400000;
         15'h7742: microcode_rom_lookup = 48'h300000000008;
         15'h7780: microcode_rom_lookup = 48'h200000000000;
-        15'h7781: microcode_rom_lookup = 48'h700003F00008;
+        15'h7781: microcode_rom_lookup = 48'h0C0000000000;
+        15'h7782: microcode_rom_lookup = 48'h300000000008;
         15'h77C0: microcode_rom_lookup = 48'h200000000000;
-        15'h77C1: microcode_rom_lookup = 48'h700004000008;
-        15'h7800: microcode_rom_lookup = 48'h700000600008;
-        15'h7840: microcode_rom_lookup = 48'h700000600008;
-        15'h7880: microcode_rom_lookup = 48'h700000200008;
-        15'h78C0: microcode_rom_lookup = 48'h700000200008;
-        15'h7900: microcode_rom_lookup = 48'h700000400008;
-        15'h7940: microcode_rom_lookup = 48'h200000000004;
-        15'h7941: microcode_rom_lookup = 48'h70000030000C;
+        15'h77C1: microcode_rom_lookup = 48'h0D0000000000;
+        15'h77C2: microcode_rom_lookup = 48'h300000000008;
+        15'h7800: microcode_rom_lookup = 48'h200000000000;
+        15'h7801: microcode_rom_lookup = 48'h308008000000;
+        15'h7802: microcode_rom_lookup = 48'h030000000008;
+        15'h7840: microcode_rom_lookup = 48'h200000000004;
+        15'h7841: microcode_rom_lookup = 48'h200000000004;
+        15'h7842: microcode_rom_lookup = 48'h308008000004;
+        15'h7843: microcode_rom_lookup = 48'h308008000004;
+        15'h7844: microcode_rom_lookup = 48'h700000E0000C;
+        15'h7880: microcode_rom_lookup = 48'h200000000000;
+        15'h7881: microcode_rom_lookup = 48'h030000000008;
+        15'h78C0: microcode_rom_lookup = 48'h200000000004;
+        15'h78C1: microcode_rom_lookup = 48'h200000000004;
+        15'h78C2: microcode_rom_lookup = 48'h700000E0000C;
+        15'h7900: microcode_rom_lookup = 48'h200000000000;
+        15'h7901: microcode_rom_lookup = 48'h308008000008;
+        15'h7940: microcode_rom_lookup = 48'h200000000000;
+        15'h7941: microcode_rom_lookup = 48'h700003F00008;
         15'h7980: microcode_rom_lookup = 48'h200000000000;
-        15'h7981: microcode_rom_lookup = 48'h0C0000000000;
-        15'h7982: microcode_rom_lookup = 48'h300000000008;
-        15'h79C0: microcode_rom_lookup = 48'h200000000000;
-        15'h79C1: microcode_rom_lookup = 48'h0D0000000000;
-        15'h79C2: microcode_rom_lookup = 48'h300000000008;
-        15'h7A00: microcode_rom_lookup = 48'h200000000000;
-        15'h7A01: microcode_rom_lookup = 48'h308008000000;
-        15'h7A02: microcode_rom_lookup = 48'h030000000008;
-        15'h7A40: microcode_rom_lookup = 48'h200000000004;
-        15'h7A41: microcode_rom_lookup = 48'h200000000004;
-        15'h7A42: microcode_rom_lookup = 48'h308008000004;
-        15'h7A43: microcode_rom_lookup = 48'h308008000004;
-        15'h7A44: microcode_rom_lookup = 48'h700000E0000C;
-        15'h7A80: microcode_rom_lookup = 48'h200000000000;
-        15'h7A81: microcode_rom_lookup = 48'h030000000008;
-        15'h7AC0: microcode_rom_lookup = 48'h200000000004;
-        15'h7AC1: microcode_rom_lookup = 48'h200000000004;
-        15'h7AC2: microcode_rom_lookup = 48'h700000E0000C;
-        15'h7B00: microcode_rom_lookup = 48'h200000000000;
-        15'h7B01: microcode_rom_lookup = 48'h308008000008;
+        15'h7981: microcode_rom_lookup = 48'h700004000008;
+        15'h79C0: microcode_rom_lookup = 48'h700000600008;
+        15'h7A00: microcode_rom_lookup = 48'h700000600008;
+        15'h7A40: microcode_rom_lookup = 48'h700000200008;
+        15'h7A80: microcode_rom_lookup = 48'h700000200008;
+        15'h7AC0: microcode_rom_lookup = 48'h700000400008;
+        15'h7B00: microcode_rom_lookup = 48'h200000000004;
+        15'h7B01: microcode_rom_lookup = 48'h70000030000C;
         `ifdef VERILATOR
+        // CPUID (0F A2): 3 ALU micro-ops writing EAX, EBX, ECX
+        15'h6880: microcode_rom_lookup = 48'h100000000110;  // step 0: ALU_IMM dest=EAX imm=0x0011
+        15'h6881: microcode_rom_lookup = 48'h10600C000220;  // step 1: ALU_IMM dest=EBX imm=0x0022
+        15'h6882: microcode_rom_lookup = 48'h102004000338;  // step 2: ALU_IMM dest=ECX imm=0x0033 is_last
         // Test opcode 0xD6: PUSH EAX → POP EBX (microcode mem bring-up)
         15'h3580: microcode_rom_lookup = 48'h308008000000;  // step 0: PUSH EAX (UCMD_PUSH_PRE)
         15'h3581: microcode_rom_lookup = 48'h207008100008;  // step 1: POP EBX (UCMD_POP_POST, is_last)
@@ -431,7 +431,9 @@ function automatic logic [5:0] microcode_max_step(
         9'h19D: microcode_max_step = 6'd1;
         9'h19E: microcode_max_step = 6'd1;
         9'h19F: microcode_max_step = 6'd1;
+        `ifdef VERILATOR
         9'h1A2: microcode_max_step = 6'd3;  // CPUID
+        `endif
         9'h1A3: microcode_max_step = 6'd2;
         9'h1A4: microcode_max_step = 6'd1;
         9'h1A5: microcode_max_step = 6'd1;
@@ -469,20 +471,20 @@ function automatic logic [5:0] microcode_max_step(
         9'h1DB: microcode_max_step = 6'd3;
         9'h1DC: microcode_max_step = 6'd3;
         9'h1DD: microcode_max_step = 6'd3;
-        9'h1DE: microcode_max_step = 6'd2;
-        9'h1DF: microcode_max_step = 6'd2;
-        9'h1E0: microcode_max_step = 6'd1;
-        9'h1E1: microcode_max_step = 6'd1;
-        9'h1E2: microcode_max_step = 6'd1;
-        9'h1E3: microcode_max_step = 6'd1;
-        9'h1E4: microcode_max_step = 6'd1;
+        9'h1DE: microcode_max_step = 6'd3;
+        9'h1DF: microcode_max_step = 6'd3;
+        9'h1E0: microcode_max_step = 6'd3;
+        9'h1E1: microcode_max_step = 6'd5;
+        9'h1E2: microcode_max_step = 6'd2;
+        9'h1E3: microcode_max_step = 6'd3;
+        9'h1E4: microcode_max_step = 6'd2;
         9'h1E5: microcode_max_step = 6'd2;
-        9'h1E6: microcode_max_step = 6'd3;
-        9'h1E7: microcode_max_step = 6'd3;
-        9'h1E8: microcode_max_step = 6'd3;
-        9'h1E9: microcode_max_step = 6'd5;
-        9'h1EA: microcode_max_step = 6'd2;
-        9'h1EB: microcode_max_step = 6'd3;
+        9'h1E6: microcode_max_step = 6'd2;
+        9'h1E7: microcode_max_step = 6'd1;
+        9'h1E8: microcode_max_step = 6'd1;
+        9'h1E9: microcode_max_step = 6'd1;
+        9'h1EA: microcode_max_step = 6'd1;
+        9'h1EB: microcode_max_step = 6'd1;
         9'h1EC: microcode_max_step = 6'd2;
         default: microcode_max_step = 6'd1;
     endcase
@@ -511,7 +513,9 @@ function automatic logic microcode_is_atomic(
         9'h101: microcode_is_atomic = 1'b1;
         9'h120: microcode_is_atomic = 1'b1;
         9'h122: microcode_is_atomic = 1'b1;
+        `ifdef VERILATOR
         9'h1A2: microcode_is_atomic = 1'b1;  // CPUID
+        `endif
         9'h1B0: microcode_is_atomic = 1'b1;
         9'h1B1: microcode_is_atomic = 1'b1;
         9'h1B2: microcode_is_atomic = 1'b1;
@@ -519,9 +523,9 @@ function automatic logic microcode_is_atomic(
         9'h1B5: microcode_is_atomic = 1'b1;
         9'h1C0: microcode_is_atomic = 1'b1;
         9'h1C1: microcode_is_atomic = 1'b1;
-        9'h1E5: microcode_is_atomic = 1'b1;
-        9'h1E9: microcode_is_atomic = 1'b1;
-        9'h1EB: microcode_is_atomic = 1'b1;
+        9'h1E1: microcode_is_atomic = 1'b1;
+        9'h1E3: microcode_is_atomic = 1'b1;
+        9'h1EC: microcode_is_atomic = 1'b1;
         default: microcode_is_atomic = 1'b0;
     endcase
 endfunction
@@ -544,21 +548,21 @@ function automatic logic [8:0] microcode_group_remap(
         12'h7BD: microcode_group_remap = 9'h1D5;  // 0xf7/5 → 0F 0xd5
         12'h7BE: microcode_group_remap = 9'h1D6;  // 0xf7/6 → 0F 0xd6
         12'h7BF: microcode_group_remap = 9'h1D7;  // 0xf7/7 → 0F 0xd7
-        12'h7F0: microcode_group_remap = 9'h1E6;  // 0xfe/0 → 0F 0xe6
-        12'h7F1: microcode_group_remap = 9'h1E7;  // 0xfe/1 → 0F 0xe7
-        12'h7FA: microcode_group_remap = 9'h1E8;  // 0xff/2 → 0F 0xe8
-        12'h7FB: microcode_group_remap = 9'h1E9;  // 0xff/3 → 0F 0xe9
-        12'h7FC: microcode_group_remap = 9'h1EA;  // 0xff/4 → 0F 0xea
-        12'h7FD: microcode_group_remap = 9'h1EB;  // 0xff/5 → 0F 0xeb
-        12'h7FE: microcode_group_remap = 9'h1EC;  // 0xff/6 → 0F 0xec
-        12'h800: microcode_group_remap = 9'h1E2;  // 0x00/0 → 0F 0xe2
-        12'h801: microcode_group_remap = 9'h1E3;  // 0x00/1 → 0F 0xe3
-        12'h804: microcode_group_remap = 9'h1DE;  // 0x00/4 → 0F 0xde
-        12'h805: microcode_group_remap = 9'h1DF;  // 0x00/5 → 0F 0xdf
-        12'h808: microcode_group_remap = 9'h1E0;  // 0x01/0 → 0F 0xe0
-        12'h809: microcode_group_remap = 9'h1E1;  // 0x01/1 → 0F 0xe1
-        12'h80C: microcode_group_remap = 9'h1E4;  // 0x01/4 → 0F 0xe4
-        12'h80E: microcode_group_remap = 9'h1E5;  // 0x01/6 → 0F 0xe5
+        12'h7F0: microcode_group_remap = 9'h1DE;  // 0xfe/0 → 0F 0xde
+        12'h7F1: microcode_group_remap = 9'h1DF;  // 0xfe/1 → 0F 0xdf
+        12'h7FA: microcode_group_remap = 9'h1E0;  // 0xff/2 → 0F 0xe0
+        12'h7FB: microcode_group_remap = 9'h1E1;  // 0xff/3 → 0F 0xe1
+        12'h7FC: microcode_group_remap = 9'h1E2;  // 0xff/4 → 0F 0xe2
+        12'h7FD: microcode_group_remap = 9'h1E3;  // 0xff/5 → 0F 0xe3
+        12'h7FE: microcode_group_remap = 9'h1E4;  // 0xff/6 → 0F 0xe4
+        12'h800: microcode_group_remap = 9'h1E9;  // 0x00/0 → 0F 0xe9
+        12'h801: microcode_group_remap = 9'h1EA;  // 0x00/1 → 0F 0xea
+        12'h804: microcode_group_remap = 9'h1E5;  // 0x00/4 → 0F 0xe5
+        12'h805: microcode_group_remap = 9'h1E6;  // 0x00/5 → 0F 0xe6
+        12'h808: microcode_group_remap = 9'h1E7;  // 0x01/0 → 0F 0xe7
+        12'h809: microcode_group_remap = 9'h1E8;  // 0x01/1 → 0F 0xe8
+        12'h80C: microcode_group_remap = 9'h1EB;  // 0x01/4 → 0F 0xeb
+        12'h80E: microcode_group_remap = 9'h1EC;  // 0x01/6 → 0F 0xec
         12'hDD4: microcode_group_remap = 9'h1DA;  // 0xba/4 → 0F 0xda
         12'hDD5: microcode_group_remap = 9'h1DB;  // 0xba/5 → 0F 0xdb
         12'hDD6: microcode_group_remap = 9'h1DC;  // 0xba/6 → 0F 0xdc

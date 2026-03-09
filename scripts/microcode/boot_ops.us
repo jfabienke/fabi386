@@ -113,7 +113,7 @@
 0: POP edi
 1: POP esi
 2: POP ebp
-3: NOP                  # Skip ESP (not restored by POPA)
+3: POP eax              # Discard ESP slot (EAX overwritten at step 7)
 4: POP ebx
 5: POP edx
 6: POP ecx

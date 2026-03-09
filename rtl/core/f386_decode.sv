@@ -953,8 +953,11 @@ module f386_decode (
                 8'hAE:
                     return OP_SYS_CALL;
 
-                // MOV CR/DR — system register access
-                8'h20, 8'h21, 8'h22, 8'h23:
+                // MOV CR — routed through microcode (UCMD_LOAD_CR / UCMD_STORE_CR)
+                8'h20, 8'h22:
+                    return OP_MICROCODE;
+                // MOV DR — system call (DR access, deferred)
+                8'h21, 8'h23:
                     return OP_SYS_CALL;
 
                 // SETcc (0F 90-9F) — simple ALU producing 0/1
@@ -1087,9 +1090,9 @@ module f386_decode (
         if (pd.opcode == 8'h8F)
             return OP_LOAD;
 
-        // PUSHF/POPF
-        if (pd.opcode == 8'h9C) return OP_STORE;
-        if (pd.opcode == 8'h9D) return OP_LOAD;
+        // PUSHF/POPF — routed through microcode (UCMD_PUSH_FLAGS / UCMD_POP_FLAGS)
+        if (pd.opcode == 8'h9C) return OP_MICROCODE;
+        if (pd.opcode == 8'h9D) return OP_MICROCODE;
 
         // String operations — microcode (REP prefix makes them multi-cycle)
         case (pd.opcode)
@@ -2525,7 +2528,9 @@ module f386_decode (
             v_addr_scale          <= ru_v.addr_scale;
             v_mem_size            <= derive_mem_size(pd_v);
 
-        end else begin
+        end else if (!s1_valid) begin
+            // Pipeline bubble: no valid data upstream, clear outputs.
+            // When s1_valid=1 && rename_ready=0: HOLD (stall retention).
             instr_u_valid         <= 0;
             instr_v_valid         <= 0;
             branch_target_u_valid <= 0;

@@ -302,8 +302,17 @@ module f386_lsq (
             sq_tail       <= '0;
             sq_count      <= '0;
         end else begin
+            // ---- Combined sq_count update (avoids last-assignment-wins bug) ----
+            automatic logic sq_enq = (st_dispatch_valid || uc_st_dispatch_valid) && !sq_full;
+            automatic logic sq_deq = store_drain_ack && sq_valid[sq_head] && sq_committed[sq_head];
+            case ({sq_enq, sq_deq})
+                2'b10:   sq_count <= sq_count + (SQ_ID_WIDTH+1)'(1);
+                2'b01:   sq_count <= sq_count - (SQ_ID_WIDTH+1)'(1);
+                default: ; // 2'b11: net zero; 2'b00: no change
+            endcase
+
             // Dispatch new store (normal or microcode sideband — mutually exclusive)
-            if ((st_dispatch_valid || uc_st_dispatch_valid) && !sq_full) begin
+            if (sq_enq) begin
                 sq_valid[sq_tail]      <= 1'b1;
                 sq_addr_valid[sq_tail] <= 1'b0;
                 sq_data_valid[sq_tail] <= 1'b0;
@@ -311,7 +320,6 @@ module f386_lsq (
                 sq_rob_tag[sq_tail]    <= uc_st_dispatch_valid ? uc_dispatch_rob_tag
                                                                : st_dispatch_rob_tag;
                 sq_tail                <= sq_tail + sq_idx_t'(1);
-                sq_count               <= sq_count + (SQ_ID_WIDTH+1)'(1);
             end
 
             // AGU address + data writeback
@@ -331,10 +339,9 @@ module f386_lsq (
                 sq_committed[uc_retire_st_idx] <= 1'b1;
 
             // Dequeue committed store after cache/memory write completes
-            if (store_drain_ack && sq_valid[sq_head] && sq_committed[sq_head]) begin
+            if (sq_deq) begin
                 sq_valid[sq_head] <= 1'b0;
                 sq_head           <= sq_head + sq_idx_t'(1);
-                sq_count          <= sq_count - (SQ_ID_WIDTH+1)'(1);
             end
         end
     end

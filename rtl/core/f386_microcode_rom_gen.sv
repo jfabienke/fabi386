@@ -162,6 +162,7 @@ function automatic logic [47:0] microcode_rom_lookup(
         15'h3940: microcode_rom_lookup = 48'h700003900008;
         15'h3980: microcode_rom_lookup = 48'h700003A00008;
         15'h39C0: microcode_rom_lookup = 48'h700003A00008;
+        15'h3A80: microcode_rom_lookup = 48'h700000E0000C;  // FAR_JMP 0xEA step 0: FAR_CALL (is_last, atomic)
         15'h3B00: microcode_rom_lookup = 48'h704003900008;
         15'h3B40: microcode_rom_lookup = 48'h704003900008;
         15'h3B80: microcode_rom_lookup = 48'h704003A00008;
@@ -397,6 +398,7 @@ function automatic logic [5:0] microcode_max_step(
         9'h0E5: microcode_max_step = 6'd1;
         9'h0E6: microcode_max_step = 6'd1;
         9'h0E7: microcode_max_step = 6'd1;
+        9'h0EA: microcode_max_step = 6'd1;  // FAR_JMP: single FAR_CALL step
         9'h0EC: microcode_max_step = 6'd1;
         9'h0ED: microcode_max_step = 6'd1;
         9'h0EE: microcode_max_step = 6'd1;
@@ -508,6 +510,7 @@ function automatic logic microcode_is_atomic(
         9'h0CB: microcode_is_atomic = 1'b1;
         9'h0CD: microcode_is_atomic = 1'b1;
         9'h0CF: microcode_is_atomic = 1'b1;
+        9'h0EA: microcode_is_atomic = 1'b1;  // FAR_JMP
         9'h0F4: microcode_is_atomic = 1'b1;
         9'h100: microcode_is_atomic = 1'b1;
         9'h101: microcode_is_atomic = 1'b1;

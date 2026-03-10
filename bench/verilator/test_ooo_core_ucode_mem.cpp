@@ -238,6 +238,33 @@ public:
         return top_->rootp->f386_ooo_core_top__DOT__sys_regs__DOT__reg_idtr_limit;
     }
 
+    // Segment register readback
+    uint16_t cs_sel() const {
+        return top_->rootp->f386_ooo_core_top__DOT__seg_cs_sel;
+    }
+    uint64_t cs_cache() const {
+        // SEG_CS = index 1
+        return top_->rootp->f386_ooo_core_top__DOT__seg_cache__DOT__reg_cache[1];
+    }
+    bool cs_db() const {
+        // D/B bit is bit 54 of the descriptor cache
+        return (cs_cache() >> 54) & 1;
+    }
+    uint32_t pc() const {
+        return top_->rootp->f386_ooo_core_top__DOT__pc_current;
+    }
+    bool pe_mode() const {
+        // PE is bit 0 of CR0
+        return cr0() & 1;
+    }
+    bool default_32() const {
+        // default_32 = CS.D/B in protected mode, 0 in real mode
+        return pe_mode() ? cs_db() : false;
+    }
+    uint32_t cr0() const {
+        return top_->rootp->f386_ooo_core_top__DOT__sys_regs__DOT__reg_cr0;
+    }
+
     // Direct access to top module for debug
     Vf386_ooo_core_top* top() const { return top_.get(); }
 
@@ -1101,6 +1128,142 @@ static void test_lidt_data_verify(UcodeMemTB& tb) {
 }
 
 // ============================================================
+// Test 21: Real-mode far JMP (0xEA)
+// Proves: Far JMP in real mode updates CS selector and redirects PC
+// ============================================================
+static void test_far_jmp_real_mode(UcodeMemTB& tb) {
+    printf("Test 21: Real-mode far JMP\n");
+
+    // In real mode (PE=0), default_32=0, so this is 16-bit operand size.
+    // 0xEA LL HH SS SS → JMP FAR seg:offset16
+    // JMP FAR 0x2000:0x1000 → EA 00 10 00 20
+    // But we need to jump to a valid address where there are NOPs.
+    // Place far JMP at byte 0 of first fetch block (reset vector area 0xFFF0).
+    // Target: 0x1000:0x0000 → linear address = 0x10000
+    // Pre-fill target with NOPs.
+    uint8_t code[] = {
+        0xEA,                   // Far JMP opcode
+        0x00, 0x00,             // Offset = 0x0000 (16-bit)
+        0x00, 0x10,             // Selector = 0x1000
+    };
+
+    tb.load_program(code, sizeof(code));
+    // Pre-fill target area (linear 0x10000 = 0x1000:0x0000) with NOPs
+    for (int i = 0; i < 256; i++)
+        tb.write_mem32(0x10000 + i*4, 0x90909090);
+    tb.reset();
+
+    // Wait for some retirements (NOPs at target should retire after the JMP)
+    bool done = tb.run_until([&]{ return tb.retired() >= 4; }, 10000);
+    tb.run(200);  // Let everything settle
+
+    printf("  CS=0x%04X pc=0x%08X pe=%d d32=%d\n",
+           tb.cs_sel(), tb.pc(), tb.pe_mode(), tb.default_32());
+    printf("  retired=%llu cycles=%llu\n",
+           (unsigned long long)tb.retired(),
+           (unsigned long long)tb.cycle_count());
+
+    CHECK(done, "far JMP completed (instructions retired at target)");
+    CHECK(tb.cs_sel() == 0x1000, "CS selector = 0x1000 after far JMP");
+    CHECK(!tb.default_32(), "default_32 = 0 (real mode, D/B=0)");
+    CHECK(!tb.pe_mode(), "still in real mode (PE=0)");
+}
+
+// ============================================================
+// Test 22: Protected-mode far JMP with GDT lookup
+// Proves: LGDT + MOV CR0 (set PE) + JMP FAR loads CS from GDT
+// ============================================================
+static void test_far_jmp_protected_mode(UcodeMemTB& tb) {
+    printf("Test 22: Protected-mode far JMP with GDT lookup\n");
+
+    // Full boot sequence across 4 fetch blocks:
+    //   Block 0: LGDT [gdt_ptr_addr]
+    //   Block 1: MOV EAX, [0x2000]  (loads PE bit value from memory)
+    //   Block 2: MOV CR0, EAX       (sets PE=1)
+    //   Block 3: JMP FAR 0x08:target32
+    // NOTE: MOV reg,imm (B8) broken due to ALU opcode encoding bug; use mem load
+
+    uint32_t gdt_base     = 0x3000;
+    uint32_t gdt_ptr_addr = 0x3100;
+    uint32_t target_pc    = 0x5000;
+
+    uint8_t code[64];
+    memset(code, 0x90, sizeof(code));
+
+    // Block 0 [0-15]: LGDT [gdt_ptr_addr] (67 0F 01 15 <addr32>)
+    code[0] = 0x67;  // Address-size override
+    code[1] = 0x0F;
+    code[2] = 0x01;
+    code[3] = 0x15;  // ModRM: mod=00, reg=2(LGDT), rm=5(disp32)
+    code[4] = (gdt_ptr_addr >>  0) & 0xFF;
+    code[5] = (gdt_ptr_addr >>  8) & 0xFF;
+    code[6] = (gdt_ptr_addr >> 16) & 0xFF;
+    code[7] = (gdt_ptr_addr >> 24) & 0xFF;
+
+    // Block 1 [16-31]: MOV EAX, [0x2000] (66 A1 00 20) — loads PE bit via memory
+    code[16] = 0x66;  // Operand-size → 32-bit
+    code[17] = 0xA1;  // MOV eAX, moffs
+    code[18] = 0x00;  // addr low
+    code[19] = 0x20;  // addr high = 0x2000
+
+    // Block 2 [32-47]: MOV CR0, EAX (0F 22 C0) — sets PE=1
+    code[32] = 0x0F;
+    code[33] = 0x22;
+    code[34] = 0xC0;
+
+    // Block 3 [48-63]: JMP FAR 0x08:target32 (66 EA <target32> 08 00)
+    code[48] = 0x66;  // Operand-size override → 32-bit offset
+    code[49] = 0xEA;
+    code[50] = (target_pc >>  0) & 0xFF;
+    code[51] = (target_pc >>  8) & 0xFF;
+    code[52] = (target_pc >> 16) & 0xFF;
+    code[53] = (target_pc >> 24) & 0xFF;
+    code[54] = 0x08;  // Selector low byte
+    code[55] = 0x00;  // Selector high byte
+
+    tb.load_program(code, sizeof(code));
+
+    // Pre-seed GDT at 0x3000
+    // Entry 0 (null)
+    tb.write_mem32(gdt_base + 0,  0x00000000);
+    tb.write_mem32(gdt_base + 4,  0x00000000);
+    // Entry 1 (selector 0x08): code32, base=0, limit=4GB, G=1, D/B=1
+    // Low:  0x0000FFFF (limit[15:0]=FFFF, base[15:0]=0000)
+    // High: 0x00CF9B00 (base[31:24]=00, G=1,D/B=1,limit[19:16]=F, P=1,DPL=00,S=1,type=1011, base[23:16]=00)
+    tb.write_mem32(gdt_base + 8,  0x0000FFFF);
+    tb.write_mem32(gdt_base + 12, 0x00CF9B00);
+
+    // Pre-seed GDT pseudo-descriptor at 0x3100
+    tb.write_mem32(gdt_ptr_addr,     0x30000017);
+    tb.write_mem32(gdt_ptr_addr + 4, 0x00000000);
+
+    // Pre-seed value 1 at address 0x2000 (for MOV EAX, [0x2000])
+    tb.write_mem32(0x2000, 0x00000001);
+
+    // Pre-fill target area with NOPs
+    for (int i = 0; i < 64; i++)
+        tb.write_mem32(target_pc + i*4, 0x90909090);
+
+    tb.reset();
+
+    bool done = tb.run_until([&]{ return tb.retired() >= 6; }, 20000);
+    tb.run(500);
+
+    printf("  CS=0x%04X pc=0x%08X pe=%d d32=%d cr0=0x%08X\n",
+           tb.cs_sel(), tb.pc(), tb.pe_mode(), tb.default_32(), tb.cr0());
+    printf("  retired=%llu cycles=%llu reads=%llu writes=%llu\n",
+           (unsigned long long)tb.retired(),
+           (unsigned long long)tb.cycle_count(),
+           (unsigned long long)tb.data_reads(),
+           (unsigned long long)tb.data_writes());
+
+    CHECK(done, "protected-mode boot sequence completed");
+    CHECK(tb.pe_mode(), "PE mode active after MOV CR0");
+    CHECK(tb.cs_sel() == 0x0008, "CS selector = 0x0008 after far JMP");
+    CHECK(tb.default_32(), "default_32 = 1 (D/B=1 from GDT descriptor)");
+}
+
+// ============================================================
 // Main
 // ============================================================
 int main(int argc, char** argv) {
@@ -1151,6 +1314,69 @@ int main(int argc, char** argv) {
     test_lgdt_basic(tb);
     test_lgdt_data_verify(tb);
     test_lidt_data_verify(tb);
+
+    test_far_jmp_real_mode(tb);
+
+    // Debug test: MOV EAX,[0x2000] → MOV CR0,EAX (no LGDT)
+    // NOTE: MOV AX, imm (B8) goes through ALU with raw opcode, which is broken
+    //       (pre-existing ALU opcode encoding bug). Use memory load instead.
+    {
+        printf("Test 21b: MOV EAX,[mem] + MOV CR0,EAX (CR0 value chain)\n");
+        // Block 0: MOV EAX, [0x2000] (66 A1 00 20) — 32-bit operand, 16-bit addr
+        // Block 1: MOV CR0, EAX (0F 22 C0)
+        uint8_t code[33];
+        memset(code, 0x90, sizeof(code));
+        code[0]  = 0x66;  // operand-size → 32-bit
+        code[1]  = 0xA1;  // MOV eAX, moffs
+        code[2]  = 0x00;  // addr low
+        code[3]  = 0x20;  // addr high = 0x2000
+        code[16] = 0x0F; code[17] = 0x22; code[18] = 0xC0; // MOV CR0, EAX
+        tb.load_program(code, sizeof(code));
+        // Pre-seed value 1 at address 0x2000
+        tb.write_mem32(0x2000, 0x00000001);
+        tb.reset();
+
+        uint32_t prev_cr0 = tb.cr0();
+        bool done = tb.run_until([&]{ return tb.retired() >= 4; }, 5000);
+        tb.run(200);
+        uint32_t new_cr0 = tb.cr0();
+        printf("  cr0: 0x%08X → 0x%08X  pe=%d  retired=%llu\n",
+               prev_cr0, new_cr0, (new_cr0 & 1), (unsigned long long)tb.retired());
+        CHECK((new_cr0 & 1) == 1, "CR0.PE = 1 after MOV EAX,[mem] + MOV CR0,EAX");
+    }
+
+    // Debug test: LGDT + MOV EAX,[mem] + MOV CR0,EAX (no far JMP)
+    {
+        printf("Test 21c: LGDT + MOV EAX,[mem] + MOV CR0,EAX (LGDT+CR0 chain)\n");
+        uint32_t gdt_ptr_addr = 0x3100;
+        uint8_t code[49];
+        memset(code, 0x90, sizeof(code));
+        // Block 0: LGDT [0x3100]
+        code[0] = 0x67; code[1] = 0x0F; code[2] = 0x01; code[3] = 0x15;
+        code[4] = 0x00; code[5] = 0x31; code[6] = 0x00; code[7] = 0x00;
+        // Block 1: MOV EAX, [0x2000] (66 A1 00 20)
+        code[16] = 0x66; code[17] = 0xA1; code[18] = 0x00; code[19] = 0x20;
+        // Block 2: MOV CR0, EAX (0F 22 C0)
+        code[32] = 0x0F; code[33] = 0x22; code[34] = 0xC0;
+        tb.load_program(code, sizeof(code));
+        // Seed pseudo-descriptor
+        tb.write_mem32(gdt_ptr_addr, 0x30000017);
+        tb.write_mem32(gdt_ptr_addr + 4, 0x00000000);
+        // Pre-seed value 1 at address 0x2000
+        tb.write_mem32(0x2000, 0x00000001);
+        tb.reset();
+
+        uint32_t prev_cr0 = tb.cr0();
+        bool done = tb.run_until([&]{ return tb.retired() >= 6; }, 10000);
+        tb.run(200);
+        uint32_t new_cr0 = tb.cr0();
+        printf("  cr0: 0x%08X → 0x%08X  pe=%d  retired=%llu  reads=%llu\n",
+               prev_cr0, new_cr0, (new_cr0 & 1),
+               (unsigned long long)tb.retired(), (unsigned long long)tb.data_reads());
+        CHECK((new_cr0 & 1) == 1, "CR0.PE = 1 after LGDT + MOV EAX,[mem] + MOV CR0,EAX");
+    }
+
+    test_far_jmp_protected_mode(tb);
 
     printf("\n=== Results: %d checks, %d failures ===\n", g_checks, g_fails);
     if (g_fails > 0) {

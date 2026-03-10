@@ -136,6 +136,7 @@ module f386_ooo_core_top (
     logic        raw_dec_v_addr_base_valid, raw_dec_v_addr_index_valid;
     logic [1:0]  raw_dec_v_addr_scale;
     logic [1:0]  raw_dec_u_mem_size, raw_dec_v_mem_size;
+    logic [15:0] raw_dec_far_selector_u;
 
     // --- Decode muxed outputs (cache hit or raw, driven by generate block) ---
     ooo_instr_t  dec_instr_u, dec_instr_v;
@@ -293,13 +294,13 @@ module f386_ooo_core_top (
     // Triggered by branch misprediction or system register changes
     logic        flush;
 `ifdef VERILATOR
-    assign flush = branch_mispredict || cr0_write_flush || cr3_write_flush || cr4_write_flush || test_force_flush;
+    assign flush = branch_mispredict || ucode_redirect_valid || cr0_write_flush || cr3_write_flush || cr4_write_flush || test_force_flush;
 `else
-    assign flush = branch_mispredict || cr0_write_flush || cr3_write_flush || cr4_write_flush;
+    assign flush = branch_mispredict || ucode_redirect_valid || cr0_write_flush || cr3_write_flush || cr4_write_flush;
 `endif
 
     // Mode-only flush for decode cache (excludes branch_mispredict)
-    wire mode_flush = cr0_write_flush || cr3_write_flush || cr4_write_flush;
+    wire mode_flush = cr0_write_flush || cr3_write_flush || cr4_write_flush || ucode_redirect_valid;
 
     // --- LSQ Dispatch Backpressure (driven by gen_lsq_memif, 0 when gate OFF) ---
     logic lsq_dispatch_blocked;
@@ -361,6 +362,16 @@ module f386_ooo_core_top (
     logic [15:0] ucode_dtr_limit_din;
     // Macro EA bridge: AGU EA from gen_lsq_memif → gen_microcode
     logic [31:0] uc_macro_ea;
+    // Segment cache write port (driven by gen_microcode, used by seg_cache)
+    logic        ucode_seg_we;
+    seg_idx_t    ucode_seg_idx;
+    logic [15:0] ucode_seg_sel;
+    logic [63:0] ucode_seg_cache;
+    // PC redirect from microcode (far JMP)
+    logic        ucode_redirect_valid;
+    logic [31:0] ucode_redirect_pc;
+    // CR write flush redirect: next fetch block after microcode instruction
+    logic [31:0] ucode_cr_flush_next_pc;
     // From gen_lsq_memif → gen_microcode
     lq_idx_t     uc_lsq_ld_alloc_idx;     // Allocated LQ index
     sq_idx_t     uc_lsq_st_alloc_idx;     // Allocated SQ index
@@ -407,7 +418,9 @@ module f386_ooo_core_top (
         if (!rst_n)
             pc_current <= 32'h0000_FFF0;  // x86 reset vector (high)
         else if (flush)
-            pc_current <= branch_target;   // Redirect on mispredict
+            pc_current <= ucode_redirect_valid ? ucode_redirect_pc :
+                         (cr0_write_flush || cr3_write_flush || cr4_write_flush) ? ucode_cr_flush_next_pc :
+                         branch_target;
         else if (fetch_ack)
             pc_current <= pc_next;
     end
@@ -493,6 +506,8 @@ module f386_ooo_core_top (
 
         .u_mem_size        (raw_dec_u_mem_size),
         .v_mem_size        (raw_dec_v_mem_size),
+
+        .u_far_selector    (raw_dec_far_selector_u),
 
         .pe_mode           (pe_mode),
         .v86_mode          (v86_mode),
@@ -1243,12 +1258,12 @@ module f386_ooo_core_top (
         .clk             (clk),
         .rst_n           (rst_n),
 
-        // Write port (undriven until segment load microcode)
-        .seg_idx             (SEG_ES),
-        .seg_sel_din         (16'h0),
-        .seg_cache_din       (64'h0),
+        // Write port (driven by microcode far JMP / segment load)
+        .seg_idx             (ucode_seg_idx),
+        .seg_sel_din         (ucode_seg_sel),
+        .seg_cache_din       (ucode_seg_cache),
         .seg_cache_valid_din (1'b1),
-        .seg_we              (1'b0),
+        .seg_we              (ucode_seg_we),
 
         // Selector read ports
         .es_sel          (),
@@ -1531,7 +1546,8 @@ module f386_ooo_core_top (
                 rob_phys_dest_tbl [uc_mem_dispatch_rob_tag] <= uc_mem_cdb1_phys_dest;
                 rob_dest_valid_tbl[uc_mem_dispatch_rob_tag] <=
                     (uc_mem_special_cmd != UCMD_POP_FLAGS) &&
-                    (uc_mem_special_cmd != UCMD_LOAD_DTR);
+                    (uc_mem_special_cmd != UCMD_LOAD_DTR) &&
+                    (uc_mem_special_cmd != UCMD_FAR_CALL);
             end
         end
 
@@ -2333,11 +2349,15 @@ module f386_ooo_core_top (
         // Detect memory micro-op from sequencer
         // PUSH_FLAGS/POP_FLAGS are OP_SYS_CALL in ROM but need the memory path
         // LOAD_DTR is OP_SYS_CALL in ROM but issues a second dword load
+        wire uop_is_far_call = (seq_uop_special_cmd == UCMD_FAR_CALL);
+        wire uop_is_far_call_mem = uop_is_far_call && pe_mode;  // PE: GDT reads
+
         wire uop_is_mem = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
                           (seq_uop_op_type == OP_LOAD || seq_uop_op_type == OP_STORE ||
                            seq_uop_special_cmd == UCMD_PUSH_FLAGS ||
                            seq_uop_special_cmd == UCMD_POP_FLAGS ||
-                           seq_uop_special_cmd == UCMD_LOAD_DTR);
+                           seq_uop_special_cmd == UCMD_LOAD_DTR ||
+                           uop_is_far_call_mem);
 
         // Detect PUSH variants (needs ESP on PRF port B)
         wire uop_is_push = uop_is_mem && (seq_uop_special_cmd == UCMD_PUSH_PRE ||
@@ -2345,7 +2365,8 @@ module f386_ooo_core_top (
 
         // Detect register-only special commands (bypass execute, self-completing)
         wire uop_is_regonly_cmd = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
-            (seq_uop_special_cmd == UCMD_STORE_CR || seq_uop_special_cmd == UCMD_LOAD_CR);
+            (seq_uop_special_cmd == UCMD_STORE_CR || seq_uop_special_cmd == UCMD_LOAD_CR ||
+             (uop_is_far_call && !pe_mode));  // Real-mode far JMP: no memory reads
 
         // PRF port B needs ESP for PUSH variants and POP_FLAGS
         wire uop_needs_esp_b = uop_is_push ||
@@ -2381,14 +2402,27 @@ module f386_ooo_core_top (
         // LOAD_DTR: temp register for step 0's dword (limit + base[15:0])
         logic [31:0] uc_dtr_low_r;
 
+        // FAR_CALL: dispatch-time far selector latch
+        logic [15:0] uc_far_sel_latch;
+
+        // FAR_CALL: drain-time latches
+        logic [15:0] macro_far_sel;    // New CS selector
+        logic [31:0] macro_imm;        // New EIP (absolute offset from far ptr)
+
+        // FAR_CALL: GDT read phase tracking
+        logic        uc_far_phase;     // 0=first GDT dword, 1=second
+        logic [31:0] uc_far_desc_lo;   // Latched first GDT dword
+
         // Size constant: dword for 32-bit stack ops
         localparam logic [1:0] UC_MEM_SIZE = 2'd2;
         localparam logic [3:0] UC_MEM_BYTE_EN = 4'b1111;
         localparam logic [31:0] ESP_DELTA = 32'd4;
 
         // Memory engine done pulse (for exec_ack)
+        // Suppress for intermediate FAR_CALL load (phase 0 → need second read)
         wire uc_mem_done = (uc_mem_state == UM_ISSUE && !uc_mem_is_load_r) ||
-                           (uc_mem_state == UM_LOAD_WAIT && lsq_cdb1_active);
+                           (uc_mem_state == UM_LOAD_WAIT && lsq_cdb1_active &&
+                            !(uc_mem_special_r == UCMD_FAR_CALL && !uc_far_phase));
 
         always_ff @(posedge clk or negedge rst_n) begin
             if (!rst_n) begin
@@ -2405,9 +2439,15 @@ module f386_ooo_core_top (
                 uc_orig_esp_latched <= 1'b0;
                 macro_ea          <= 32'd0;
                 uc_dtr_low_r      <= 32'd0;
+                uc_far_sel_latch  <= 16'd0;
+                macro_far_sel     <= 16'd0;
+                macro_imm         <= 32'd0;
+                uc_far_phase      <= 1'b0;
+                uc_far_desc_lo    <= 32'd0;
             end else if (flush) begin
                 uc_mem_state      <= UM_IDLE;
                 uc_orig_esp_latched <= 1'b0;
+                uc_far_phase      <= 1'b0;
             end else begin
                 case (uc_mem_state)
                     UM_IDLE: begin
@@ -2418,7 +2458,8 @@ module f386_ooo_core_top (
                             uc_mem_state     <= UM_ALLOC;
                             uc_mem_is_load_r <= (seq_uop_op_type == OP_LOAD) ||
                                                (seq_uop_special_cmd == UCMD_POP_FLAGS) ||
-                                               (seq_uop_special_cmd == UCMD_LOAD_DTR);
+                                               (seq_uop_special_cmd == UCMD_LOAD_DTR) ||
+                                               uop_is_far_call_mem;
                             uc_mem_special_r <= seq_uop_special_cmd;
                             uc_mem_phys_dest_r <= rename_com_map[seq_uop_dest_reg];
 
@@ -2462,6 +2503,14 @@ module f386_ooo_core_top (
                                     uc_mem_data_r    <= 32'd0;
                                     uc_mem_esp_new_r <= 32'd0;
                                 end
+                                UCMD_FAR_CALL: begin
+                                    // Protected-mode far JMP: first GDT dword load
+                                    // GDT addr = GDTR.base + (selector & 0xFFF8)
+                                    uc_mem_addr_r    <= sys_gdtr_base + {16'd0, macro_far_sel[15:3], 3'd0};
+                                    uc_mem_data_r    <= 32'd0;
+                                    uc_mem_esp_new_r <= 32'd0;
+                                    uc_far_phase     <= 1'b0;
+                                end
                                 default: begin
                                     // Generic LOAD/STORE: address from macro EA
                                     uc_mem_addr_r    <= macro_ea;
@@ -2490,8 +2539,17 @@ module f386_ooo_core_top (
                     end
 
                     UM_LOAD_WAIT: begin
-                        if (lsq_cdb1_active)
-                            uc_mem_state <= UM_IDLE;
+                        if (lsq_cdb1_active) begin
+                            if (uc_mem_special_r == UCMD_FAR_CALL && !uc_far_phase) begin
+                                // Phase 0 complete: latch low dword, issue second read
+                                uc_far_desc_lo   <= cdb1_data[31:0];
+                                uc_mem_addr_r    <= uc_mem_addr_r + 32'd4;
+                                uc_far_phase     <= 1'b1;
+                                uc_mem_state     <= UM_ALLOC;  // Re-enter for second load
+                            end else begin
+                                uc_mem_state     <= UM_IDLE;   // Normal completion
+                            end
+                        end
                     end
 
                     default: uc_mem_state <= UM_IDLE;
@@ -2549,6 +2607,14 @@ module f386_ooo_core_top (
         // Latched operand value for STORE_CR (source GPR value from IQ issue)
         logic [31:0] macro_val_a;
 
+        // Dispatch-time far_selector capture: only one OP_MICROCODE in-flight
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n)
+                uc_far_sel_latch <= 16'd0;
+            else if (dispatch_u_valid && dec_instr_u.op_cat == OP_MICROCODE)
+                uc_far_sel_latch <= raw_dec_far_selector_u;
+        end
+
         always_ff @(posedge clk or negedge rst_n) begin
             if (!rst_n) begin
                 ucode_state     <= UC_IDLE;
@@ -2580,6 +2646,8 @@ module f386_ooo_core_top (
                             macro_pc         <= iq_issue_instr.pc;
                             macro_val_a      <= iq_issue_instr.val_a;
                             macro_ea         <= uc_macro_ea;
+                            macro_far_sel    <= uc_far_sel_latch;
+                            macro_imm        <= iq_issue_instr.imm_value;
                         end
                     end
 
@@ -2767,6 +2835,44 @@ module f386_ooo_core_top (
         assign ucode_dtr_limit_din = uc_dtr_low_r[15:0];
         assign ucode_dtr_base_din  = {cdb1_data[15:0], uc_dtr_low_r[31:16]};
 
+        // ---------------------------------------------------------
+        // Segment cache write port (far JMP: CS descriptor load)
+        // ---------------------------------------------------------
+        // Protected mode: fires when second GDT read completes
+        wire uc_far_commit_pm = uc_mem_done && (uc_mem_special_r == UCMD_FAR_CALL);
+        // Real mode: fires on regonly_done when FAR_CALL
+        wire uc_far_commit_real = uc_regonly_done && (seq_uop_special_cmd == UCMD_FAR_CALL);
+        wire uc_far_commit = uc_far_commit_pm || uc_far_commit_real;
+
+        // GDT descriptor = {high_dword, low_dword}
+        wire [63:0] far_gdt_desc = {cdb1_data[31:0], uc_far_desc_lo};
+
+        // Real-mode CS cache: base = selector << 4, limit=0xFFFF, P=1, S=1, type=code-RX
+        wire [31:0] rm_cs_base = {12'd0, macro_far_sel, 4'd0};
+        wire [63:0] real_mode_cs_cache = {
+            rm_cs_base[31:24],         // [63:56] base[31:24]
+            8'h00,                      // [55:48] G=0, D/B=0, res, limit[19:16]=0
+            8'h9B,                      // [47:40] P=1, DPL=00, S=1, type=1011 (code,R,accessed)
+            rm_cs_base[23:16],         // [39:32] base[23:16]
+            rm_cs_base[15:0],          // [31:16] base[15:0]
+            16'hFFFF                    // [15:0]  limit=0xFFFF
+        };
+
+        assign ucode_seg_we    = uc_far_commit;
+        assign ucode_seg_idx   = SEG_CS;
+        assign ucode_seg_sel   = macro_far_sel;
+        assign ucode_seg_cache = pe_mode ? far_gdt_desc : real_mode_cs_cache;
+
+        // ---------------------------------------------------------
+        // PC redirect (far JMP: flush pipeline, redirect to new EIP)
+        // ---------------------------------------------------------
+        assign ucode_redirect_valid = uc_far_commit;
+        assign ucode_redirect_pc    = macro_imm;  // New EIP from far JMP offset
+
+        // CR write flush redirect: next fetch block after microcode instruction
+        // (V-pipe is always suppressed for OP_MICROCODE, so next block is correct)
+        assign ucode_cr_flush_next_pc = {macro_pc[31:4], 4'h0} + 32'd16;
+
         // Deferred special commands (sim-only log)
         // synopsys translate_off
         always_ff @(posedge clk) begin
@@ -2777,7 +2883,8 @@ module f386_ooo_core_top (
                     && seq_uop_special_cmd != UCMD_PUSH_FLAGS
                     && seq_uop_special_cmd != UCMD_LOAD_CR
                     && seq_uop_special_cmd != UCMD_STORE_CR
-                    && seq_uop_special_cmd != UCMD_LOAD_DTR) begin
+                    && seq_uop_special_cmd != UCMD_LOAD_DTR
+                    && seq_uop_special_cmd != UCMD_FAR_CALL) begin
                     case (seq_uop_special_cmd)
                         UCMD_STORE_DTR,                    // deferred P3.2+
                         UCMD_LOAD_SEG, UCMD_STORE_SEG,     // deferred P3.2+
@@ -2830,6 +2937,13 @@ module f386_ooo_core_top (
         assign ucode_dtr_idx          = DTR_GDTR;
         assign ucode_dtr_base_din     = 32'd0;
         assign ucode_dtr_limit_din    = 16'd0;
+        assign ucode_seg_we          = 1'b0;
+        assign ucode_seg_idx         = SEG_ES;
+        assign ucode_seg_sel         = 16'h0;
+        assign ucode_seg_cache       = 64'h0;
+        assign ucode_redirect_valid  = 1'b0;
+        assign ucode_redirect_pc     = 32'd0;
+        assign ucode_cr_flush_next_pc = 32'd0;
         assign eff_iq_exec_ready     = exec_u_ready && !lsq_load_issue_stall;
         assign eff_exec_u_valid      = iq_issue_valid;
         assign eff_exec_u_instr      = exec_u_instr;

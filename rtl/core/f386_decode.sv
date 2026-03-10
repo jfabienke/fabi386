@@ -64,6 +64,9 @@ module f386_decode (
     output logic [1:0]   u_mem_size,
     output logic [1:0]   v_mem_size,
 
+    // Far pointer segment selector (for FMT_FAR: JMP/CALL far)
+    output logic [15:0]  u_far_selector,
+
     // CPU Mode Context
     input  logic         pe_mode,       // CR0.PE — Protected Mode
     input  logic         v86_mode,      // EFLAGS.VM — Virtual 8086
@@ -479,6 +482,9 @@ module f386_decode (
 
         // Effective operand size (for memory op sizing)
         logic        eff_op32;      // 1=dword, 0=word (after prefix toggle)
+
+        // Far pointer segment selector (FMT_FAR: JMP/CALL far)
+        logic [15:0] far_selector;
     } predecode_t;
 
     function automatic predecode_t pre_decode(
@@ -693,13 +699,14 @@ module f386_decode (
             end
 
             FMT_FAR: begin
-                // ptr16:16 or ptr16:32 — extract offset portion only
-                // (segment selector follows but is handled by execution)
+                // ptr16:16 or ptr16:32 — extract offset + segment selector
                 if (eff_op32) begin
-                    d.imm_value = stream[pos*8 +: 32];
+                    d.imm_value    = stream[pos*8 +: 32];
+                    d.far_selector = stream[(pos+4)*8 +: 16];
                     pos += 6;   // offset32 + seg16
                 end else begin
-                    d.imm_value = {16'h0, stream[pos*8 +: 16]};
+                    d.imm_value    = {16'h0, stream[pos*8 +: 16]};
+                    d.far_selector = stream[(pos+2)*8 +: 16];
                     pos += 4;   // offset16 + seg16
                 end
             end
@@ -2434,6 +2441,7 @@ module f386_decode (
             v_addr_scale          <= 2'b00;
             u_mem_size            <= 2'b00;
             v_mem_size            <= 2'b00;
+            u_far_selector        <= 16'h0;
         end else if (s1_valid && rename_ready) begin
 
             // --- U-Pipe Instruction ---
@@ -2503,6 +2511,7 @@ module f386_decode (
             u_addr_index_valid    <= ru_u.addr_index_valid;
             u_addr_scale          <= ru_u.addr_scale;
             u_mem_size            <= derive_mem_size(pd_u);
+            u_far_selector        <= pd_u.far_selector;
 
             // --- V-Pipe Instruction ---
             instr_v.valid       <= v_eligible;

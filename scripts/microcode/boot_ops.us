@@ -87,6 +87,10 @@
 1: PUSH eax             # Save return EIP
 2: FAR_CALL             # Load new CS:EIP, privilege check
 
+# Far JMP ptr16:16/32 (0xEA)
+@FAR_JMP 0xEA atomic
+0: FAR_CALL             # Hardware handles GDT lookup, seg_cache write, PC redirect
+
 # Far RET
 @FAR_RET 0xCB atomic
 0: POP eax              # Pop EIP

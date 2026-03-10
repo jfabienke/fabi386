@@ -883,7 +883,11 @@ module f386_ooo_core_top (
         .cdb1_dest       (cdb1_phys_dest),
 
         // Flush
-        .flush           (flush)
+        .flush           (flush),
+
+        // Microcode: skip OP_MICROCODE unless at ROB head and sequencer idle
+        .ucode_active    (ucode_active),
+        .rob_head        (rob_head_ptr)
     );
 
     // =================================================================
@@ -1547,7 +1551,8 @@ module f386_ooo_core_top (
                 rob_dest_valid_tbl[uc_mem_dispatch_rob_tag] <=
                     (uc_mem_special_cmd != UCMD_POP_FLAGS) &&
                     (uc_mem_special_cmd != UCMD_LOAD_DTR) &&
-                    (uc_mem_special_cmd != UCMD_FAR_CALL);
+                    (uc_mem_special_cmd != UCMD_FAR_CALL) &&
+                    (uc_mem_special_cmd != UCMD_LOAD_SEG);
             end
         end
 
@@ -2352,12 +2357,23 @@ module f386_ooo_core_top (
         wire uop_is_far_call = (seq_uop_special_cmd == UCMD_FAR_CALL);
         wire uop_is_far_call_mem = uop_is_far_call && pe_mode;  // PE: GDT reads
 
+        wire uop_is_load_seg = (seq_uop_special_cmd == UCMD_LOAD_SEG);
+        wire uop_is_load_seg_mem = uop_is_load_seg && pe_mode;  // PE: GDT reads
+
+        // MOV Sreg step 0 (LOAD with UCMD_NOP): regonly for register form
+        // The selector is already in macro_val_a from GPR source read at dispatch
+        wire uop_is_mov_sreg_step0 = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
+            (macro_opcode == 8'h8E) && (seq_uop_op_type == OP_LOAD) &&
+            (seq_uop_special_cmd == UCMD_NOP);
+
         wire uop_is_mem = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
-                          (seq_uop_op_type == OP_LOAD || seq_uop_op_type == OP_STORE ||
+                          ((seq_uop_op_type == OP_LOAD || seq_uop_op_type == OP_STORE) &&
+                           !uop_is_mov_sreg_step0 ||  // step 0 of reg-form MOV sreg is regonly
                            seq_uop_special_cmd == UCMD_PUSH_FLAGS ||
                            seq_uop_special_cmd == UCMD_POP_FLAGS ||
                            seq_uop_special_cmd == UCMD_LOAD_DTR ||
-                           uop_is_far_call_mem);
+                           uop_is_far_call_mem ||
+                           uop_is_load_seg_mem);
 
         // Detect PUSH variants (needs ESP on PRF port B)
         wire uop_is_push = uop_is_mem && (seq_uop_special_cmd == UCMD_PUSH_PRE ||
@@ -2366,7 +2382,9 @@ module f386_ooo_core_top (
         // Detect register-only special commands (bypass execute, self-completing)
         wire uop_is_regonly_cmd = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
             (seq_uop_special_cmd == UCMD_STORE_CR || seq_uop_special_cmd == UCMD_LOAD_CR ||
-             (uop_is_far_call && !pe_mode));  // Real-mode far JMP: no memory reads
+             (uop_is_far_call && !pe_mode) ||
+             (uop_is_load_seg && !pe_mode) ||      // Real-mode MOV Sreg: no GDT reads
+             uop_is_mov_sreg_step0);               // MOV Sreg step 0 reg form: self-complete
 
         // PRF port B needs ESP for PUSH variants and POP_FLAGS
         wire uop_needs_esp_b = uop_is_push ||
@@ -2419,10 +2437,12 @@ module f386_ooo_core_top (
         localparam logic [31:0] ESP_DELTA = 32'd4;
 
         // Memory engine done pulse (for exec_ack)
-        // Suppress for intermediate FAR_CALL load (phase 0 → need second read)
+        // Suppress for intermediate GDT load (phase 0 → need second read)
+        wire uc_gdt_phase0 = (uc_mem_special_r == UCMD_FAR_CALL ||
+                              uc_mem_special_r == UCMD_LOAD_SEG) && !uc_far_phase;
         wire uc_mem_done = (uc_mem_state == UM_ISSUE && !uc_mem_is_load_r) ||
                            (uc_mem_state == UM_LOAD_WAIT && lsq_cdb1_active &&
-                            !(uc_mem_special_r == UCMD_FAR_CALL && !uc_far_phase));
+                            !uc_gdt_phase0);
 
         always_ff @(posedge clk or negedge rst_n) begin
             if (!rst_n) begin
@@ -2459,7 +2479,8 @@ module f386_ooo_core_top (
                             uc_mem_is_load_r <= (seq_uop_op_type == OP_LOAD) ||
                                                (seq_uop_special_cmd == UCMD_POP_FLAGS) ||
                                                (seq_uop_special_cmd == UCMD_LOAD_DTR) ||
-                                               uop_is_far_call_mem;
+                                               uop_is_far_call_mem ||
+                                               uop_is_load_seg_mem;
                             uc_mem_special_r <= seq_uop_special_cmd;
                             uc_mem_phys_dest_r <= rename_com_map[seq_uop_dest_reg];
 
@@ -2511,6 +2532,14 @@ module f386_ooo_core_top (
                                     uc_mem_esp_new_r <= 32'd0;
                                     uc_far_phase     <= 1'b0;
                                 end
+                                UCMD_LOAD_SEG: begin
+                                    // Protected-mode MOV Sreg: first GDT dword load
+                                    // Selector from macro_val_a (GPR source, register form)
+                                    uc_mem_addr_r    <= sys_gdtr_base + {16'd0, macro_val_a[15:3], 3'd0};
+                                    uc_mem_data_r    <= 32'd0;
+                                    uc_mem_esp_new_r <= 32'd0;
+                                    uc_far_phase     <= 1'b0;
+                                end
                                 default: begin
                                     // Generic LOAD/STORE: address from macro EA
                                     uc_mem_addr_r    <= macro_ea;
@@ -2540,7 +2569,8 @@ module f386_ooo_core_top (
 
                     UM_LOAD_WAIT: begin
                         if (lsq_cdb1_active) begin
-                            if (uc_mem_special_r == UCMD_FAR_CALL && !uc_far_phase) begin
+                            if ((uc_mem_special_r == UCMD_FAR_CALL ||
+                                 uc_mem_special_r == UCMD_LOAD_SEG) && !uc_far_phase) begin
                                 // Phase 0 complete: latch low dword, issue second read
                                 uc_far_desc_lo   <= cdb1_data[31:0];
                                 uc_mem_addr_r    <= uc_mem_addr_r + 32'd4;
@@ -2836,16 +2866,23 @@ module f386_ooo_core_top (
         assign ucode_dtr_base_din  = {cdb1_data[15:0], uc_dtr_low_r[31:16]};
 
         // ---------------------------------------------------------
-        // Segment cache write port (far JMP: CS descriptor load)
+        // Segment cache write port (far JMP + MOV Sreg)
         // ---------------------------------------------------------
-        // Protected mode: fires when second GDT read completes
+        // FAR_CALL commits
         wire uc_far_commit_pm = uc_mem_done && (uc_mem_special_r == UCMD_FAR_CALL);
-        // Real mode: fires on regonly_done when FAR_CALL
         wire uc_far_commit_real = uc_regonly_done && (seq_uop_special_cmd == UCMD_FAR_CALL);
         wire uc_far_commit = uc_far_commit_pm || uc_far_commit_real;
 
+        // LOAD_SEG commits
+        wire uc_load_seg_commit_pm = uc_mem_done && (uc_mem_special_r == UCMD_LOAD_SEG);
+        wire uc_load_seg_commit_real = uc_regonly_done && (seq_uop_special_cmd == UCMD_LOAD_SEG);
+        wire uc_load_seg_commit = uc_load_seg_commit_pm || uc_load_seg_commit_real;
+
         // GDT descriptor = {high_dword, low_dword}
-        wire [63:0] far_gdt_desc = {cdb1_data[31:0], uc_far_desc_lo};
+        wire [63:0] gdt_desc = {cdb1_data[31:0], uc_far_desc_lo};
+
+        // Selector for MOV Sreg (from GPR source, register form)
+        wire [15:0] seg_load_selector = macro_val_a[15:0];
 
         // Real-mode CS cache: base = selector << 4, limit=0xFFFF, P=1, S=1, type=code-RX
         wire [31:0] rm_cs_base = {12'd0, macro_far_sel, 4'd0};
@@ -2858,10 +2895,23 @@ module f386_ooo_core_top (
             16'hFFFF                    // [15:0]  limit=0xFFFF
         };
 
-        assign ucode_seg_we    = uc_far_commit;
-        assign ucode_seg_idx   = SEG_CS;
-        assign ucode_seg_sel   = macro_far_sel;
-        assign ucode_seg_cache = pe_mode ? far_gdt_desc : real_mode_cs_cache;
+        // Real-mode data cache: base = selector << 4, limit=0xFFFF, P=1, S=1, type=data-RW
+        wire [31:0] rm_data_base = {12'd0, seg_load_selector, 4'd0};
+        wire [63:0] real_mode_data_cache = {
+            rm_data_base[31:24],       // [63:56] base[31:24]
+            8'h00,                      // [55:48] G=0, D/B=0
+            8'h93,                      // [47:40] P=1, DPL=00, S=1, type=0011 (data,R/W,accessed)
+            rm_data_base[23:16],       // [39:32] base[23:16]
+            rm_data_base[15:0],        // [31:16] base[15:0]
+            16'hFFFF                    // [15:0]  limit=0xFFFF
+        };
+
+        assign ucode_seg_we    = uc_far_commit || uc_load_seg_commit;
+        assign ucode_seg_idx   = uc_far_commit ? SEG_CS : seg_idx_t'(macro_modrm_reg);
+        assign ucode_seg_sel   = uc_far_commit ? macro_far_sel : seg_load_selector;
+        assign ucode_seg_cache = uc_far_commit ?
+            (pe_mode ? gdt_desc : real_mode_cs_cache) :
+            (pe_mode ? gdt_desc : real_mode_data_cache);
 
         // ---------------------------------------------------------
         // PC redirect (far JMP: flush pipeline, redirect to new EIP)
@@ -2884,10 +2934,11 @@ module f386_ooo_core_top (
                     && seq_uop_special_cmd != UCMD_LOAD_CR
                     && seq_uop_special_cmd != UCMD_STORE_CR
                     && seq_uop_special_cmd != UCMD_LOAD_DTR
-                    && seq_uop_special_cmd != UCMD_FAR_CALL) begin
+                    && seq_uop_special_cmd != UCMD_FAR_CALL
+                    && seq_uop_special_cmd != UCMD_LOAD_SEG) begin
                     case (seq_uop_special_cmd)
                         UCMD_STORE_DTR,                    // deferred P3.2+
-                        UCMD_LOAD_SEG, UCMD_STORE_SEG,     // deferred P3.2+
+                        UCMD_STORE_SEG,                    // deferred P3.4+
                         UCMD_INT_ENTER, UCMD_INT_EXIT,     // deferred P3.3
                         UCMD_LAHF, UCMD_SAHF,              // deferred
                         UCMD_CLI, UCMD_STI,                // deferred P3.2+ (IOPL)

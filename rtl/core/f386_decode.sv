@@ -1107,7 +1107,7 @@ module f386_decode (
             8'h8C:                                    // MOV r/m, Sreg
                 return (pd.mod != 2'b11) ? OP_STORE : OP_ALU_REG;
             8'h8E:                                    // MOV Sreg, r/m
-                return (pd.mod != 2'b11) ? OP_LOAD : OP_ALU_REG;
+                return OP_MICROCODE;
             default: ;
         endcase
 
@@ -1852,11 +1852,18 @@ module f386_decode (
             return ru;
         end
 
-        // POP r/m (8F), MOV Sreg (8C/8E)
+        // POP r/m (8F)
         if (pd.opcode == 8'h8F) begin
             ru.dest = pd.rm;
             ru.dest_valid = (pd.mod == 2'b11);
             ru.writes_esp = 1;
+            return ru;
+        end
+
+        // MOV Sreg, r/m (8E) — reads source GPR (reg form only for now)
+        if (pd.opcode == 8'h8E) begin
+            ru.src_a = pd.rm;
+            ru.src_a_valid = (pd.mod == 2'b11);  // Register form: direct GPR read
             return ru;
         end
 

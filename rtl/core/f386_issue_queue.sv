@@ -42,7 +42,11 @@ module f386_issue_queue (
     input  phys_reg_t    cdb1_dest,
 
     // Flush
-    input  logic         flush
+    input  logic         flush,
+
+    // Microcode: skip OP_MICROCODE unless it's at ROB head and sequencer is idle
+    input  logic         ucode_active,
+    input  rob_id_t      rob_head
 );
 
     localparam int N     = CONF_IQ_ENTRIES;
@@ -260,7 +264,9 @@ module f386_issue_queue (
             issue_instr       = '0;
             for (int i = 0; i < N; i++) begin
                 if (entry_valid[i] && queue[i].src_a_ready &&
-                    queue[i].src_b_ready && !naive_issue_valid) begin
+                    queue[i].src_b_ready && !naive_issue_valid &&
+                    !(queue[i].op_cat == OP_MICROCODE &&
+                      (ucode_active || queue[i].rob_tag != rob_head))) begin
                     issue_instr       = queue[i];
                     naive_issue_valid = 1'b1;
                     naive_issue_idx   = IDX_W'(i);

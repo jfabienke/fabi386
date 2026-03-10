@@ -200,19 +200,6 @@ public:
     uint32_t fetch_addr() const {
         return top_->fetch_addr;
     }
-    bool iq_flush() const {
-        return top_->rootp->f386_ooo_core_top__DOT__iq__DOT__flush;
-    }
-    int iq_entry_valid_count() const {
-        int count = 0;
-        // Check how many IQ entries are valid
-        // Access the entry_valid bitvector
-        auto ev = top_->rootp->f386_ooo_core_top__DOT__iq__DOT__entry_valid;
-        for (int i = 0; i < 8; i++)
-            if (ev & (1 << i)) count++;
-        return count;
-    }
-
     uint64_t retired()      const { return retired_; }
     uint64_t cycle_count()  const { return cycle_; }
     uint64_t data_writes()  const { return data_writes_; }
@@ -222,6 +209,7 @@ public:
     uint32_t read_mem32(uint32_t addr) const { return mem_.read32(addr); }
 
     // Memory write for pre-seeding data memory
+    void write_mem8(uint32_t addr, uint8_t val) { mem_.write8(addr, val); }
     void write_mem32(uint32_t addr, uint32_t val) { mem_.write32(addr, val); }
 
     // DTR register readback (via sys_regs internal names)
@@ -238,14 +226,17 @@ public:
         return top_->rootp->f386_ooo_core_top__DOT__sys_regs__DOT__reg_idtr_limit;
     }
 
-    // Segment register readback
+    // Segment register readback (indices: ES=0, CS=1, SS=2, DS=3, FS=4, GS=5)
+    uint16_t seg_sel(int idx) const {
+        return top_->rootp->f386_ooo_core_top__DOT__seg_cache__DOT__reg_sel[idx];
+    }
+    uint64_t seg_cache(int idx) const {
+        return top_->rootp->f386_ooo_core_top__DOT__seg_cache__DOT__reg_cache[idx];
+    }
     uint16_t cs_sel() const {
         return top_->rootp->f386_ooo_core_top__DOT__seg_cs_sel;
     }
-    uint64_t cs_cache() const {
-        // SEG_CS = index 1
-        return top_->rootp->f386_ooo_core_top__DOT__seg_cache__DOT__reg_cache[1];
-    }
+    uint64_t cs_cache() const { return seg_cache(1); }
     bool cs_db() const {
         // D/B bit is bit 54 of the descriptor cache
         return (cs_cache() >> 54) & 1;
@@ -267,6 +258,65 @@ public:
 
     // Direct access to top module for debug
     Vf386_ooo_core_top* top() const { return top_.get(); }
+
+    // Debug: dispatch, IQ, ROB signals
+    bool iq_issue_valid() const {
+        return top_->rootp->f386_ooo_core_top__DOT__iq_issue_valid;
+    }
+    bool iq_flush() const {
+        return top_->rootp->f386_ooo_core_top__DOT__iq__DOT__flush;
+    }
+    bool lsq_dispatch_blocked() const {
+        return top_->rootp->f386_ooo_core_top__DOT__lsq_dispatch_blocked;
+    }
+    bool iq_force_dequeue() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__iq_force_dequeue;
+    }
+    uint8_t rob_head() const {
+        return top_->rootp->f386_ooo_core_top__DOT__rob__DOT__head;
+    }
+    uint8_t rob_tail() const {
+        return top_->rootp->f386_ooo_core_top__DOT__rob__DOT__tail;
+    }
+    uint8_t rob_count() const {
+        return top_->rootp->f386_ooo_core_top__DOT__rob__DOT__count;
+    }
+    uint16_t rob_entry_valid_mask() const {
+        return top_->rootp->f386_ooo_core_top__DOT__rob__DOT__entry_valid;
+    }
+    uint16_t rob_entry_complete_mask() const {
+        return top_->rootp->f386_ooo_core_top__DOT__rob__DOT__entry_complete;
+    }
+    uint8_t iq_entry_valid_mask() const {
+        return top_->rootp->f386_ooo_core_top__DOT__iq__DOT__entry_valid;
+    }
+    uint8_t macro_rob_tag() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__macro_rob_tag;
+    }
+    bool uc_regonly_pending() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__uc_regonly_pending_r;
+    }
+    bool uop_is_regonly() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__uop_is_regonly_cmd;
+    }
+    bool uop_is_mem() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__uop_is_mem;
+    }
+    bool seq_uop_valid() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__seq_uop_valid;
+    }
+    bool uc_mem_done() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__uc_mem_done;
+    }
+    bool exec_u_ready() const {
+        return top_->rootp->f386_ooo_core_top__DOT__exec_stage__DOT__u_ready;
+    }
+    bool exec_u_valid() const {
+        return top_->rootp->f386_ooo_core_top__DOT__exec_stage__DOT__u_valid;
+    }
+    bool ld_in_flight() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_lsq_memif__DOT__ld_in_flight;
+    }
 
 private:
     std::unique_ptr<Vf386_ooo_core_top> top_;
@@ -1264,6 +1314,190 @@ static void test_far_jmp_protected_mode(UcodeMemTB& tb) {
 }
 
 // ============================================================
+// Test 23: MOV DS, AX in real mode (register form)
+// ============================================================
+static void test_mov_ds_real_mode(UcodeMemTB& tb) {
+    printf("Test 23: MOV DS, AX in real mode (register form)\n");
+
+    // Block 0: MOV EAX, [0x2000] (66 A1 00 20) — load selector via memory
+    // Block 1: MOV DS, AX (8E D8)
+    uint8_t code[33];
+    memset(code, 0x90, sizeof(code));
+    code[0]  = 0x66;  // operand-size → 32-bit
+    code[1]  = 0xA1;  // MOV eAX, moffs
+    code[2]  = 0x00;  // addr low
+    code[3]  = 0x20;  // addr high = 0x2000
+    code[16] = 0x8E;  // MOV Sreg, r/m
+    code[17] = 0xD8;  // ModRM: mod=11, reg=011(DS), rm=000(AX)
+
+    tb.load_program(code, sizeof(code));
+    tb.write_mem32(0x2000, 0x00000020);  // Selector = 0x0020
+    tb.reset();
+
+    bool done = tb.run_until([&]{ return tb.retired() >= 4; }, 5000);
+    tb.run(200);
+
+    printf("  DS.sel=0x%04X pe=%d retired=%llu\n",
+           tb.seg_sel(3), tb.pe_mode(), (unsigned long long)tb.retired());
+    CHECK(done, "MOV DS,AX completed");
+    CHECK(tb.seg_sel(3) == 0x0020, "DS selector = 0x0020 after MOV DS,AX");
+}
+
+// ============================================================
+// Test 24: Protected-mode MOV DS, AX with GDT lookup
+// ============================================================
+static void test_mov_ds_protected_mode(UcodeMemTB& tb) {
+    printf("Test 24: Protected-mode MOV DS, AX with GDT lookup\n");
+
+    // Full boot sequence + MOV DS,AX:
+    //   Block 0: LGDT [gdt_ptr_addr]
+    //   Block 1: MOV EAX, [0x2000]  (value = 1 → PE bit)
+    //   Block 2: MOV CR0, EAX
+    //   Block 3: JMP FAR 0x08:target
+    //   target Block 0: MOV EAX, [0x2004]  (value = 0x0010 → selector)
+    //   target Block 1: MOV DS, AX
+
+    uint32_t gdt_base     = 0x3000;
+    uint32_t gdt_ptr_addr = 0x3100;
+    uint32_t target_pc    = 0x5000;
+
+    // Boot code (4 blocks = 64 bytes)
+    uint8_t code[64];
+    memset(code, 0x90, sizeof(code));
+
+    // Block 0: LGDT [gdt_ptr_addr]
+    code[0] = 0x67; code[1] = 0x0F; code[2] = 0x01; code[3] = 0x15;
+    code[4] = (gdt_ptr_addr >>  0) & 0xFF;
+    code[5] = (gdt_ptr_addr >>  8) & 0xFF;
+    code[6] = (gdt_ptr_addr >> 16) & 0xFF;
+    code[7] = (gdt_ptr_addr >> 24) & 0xFF;
+
+    // Block 1: MOV EAX, [0x2000]
+    code[16] = 0x66; code[17] = 0xA1; code[18] = 0x00; code[19] = 0x20;
+
+    // Block 2: MOV CR0, EAX
+    code[32] = 0x0F; code[33] = 0x22; code[34] = 0xC0;
+
+    // Block 3: JMP FAR 0x08:target32
+    code[48] = 0x66; code[49] = 0xEA;
+    code[50] = (target_pc >>  0) & 0xFF;
+    code[51] = (target_pc >>  8) & 0xFF;
+    code[52] = (target_pc >> 16) & 0xFF;
+    code[53] = (target_pc >> 24) & 0xFF;
+    code[54] = 0x08; code[55] = 0x00;
+
+    tb.load_program(code, sizeof(code));
+
+    // Target code at 0x5000 (2 blocks = 32 bytes)
+    uint8_t target_code[32];
+    memset(target_code, 0x90, sizeof(target_code));
+    // Block 0 at target: MOV EAX, [0x2004] — in 32-bit mode after far JMP
+    target_code[0] = 0xA1;  // MOV EAX, moffs32 (already 32-bit mode)
+    target_code[1] = 0x04; target_code[2] = 0x20;
+    target_code[3] = 0x00; target_code[4] = 0x00;
+    // Block 1 at target+16: MOV DS, AX
+    target_code[16] = 0x8E; target_code[17] = 0xD8;
+
+    for (int i = 0; i < 32; i++)
+        tb.write_mem8(target_pc + i, target_code[i]);
+
+    // Pre-seed GDT
+    tb.write_mem32(gdt_base + 0,  0x00000000);  // Null descriptor
+    tb.write_mem32(gdt_base + 4,  0x00000000);
+    // Entry 1 (0x08): code32, base=0, limit=4GB
+    tb.write_mem32(gdt_base + 8,  0x0000FFFF);
+    tb.write_mem32(gdt_base + 12, 0x00CF9B00);
+    // Entry 2 (0x10): data32, base=0, limit=4GB
+    tb.write_mem32(gdt_base + 16, 0x0000FFFF);
+    tb.write_mem32(gdt_base + 20, 0x00CF9300);  // data RW, DPL=0
+
+    // GDT pseudo-descriptor
+    tb.write_mem32(gdt_ptr_addr,     0x30000017);
+    tb.write_mem32(gdt_ptr_addr + 4, 0x00000000);
+
+    // Pre-seed data values
+    tb.write_mem32(0x2000, 0x00000001);  // PE bit for CR0
+    tb.write_mem32(0x2004, 0x00000010);  // Selector 0x10 for DS
+
+    tb.reset();
+
+    bool done = tb.run_until([&]{ return tb.retired() >= 8; }, 30000);
+    tb.run(500);
+
+    printf("  CS=0x%04X DS=0x%04X pe=%d d32=%d cr0=0x%08X\n",
+           tb.cs_sel(), tb.seg_sel(3), tb.pe_mode(), tb.default_32(), tb.cr0());
+    printf("  retired=%llu cycles=%llu reads=%llu\n",
+           (unsigned long long)tb.retired(),
+           (unsigned long long)tb.cycle_count(),
+           (unsigned long long)tb.data_reads());
+
+    CHECK(done, "protected-mode boot + MOV DS completed");
+    CHECK(tb.pe_mode(), "PE mode active");
+    CHECK(tb.cs_sel() == 0x0008, "CS = 0x0008");
+    CHECK(tb.seg_sel(3) == 0x0010, "DS selector = 0x0010 after MOV DS,AX");
+}
+
+// ============================================================
+// Test 25: Multiple segment register loads (DS, ES, SS)
+// ============================================================
+static void test_mov_multi_seg_real_mode(UcodeMemTB& tb) {
+    printf("Test 25: Multiple segment register loads (DS, ES, SS) real mode\n");
+
+    // Block 0: MOV EAX, [0x2000]  (selector = 0x1234)
+    // Block 1: MOV DS, AX (8E D8)
+    // Block 2: MOV ES, AX (8E C0)
+    // Block 3: MOV SS, AX (8E D0)
+    uint8_t code[64];
+    memset(code, 0x90, sizeof(code));
+    code[0]  = 0x66; code[1]  = 0xA1; code[2]  = 0x00; code[3]  = 0x20;
+    code[16] = 0x8E; code[17] = 0xD8;  // MOV DS, AX
+    code[32] = 0x8E; code[33] = 0xC0;  // MOV ES, AX
+    code[48] = 0x8E; code[49] = 0xD0;  // MOV SS, AX
+
+    tb.load_program(code, sizeof(code));
+    tb.write_mem32(0x2000, 0x00001234);
+    tb.reset();
+
+    uint64_t prev_ret = 0;
+    bool done = false;
+    for (int i = 0; i < 30000 && !done; i++) {
+        tb.tick();
+        uint64_t r = tb.retired();
+        // Detailed trace for first 60 cycles
+        if (i < 60) {
+            printf("  [%3d] pc=%05X uc=%d um=%d iq=%02X rob=%d/%d/%d(%04X/%04X) "
+                   "iqv=%d fd=%d xr=%d xv=%d lif=%d mrt=%d ret=%llu\n",
+                   i, tb.pc(),
+                   tb.ucode_state(), tb.um_state(),
+                   tb.iq_entry_valid_mask(),
+                   tb.rob_head(), tb.rob_tail(), tb.rob_count(),
+                   tb.rob_entry_valid_mask(), tb.rob_entry_complete_mask(),
+                   tb.iq_issue_valid(), tb.iq_force_dequeue(),
+                   tb.exec_u_ready(), tb.exec_u_valid(),
+                   tb.ld_in_flight(), tb.macro_rob_tag(),
+                   (unsigned long long)r);
+        }
+        if (r != prev_ret) {
+            if (i >= 60)
+                printf("  [cyc %d] retired=%llu pc=0x%08X DS=0x%04X uc=%d\n",
+                       i, (unsigned long long)r, tb.pc(), tb.seg_sel(3), tb.saw_uc_active());
+            prev_ret = r;
+        }
+        if (r >= 6) done = true;
+    }
+    tb.run(200);
+
+    printf("  DS=0x%04X ES=0x%04X SS=0x%04X retired=%llu\n",
+           tb.seg_sel(3), tb.seg_sel(0), tb.seg_sel(2),
+           (unsigned long long)tb.retired());
+
+    CHECK(done, "multi-segment loads completed");
+    CHECK(tb.seg_sel(3) == 0x1234, "DS = 0x1234");
+    CHECK(tb.seg_sel(0) == 0x1234, "ES = 0x1234");
+    CHECK(tb.seg_sel(2) == 0x1234, "SS = 0x1234");
+}
+
+// ============================================================
 // Main
 // ============================================================
 int main(int argc, char** argv) {
@@ -1377,6 +1611,10 @@ int main(int argc, char** argv) {
     }
 
     test_far_jmp_protected_mode(tb);
+
+    test_mov_ds_real_mode(tb);
+    test_mov_ds_protected_mode(tb);
+    test_mov_multi_seg_real_mode(tb);
 
     printf("\n=== Results: %d checks, %d failures ===\n", g_checks, g_fails);
     if (g_fails > 0) {

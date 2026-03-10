@@ -194,6 +194,9 @@ public:
     int macro_opcode() const {
         return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__macro_opcode;
     }
+    uint32_t macro_ea() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__macro_ea;
+    }
     uint32_t fetch_addr() const {
         return top_->fetch_addr;
     }
@@ -217,6 +220,23 @@ public:
 
     // Memory readback for data verification
     uint32_t read_mem32(uint32_t addr) const { return mem_.read32(addr); }
+
+    // Memory write for pre-seeding data memory
+    void write_mem32(uint32_t addr, uint32_t val) { mem_.write32(addr, val); }
+
+    // DTR register readback (via sys_regs internal names)
+    uint32_t gdtr_base() const {
+        return top_->rootp->f386_ooo_core_top__DOT__sys_regs__DOT__reg_gdtr_base;
+    }
+    uint16_t gdtr_limit() const {
+        return top_->rootp->f386_ooo_core_top__DOT__sys_regs__DOT__reg_gdtr_limit;
+    }
+    uint32_t idtr_base() const {
+        return top_->rootp->f386_ooo_core_top__DOT__sys_regs__DOT__reg_idtr_base;
+    }
+    uint16_t idtr_limit() const {
+        return top_->rootp->f386_ooo_core_top__DOT__sys_regs__DOT__reg_idtr_limit;
+    }
 
     // Direct access to top module for debug
     Vf386_ooo_core_top* top() const { return top_.get(); }
@@ -940,6 +960,147 @@ static void test_load_cr_basic(UcodeMemTB& tb) {
 }
 
 // ============================================================
+// Test 18: LGDT basic
+// Proves: LGDT (0F 01 /2) completes, generates ≥2 loads, no deadlock
+// ============================================================
+static void test_lgdt_basic(UcodeMemTB& tb) {
+    printf("Test 18: LGDT basic\n");
+
+    // LGDT [disp32] = 67 0F 01 15 <addr32>
+    // 67 = address-size override (16→32-bit in real mode)
+    // ModRM 0x15: mod=00, reg=2(LGDT), rm=5(disp32)
+    // Pseudo-descriptor address = 0x1000
+    uint32_t desc_addr = 0x1000;
+
+    uint8_t code[17];
+    memset(code, 0x90, sizeof(code));
+    code[0] = 0x67;  // Address-size override (real mode → 32-bit addressing)
+    code[1] = 0x0F;
+    code[2] = 0x01;
+    code[3] = 0x15;  // ModRM: mod=00, reg=2, rm=5 (disp32)
+    code[4] = (desc_addr >>  0) & 0xFF;
+    code[5] = (desc_addr >>  8) & 0xFF;
+    code[6] = (desc_addr >> 16) & 0xFF;
+    code[7] = (desc_addr >> 24) & 0xFF;
+    tb.load_program(code, sizeof(code));
+
+    // Pre-seed pseudo-descriptor at desc_addr (6 bytes):
+    // limit=0x0000, base=0x00000000 (zeros are fine for basic test)
+    tb.write_mem32(desc_addr,     0x00000000);  // {base[15:0], limit}
+    tb.write_mem32(desc_addr + 4, 0x00000000);  // {pad, base[31:16]}
+    tb.reset();
+
+    bool done = tb.run_until([&]{ return tb.retired() >= 4; }, 10000);
+    CHECK(done, "LGDT + NOPs retired");
+    CHECK(tb.cycle_count() < 8000, "completed within 8000 cycles (no deadlock)");
+    CHECK(tb.data_reads() >= 2, "at least 2 data memory reads (step 0 + LOAD_DTR)");
+    CHECK(tb.ucode_state() == UC_IDLE, "microcode FSM returned to UC_IDLE");
+
+    printf("  retired=%llu cycles=%llu reads=%llu\n",
+           (unsigned long long)tb.retired(),
+           (unsigned long long)tb.cycle_count(),
+           (unsigned long long)tb.data_reads());
+}
+
+// ============================================================
+// Test 19: LGDT data verification
+// Proves: LGDT writes correct limit and base to GDTR
+// ============================================================
+static void test_lgdt_data_verify(UcodeMemTB& tb) {
+    printf("Test 19: LGDT data verification\n");
+
+    // Pseudo-descriptor: limit=0x1234, base=0xDEADBEEF
+    // Memory layout (little-endian):
+    //   addr+0: limit[7:0]  = 0x34
+    //   addr+1: limit[15:8] = 0x12
+    //   addr+2: base[7:0]   = 0xEF
+    //   addr+3: base[15:8]  = 0xBE
+    //   addr+4: base[23:16] = 0xAD
+    //   addr+5: base[31:24] = 0xDE
+    //
+    // Step 0 loads dword at addr+0 = 0xBEEF1234 → {base[15:0], limit}
+    // Step 1 loads dword at addr+4 = 0x????DEAD → base[31:16] in [15:0]
+    // DTR: limit=0x1234, base={0xDEAD, 0xBEEF}=0xDEADBEEF
+
+    uint32_t desc_addr = 0x2000;
+
+    uint8_t code[17];
+    memset(code, 0x90, sizeof(code));
+    code[0] = 0x67;  // Address-size override (real mode → 32-bit addressing)
+    code[1] = 0x0F;
+    code[2] = 0x01;
+    code[3] = 0x15;  // ModRM: mod=00, reg=2, rm=5 (disp32)
+    code[4] = (desc_addr >>  0) & 0xFF;
+    code[5] = (desc_addr >>  8) & 0xFF;
+    code[6] = (desc_addr >> 16) & 0xFF;
+    code[7] = (desc_addr >> 24) & 0xFF;
+    tb.load_program(code, sizeof(code));
+
+    // Pre-seed pseudo-descriptor
+    tb.write_mem32(desc_addr,     0xBEEF1234);  // {base[15:0]=0xBEEF, limit=0x1234}
+    tb.write_mem32(desc_addr + 4, 0x0000DEAD);  // {pad, base[31:16]=0xDEAD}
+    tb.reset();
+
+    bool done = tb.run_until([&]{ return tb.retired() >= 4; }, 10000);
+    tb.run(200);  // Let everything settle
+    CHECK(done, "LGDT completed");
+
+    uint32_t gdtr_base  = tb.gdtr_base();
+    uint16_t gdtr_limit = tb.gdtr_limit();
+    printf("  GDTR: base=0x%08X limit=0x%04X\n", gdtr_base, gdtr_limit);
+    CHECK(gdtr_limit == 0x1234, "GDTR limit matches (0x1234)");
+    CHECK(gdtr_base == 0xDEADBEEF, "GDTR base matches (0xDEADBEEF)");
+
+    printf("  retired=%llu cycles=%llu\n",
+           (unsigned long long)tb.retired(),
+           (unsigned long long)tb.cycle_count());
+}
+
+// ============================================================
+// Test 20: LIDT basic + data verification
+// Proves: LIDT (0F 01 /3) writes correct limit and base to IDTR
+// ============================================================
+static void test_lidt_data_verify(UcodeMemTB& tb) {
+    printf("Test 20: LIDT data verification\n");
+
+    // Pseudo-descriptor: limit=0xABCD, base=0x12345678
+    uint32_t desc_addr = 0x3000;
+
+    uint8_t code[17];
+    memset(code, 0x90, sizeof(code));
+    code[0] = 0x67;  // Address-size override (real mode → 32-bit addressing)
+    code[1] = 0x0F;
+    code[2] = 0x01;
+    code[3] = 0x1D;  // ModRM: mod=00, reg=3(LIDT), rm=5(disp32)
+    code[4] = (desc_addr >>  0) & 0xFF;
+    code[5] = (desc_addr >>  8) & 0xFF;
+    code[6] = (desc_addr >> 16) & 0xFF;
+    code[7] = (desc_addr >> 24) & 0xFF;
+    tb.load_program(code, sizeof(code));
+
+    // Pre-seed: limit=0xABCD, base=0x12345678
+    // dword at addr+0 = {base[15:0]=0x5678, limit=0xABCD} = 0x5678ABCD
+    // dword at addr+4 = {pad, base[31:16]=0x1234} = 0x00001234
+    tb.write_mem32(desc_addr,     0x5678ABCD);
+    tb.write_mem32(desc_addr + 4, 0x00001234);
+    tb.reset();
+
+    bool done = tb.run_until([&]{ return tb.retired() >= 4; }, 10000);
+    tb.run(200);  // Let everything settle
+    CHECK(done, "LIDT completed");
+
+    uint32_t idtr_base  = tb.idtr_base();
+    uint16_t idtr_limit = tb.idtr_limit();
+    printf("  IDTR: base=0x%08X limit=0x%04X\n", idtr_base, idtr_limit);
+    CHECK(idtr_limit == 0xABCD, "IDTR limit matches (0xABCD)");
+    CHECK(idtr_base == 0x12345678, "IDTR base matches (0x12345678)");
+
+    printf("  retired=%llu cycles=%llu\n",
+           (unsigned long long)tb.retired(),
+           (unsigned long long)tb.cycle_count());
+}
+
+// ============================================================
 // Main
 // ============================================================
 int main(int argc, char** argv) {
@@ -987,6 +1148,9 @@ int main(int argc, char** argv) {
     test_popf_modifies_eflags(tb);
     test_store_cr_basic(tb);
     test_load_cr_basic(tb);
+    test_lgdt_basic(tb);
+    test_lgdt_data_verify(tb);
+    test_lidt_data_verify(tb);
 
     printf("\n=== Results: %d checks, %d failures ===\n", g_checks, g_fails);
     if (g_fails > 0) {

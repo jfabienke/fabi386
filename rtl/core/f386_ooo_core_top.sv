@@ -354,6 +354,13 @@ module f386_ooo_core_top (
     cr_idx_t     ucode_cr_idx;
     logic [31:0] ucode_cr_din;
     logic        ucode_cr_we;
+    // Microcode DTR write port (LGDT/LIDT)
+    logic        ucode_dtr_we;
+    dtr_idx_t    ucode_dtr_idx;
+    logic [31:0] ucode_dtr_base_din;
+    logic [15:0] ucode_dtr_limit_din;
+    // Macro EA bridge: AGU EA from gen_lsq_memif → gen_microcode
+    logic [31:0] uc_macro_ea;
     // From gen_lsq_memif → gen_microcode
     lq_idx_t     uc_lsq_ld_alloc_idx;     // Allocated LQ index
     sq_idx_t     uc_lsq_st_alloc_idx;     // Allocated SQ index
@@ -1176,13 +1183,13 @@ module f386_ooo_core_top (
         .alu_flags_mask  (merged_retire_flags_mask),
         .alu_flags_we    (retire_u_writes_flags || retire_v_writes_flags),
 
-        // DTR write port (undriven until microcode sequencer)
-        .dtr_idx         (DTR_GDTR),
-        .dtr_base_din    (32'h0),
-        .dtr_limit_din   (16'h0),
-        .dtr_sel_din     (16'h0),
-        .dtr_cache_din   (64'h0),
-        .dtr_we          (1'b0),
+        // DTR write port (driven by microcode LGDT/LIDT)
+        .dtr_idx         (ucode_dtr_idx),
+        .dtr_base_din    (ucode_dtr_base_din),
+        .dtr_limit_din   (ucode_dtr_limit_din),
+        .dtr_sel_din     (16'h0),            // Future (LLDT/LTR)
+        .dtr_cache_din   (64'h0),            // Future (LLDT/LTR)
+        .dtr_we          (ucode_dtr_we),
 
         // CS selector input (for CPL = CS.RPL derivation)
         .cs_sel_in       (seg_cs_sel),
@@ -1522,7 +1529,9 @@ module f386_ooo_core_top (
             // POP_FLAGS: suppress PRF write (loaded value goes to EFLAGS, not GPR)
             if (uc_mem_ld_dispatch) begin
                 rob_phys_dest_tbl [uc_mem_dispatch_rob_tag] <= uc_mem_cdb1_phys_dest;
-                rob_dest_valid_tbl[uc_mem_dispatch_rob_tag] <= (uc_mem_special_cmd != UCMD_POP_FLAGS);
+                rob_dest_valid_tbl[uc_mem_dispatch_rob_tag] <=
+                    (uc_mem_special_cmd != UCMD_POP_FLAGS) &&
+                    (uc_mem_special_cmd != UCMD_LOAD_DTR);
             end
         end
 
@@ -1586,6 +1595,9 @@ module f386_ooo_core_top (
             .linear_addr  (computed_ea),
             .a20_gate     (a20_gate)
         );
+
+        // Bridge computed_ea to gen_microcode for macro EA latch
+        assign uc_macro_ea = computed_ea;
 
         // Misaligned cross-dword store detection (uses computed_ea from AGU)
         wire misaligned_store_block = (iq_issue_instr.op_cat == OP_STORE) && (
@@ -2198,6 +2210,9 @@ module f386_ooo_core_top (
         // Microcode regonly CDB0 phys_dest stub
         assign uc_regonly_phys_dest = '0;
 
+        // Macro EA bridge stub (no AGU when LSQ disabled)
+        assign uc_macro_ea = 32'd0;
+
         // CDB passthrough (no muxing)
         assign cdb0_valid      = raw_cdb0_valid;
         assign cdb0_tag        = raw_cdb0_tag;
@@ -2317,10 +2332,12 @@ module f386_ooo_core_top (
 
         // Detect memory micro-op from sequencer
         // PUSH_FLAGS/POP_FLAGS are OP_SYS_CALL in ROM but need the memory path
+        // LOAD_DTR is OP_SYS_CALL in ROM but issues a second dword load
         wire uop_is_mem = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
                           (seq_uop_op_type == OP_LOAD || seq_uop_op_type == OP_STORE ||
                            seq_uop_special_cmd == UCMD_PUSH_FLAGS ||
-                           seq_uop_special_cmd == UCMD_POP_FLAGS);
+                           seq_uop_special_cmd == UCMD_POP_FLAGS ||
+                           seq_uop_special_cmd == UCMD_LOAD_DTR);
 
         // Detect PUSH variants (needs ESP on PRF port B)
         wire uop_is_push = uop_is_mem && (seq_uop_special_cmd == UCMD_PUSH_PRE ||
@@ -2358,6 +2375,12 @@ module f386_ooo_core_top (
         logic [31:0] uc_orig_esp_r;
         logic        uc_orig_esp_latched;
 
+        // Macro EA: AGU effective address latched at drain time (for generic LOAD/STORE)
+        logic [31:0] macro_ea;
+
+        // LOAD_DTR: temp register for step 0's dword (limit + base[15:0])
+        logic [31:0] uc_dtr_low_r;
+
         // Size constant: dword for 32-bit stack ops
         localparam logic [1:0] UC_MEM_SIZE = 2'd2;
         localparam logic [3:0] UC_MEM_BYTE_EN = 4'b1111;
@@ -2380,6 +2403,8 @@ module f386_ooo_core_top (
                 uc_mem_esp_new_r  <= 32'd0;
                 uc_orig_esp_r     <= 32'd0;
                 uc_orig_esp_latched <= 1'b0;
+                macro_ea          <= 32'd0;
+                uc_dtr_low_r      <= 32'd0;
             end else if (flush) begin
                 uc_mem_state      <= UM_IDLE;
                 uc_orig_esp_latched <= 1'b0;
@@ -2392,7 +2417,8 @@ module f386_ooo_core_top (
                         if (uop_is_mem) begin
                             uc_mem_state     <= UM_ALLOC;
                             uc_mem_is_load_r <= (seq_uop_op_type == OP_LOAD) ||
-                                               (seq_uop_special_cmd == UCMD_POP_FLAGS);
+                                               (seq_uop_special_cmd == UCMD_POP_FLAGS) ||
+                                               (seq_uop_special_cmd == UCMD_LOAD_DTR);
                             uc_mem_special_r <= seq_uop_special_cmd;
                             uc_mem_phys_dest_r <= rename_com_map[seq_uop_dest_reg];
 
@@ -2428,9 +2454,18 @@ module f386_ooo_core_top (
                                     uc_mem_data_r    <= 32'd0;
                                     uc_mem_esp_new_r <= prf_data_b + ESP_DELTA;
                                 end
+                                UCMD_LOAD_DTR: begin
+                                    // LGDT/LIDT step 1: capture step 0 result,
+                                    // issue second dword load at EA+4
+                                    uc_dtr_low_r     <= prf_data_a;       // {base[15:0], limit[15:0]}
+                                    uc_mem_addr_r    <= macro_ea + 32'd4; // base[31:16] at offset 4
+                                    uc_mem_data_r    <= 32'd0;
+                                    uc_mem_esp_new_r <= 32'd0;
+                                end
                                 default: begin
-                                    uc_mem_addr_r    <= prf_data_a;
-                                    uc_mem_data_r    <= prf_data_b;
+                                    // Generic LOAD/STORE: address from macro EA
+                                    uc_mem_addr_r    <= macro_ea;
+                                    uc_mem_data_r    <= prf_data_a;  // Store data (if store)
                                     uc_mem_esp_new_r <= 32'd0;
                                 end
                             endcase
@@ -2544,6 +2579,7 @@ module f386_ooo_core_top (
                             macro_is_repne   <= iq_issue_instr.is_repne;
                             macro_pc         <= iq_issue_instr.pc;
                             macro_val_a      <= iq_issue_instr.val_a;
+                            macro_ea         <= uc_macro_ea;
                         end
                     end
 
@@ -2722,6 +2758,15 @@ module f386_ooo_core_top (
         assign ucode_cr_idx = cr_idx_t'(macro_modrm_reg);
         assign ucode_cr_din = macro_val_a;
 
+        // ---------------------------------------------------------
+        // DTR write port (LGDT/LIDT: LOAD_DTR second load completes)
+        // ---------------------------------------------------------
+        wire dtr_write_fire = uc_mem_done && (uc_mem_special_r == UCMD_LOAD_DTR);
+        assign ucode_dtr_we        = dtr_write_fire;
+        assign ucode_dtr_idx       = (macro_modrm_reg == 3'd3) ? DTR_IDTR : DTR_GDTR;
+        assign ucode_dtr_limit_din = uc_dtr_low_r[15:0];
+        assign ucode_dtr_base_din  = {cdb1_data[15:0], uc_dtr_low_r[31:16]};
+
         // Deferred special commands (sim-only log)
         // synopsys translate_off
         always_ff @(posedge clk) begin
@@ -2731,9 +2776,10 @@ module f386_ooo_core_top (
                     && seq_uop_special_cmd != UCMD_POP_POST
                     && seq_uop_special_cmd != UCMD_PUSH_FLAGS
                     && seq_uop_special_cmd != UCMD_LOAD_CR
-                    && seq_uop_special_cmd != UCMD_STORE_CR) begin
+                    && seq_uop_special_cmd != UCMD_STORE_CR
+                    && seq_uop_special_cmd != UCMD_LOAD_DTR) begin
                     case (seq_uop_special_cmd)
-                        UCMD_LOAD_DTR, UCMD_STORE_DTR,     // deferred P3.2+
+                        UCMD_STORE_DTR,                    // deferred P3.2+
                         UCMD_LOAD_SEG, UCMD_STORE_SEG,     // deferred P3.2+
                         UCMD_INT_ENTER, UCMD_INT_EXIT,     // deferred P3.3
                         UCMD_LAHF, UCMD_SAHF,              // deferred
@@ -2780,6 +2826,10 @@ module f386_ooo_core_top (
         assign ucode_cr_we            = 1'b0;
         assign ucode_cr_idx           = CR_0;
         assign ucode_cr_din           = 32'd0;
+        assign ucode_dtr_we           = 1'b0;
+        assign ucode_dtr_idx          = DTR_GDTR;
+        assign ucode_dtr_base_din     = 32'd0;
+        assign ucode_dtr_limit_din    = 16'd0;
         assign eff_iq_exec_ready     = exec_u_ready && !lsq_load_issue_stall;
         assign eff_exec_u_valid      = iq_issue_valid;
         assign eff_exec_u_instr      = exec_u_instr;

@@ -493,9 +493,15 @@ module f386_decode (
         logic [7:0]  b;                 // Current byte under examination
         logic        has_sib;           // SIB byte present in this instruction
         logic [2:0]  sib_base;          // SIB.base field (bits [2:0] of SIB byte)
+        logic [3:0]  disp_pos;          // Byte position of displacement
+        logic [31:0] disp_value;        // Extracted displacement value
+        logic [1:0]  disp_size;         // 0=none, 1=disp8, 2=disp32
 
         d = '0;
         pos = 0;
+        disp_pos   = 0;
+        disp_value = 32'h0;
+        disp_size  = 2'd0;
 
         // ---- Phase 1: Consume Prefixes (up to 4) ----
         for (int i = 0; i < 4; i++) begin
@@ -579,22 +585,37 @@ module f386_decode (
                 if (has_sib)
                     pos++;
 
-                // Displacement
+                // Displacement — save position before consuming
+                disp_pos = pos;
                 case (d.mod)
                     2'b00: begin
                         if (has_sib) begin
                             // SIB with mod==00 and base==101: disp32, no base reg
-                            if (sib_base == 3'b101)
+                            if (sib_base == 3'b101) begin
+                                disp_value = stream[pos*8 +: 32];
+                                disp_size  = 2'd2;  // disp32
                                 pos += 4;
+                            end
                         end else begin
                             // No SIB: rm==101 means disp32 (no base register)
-                            if (d.rm == 3'b101)
+                            if (d.rm == 3'b101) begin
+                                disp_value = stream[pos*8 +: 32];
+                                disp_size  = 2'd2;  // disp32
                                 pos += 4;
+                            end
                         end
                     end
-                    2'b01: pos += 1;  // disp8
-                    2'b10: pos += 4;  // disp32
-                    2'b11: ;          // Register direct, no displacement
+                    2'b01: begin  // disp8 (sign-extended)
+                        disp_value = {{24{stream[pos*8 + 7]}}, stream[pos*8 +: 8]};
+                        disp_size  = 2'd1;
+                        pos += 1;
+                    end
+                    2'b10: begin  // disp32
+                        disp_value = stream[pos*8 +: 32];
+                        disp_size  = 2'd2;
+                        pos += 4;
+                    end
+                    2'b11: ;  // Register direct, no displacement
                 endcase
             end else begin
                 // --- 16-bit addressing ---
@@ -712,6 +733,15 @@ module f386_decode (
 
             default: ; // FMT_NONE, FMT_MODRM (no immediate), FMT_PREFIX, FMT_INVALID
         endcase
+
+        // ---- Phase 4b: Displacement → imm_value for pure-ModRM formats ----
+        // For FMT_MODRM (no immediate operand), the displacement from Phase 3
+        // is the only offset. Store it in imm_value so the AGU can use it.
+        // Formats with immediate (FMT_MODRM_I8, FMT_MODRM_IV, etc.) keep
+        // imm_value from Phase 4; their displacement needs a separate path.
+        if (fmt == FMT_MODRM && disp_size != 2'd0) begin
+            d.imm_value = disp_value;
+        end
 
         // ---- Phase 5: Indirect Branch Detection ----
         // Indirect branches have no computable target at decode time.
@@ -944,9 +974,16 @@ module f386_decode (
                 8'hA2:                              // CPUID
                     return OP_MICROCODE;            // Multi-cycle: EAX→EAX/EBX/ECX/EDX
 
-                // Grp6/7: SLDT/STR/LLDT/LTR/SGDT/SIDT/LGDT/LIDT/SMSW/LMSW/INVLPG
-                8'h00, 8'h01:
+                // Grp6: SLDT/STR/LLDT/LTR
+                8'h00:
                     return OP_SYS_CALL;
+                // Grp7: SGDT/SIDT/LGDT/LIDT/SMSW/LMSW/INVLPG
+                8'h01: begin
+                    if (pd.reg_field == 3'd2 || pd.reg_field == 3'd3)
+                        return OP_MICROCODE;  // LGDT/LIDT → microcode
+                    else
+                        return OP_SYS_CALL;   // SGDT/SIDT/SMSW/LMSW/INVLPG
+                end
 
                 // Grp15 (0F AE): FXSAVE/FXRSTOR/CLFLUSH fallback
                 // Fence forms (mod=11, reg>=5) caught above when P3 enabled

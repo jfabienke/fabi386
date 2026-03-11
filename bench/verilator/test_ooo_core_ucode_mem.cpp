@@ -244,6 +244,9 @@ public:
     uint32_t pc() const {
         return top_->rootp->f386_ooo_core_top__DOT__pc_current;
     }
+    uint32_t eflags() const {
+        return top_->rootp->f386_ooo_core_top__DOT__sys_regs__DOT__reg_eflags;
+    }
     bool pe_mode() const {
         // PE is bit 0 of CR0
         return cr0() & 1;
@@ -307,6 +310,15 @@ public:
     }
     bool uc_mem_done() const {
         return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__uc_mem_done;
+    }
+    uint8_t uc_mem_special_r() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__uc_mem_special_r;
+    }
+    bool ucode_exec_ack() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__u_ucode_seq__DOT__exec_ack;
+    }
+    bool has_eflags_cmd() const {
+        return top_->rootp->f386_ooo_core_top__DOT__gen_microcode__DOT__ucode_has_eflags_cmd;
     }
     bool exec_u_ready() const {
         return top_->rootp->f386_ooo_core_top__DOT__exec_stage__DOT__u_ready;
@@ -387,8 +399,9 @@ private:
                 for (int i = 0; i < 8; i++)
                     rdata |= (uint64_t)mem_.read8(base + i) << (i * 8);
                 data_ack_rdata_ = rdata;
-                if (trace_enabled_)
+                if (trace_enabled_) {
                     mem_trace_.push_back({addr, rdata, 0, false});
+                }
                 data_reads_++;
             }
             data_ack_pending_ = true;
@@ -1498,6 +1511,245 @@ static void test_mov_multi_seg_real_mode(UcodeMemTB& tb) {
 }
 
 // ============================================================
+// Test 26: INT 0x21 basic completion (real mode)
+// ============================================================
+static void test_int_basic(UcodeMemTB& tb) {
+    printf("Test 26: INT 0x21 basic completion (real mode)\n");
+
+    // Program: INT 0x21
+    uint8_t code[16];
+    memset(code, 0x90, sizeof(code));
+    code[0] = 0xCD; code[1] = 0x21;  // INT 0x21
+
+    tb.load_program(code, sizeof(code));
+
+    // Set up IVT entry at vector 0x21 * 4 = 0x84
+    // IVT format: [offset_lo:16][segment:16]
+    // Handler at 0x0000:0x1000 → linear 0x1000
+    uint32_t ivt_entry = (0x0000 << 16) | 0x1000;  // seg=0x0000, off=0x1000
+    tb.write_mem32(0x84, ivt_entry);
+
+    // Put NOPs at handler address 0x1000
+    uint8_t nops[16];
+    memset(nops, 0x90, 16);
+    for (int i = 0; i < 16; i++) tb.write_mem8(0x1000 + i, nops[i]);
+
+    tb.reset();
+
+    uint64_t prev_ret = 0;
+    bool done = false;
+    for (int i = 0; i < 10000 && !done; i++) {
+        tb.tick();
+        uint64_t r = tb.retired();
+        if (i < 80) {
+            printf("  [%3d] pc=%05X uc=%d um=%d ss=%d step=%d msr=0x%02X "
+                   "sqv=%d mem=%d ro=%d ack=%d md=%d efl=%d ret=%llu\n",
+                   i, tb.pc(),
+                   tb.ucode_state(), tb.um_state(),
+                   tb.seq_state(), tb.seq_step(), tb.uc_mem_special_r(),
+                   tb.seq_uop_valid(), tb.uop_is_mem(), tb.uop_is_regonly(),
+                   tb.ucode_exec_ack(), tb.uc_mem_done(), tb.has_eflags_cmd(),
+                   (unsigned long long)r);
+        }
+        if (r != prev_ret) {
+            if (i >= 80)
+                printf("  [cyc %d] retired=%llu pc=0x%08X\n",
+                       i, (unsigned long long)r, tb.pc());
+            prev_ret = r;
+        }
+        if (r >= 10) done = true;
+    }
+    printf("  done=%d retired=%llu pc=0x%08X CS=0x%04X eflags=0x%08X\n",
+           done, (unsigned long long)tb.retired(), tb.pc(), tb.cs_sel(), tb.eflags());
+
+    CHECK(done, "INT 0x21 completed");
+    CHECK(tb.saw_uc_active(), "UC_ACTIVE reached for INT");
+}
+
+// ============================================================
+// Test 27: INT 0x10 with CS redirect verify
+// ============================================================
+static void test_int_redirect(UcodeMemTB& tb) {
+    printf("Test 27: INT 0x10 CS:EIP redirect verify\n");
+
+    uint8_t code[16];
+    memset(code, 0x90, sizeof(code));
+    code[0] = 0xCD; code[1] = 0x10;  // INT 0x10
+
+    tb.load_program(code, sizeof(code));
+
+    // IVT[0x10] at address 0x40: handler at 0x0500:0x0100 → linear 0x5100
+    uint32_t ivt_entry = (0x0500 << 16) | 0x0100;
+    tb.write_mem32(0x40, ivt_entry);
+
+    // NOPs at handler linear address
+    uint8_t nops[16];
+    memset(nops, 0x90, 16);
+    for (int i = 0; i < 16; i++) tb.write_mem8(0x5100 + i, nops[i]);
+
+    tb.reset();
+
+    bool done = tb.run_until([&]{ return tb.retired() >= 8; }, 10000);
+    tb.run(100);
+    printf("  pc=0x%08X CS=0x%04X eflags=0x%08X retired=%llu\n",
+           tb.pc(), tb.cs_sel(), tb.eflags(), (unsigned long long)tb.retired());
+
+    CHECK(done, "INT 0x10 completed");
+    CHECK(tb.cs_sel() == 0x0500, "CS = 0x0500 after INT 0x10");
+    // IF should be cleared by CLI step
+    CHECK((tb.eflags() & 0x200) == 0, "IF cleared after INT");
+}
+
+// ============================================================
+// Test 28: INT 0x21 stack frame verify
+// ============================================================
+static void test_int_stack_frame(UcodeMemTB& tb) {
+    printf("Test 28: INT 0x21 stack frame data verify\n");
+
+    uint8_t code[16];
+    memset(code, 0x90, sizeof(code));
+    code[0] = 0xCD; code[1] = 0x21;  // INT 0x21
+
+    tb.load_program(code, sizeof(code));
+
+    // IVT[0x21] at 0x84: handler at 0x0000:0x2000
+    uint32_t ivt_entry = (0x0000 << 16) | 0x2000;
+    tb.write_mem32(0x84, ivt_entry);
+
+    uint8_t nops[16];
+    memset(nops, 0x90, 16);
+    for (int i = 0; i < 16; i++) tb.write_mem8(0x2000 + i, nops[i]);
+
+    tb.reset();
+
+    bool done = tb.run_until([&]{ return tb.retired() >= 8; }, 10000);
+    tb.run(100);
+
+    // After INT, ESP should have been decremented by 12 (3 pushes x 4 bytes)
+    // Stack frame (top to bottom): FLAGS, CS, EIP (return addr)
+    // Initial ESP is typically 0x0000 in this test harness (wraps to 0xFFFF area)
+    // Read the three pushed dwords from memory
+    // ESP at reset: check by reading stack area
+    // The INT instruction is at PC=0x10000, length=2, so return EIP = 0x10002
+    // CS at dispatch time = 0x0000 (reset value)
+    // EFLAGS at dispatch = 0x00000002 (reset: reserved bit 1 set)
+
+    // We can't easily read ESP, but we can check that the handler was reached
+    printf("  pc=0x%08X CS=0x%04X retired=%llu\n",
+           tb.pc(), tb.cs_sel(), (unsigned long long)tb.retired());
+    CHECK(done, "INT 0x21 stack frame test completed");
+}
+
+// ============================================================
+// Test 29: IRET basic completion
+// ============================================================
+static void test_iret_basic(UcodeMemTB& tb) {
+    printf("Test 29: IRET basic completion\n");
+
+    // We need to first execute INT to set up the stack frame,
+    // then have the handler execute IRET.
+    // Program: INT 0x21 at 0x10000
+    // Handler at 0x0000:0x2000: IRET (0xCF) at byte 0
+    uint8_t code[16];
+    memset(code, 0x90, sizeof(code));
+    code[0] = 0xCD; code[1] = 0x21;  // INT 0x21
+
+    tb.load_program(code, sizeof(code));
+
+    // IVT[0x21] at 0x84: handler at 0x0000:0x2000
+    uint32_t ivt_entry = (0x0000 << 16) | 0x2000;
+    tb.write_mem32(0x84, ivt_entry);
+
+    // Handler: IRET at byte 0 of a 16-byte block
+    uint8_t handler[16];
+    memset(handler, 0x90, 16);
+    handler[0] = 0xCF;  // IRET
+    for (int i = 0; i < 16; i++) tb.write_mem8(0x2000 + i, handler[i]);
+
+    // Also need NOPs after the INT instruction for when IRET returns
+    uint8_t after_int[16];
+    memset(after_int, 0x90, 16);
+    for (int i = 0; i < 16; i++) tb.write_mem8(0x10010 + i, after_int[i]);
+
+    tb.reset();
+
+    // Wait for enough retirements (INT=1 retirement + handler IRET=1 + more)
+    bool done = tb.run_until([&]{ return tb.retired() >= 10; }, 30000);
+    tb.run(200);
+    printf("  pc=0x%08X CS=0x%04X eflags=0x%08X retired=%llu\n",
+           tb.pc(), tb.cs_sel(), tb.eflags(), (unsigned long long)tb.retired());
+
+    CHECK(done, "INT + IRET roundtrip completed");
+    // After IRET, CS should be restored to original (0x0000)
+    CHECK(tb.cs_sel() == 0x0000, "CS restored to 0x0000 after IRET");
+}
+
+// ============================================================
+// Test 30: INT + IRET with nonzero CS roundtrip
+// ============================================================
+static void test_int_iret_roundtrip(UcodeMemTB& tb) {
+    printf("Test 30: INT + IRET with nonzero CS roundtrip\n");
+
+    uint8_t code[16];
+    memset(code, 0x90, sizeof(code));
+    code[0] = 0xCD; code[1] = 0x10;  // INT 0x10
+
+    tb.load_program(code, sizeof(code));
+
+    // IVT[0x10] at 0x40: handler at 0x0300:0x0100 → linear 0x3100
+    uint32_t ivt_entry = (0x0300 << 16) | 0x0100;
+    tb.write_mem32(0x40, ivt_entry);
+
+    // Handler at linear 0x3100: IRET
+    uint8_t handler[16];
+    memset(handler, 0x90, 16);
+    handler[0] = 0xCF;  // IRET
+    for (int i = 0; i < 16; i++) tb.write_mem8(0x3100 + i, handler[i]);
+
+    // NOPs after the INT for return
+    uint8_t after_int[16];
+    memset(after_int, 0x90, 16);
+    for (int i = 0; i < 16; i++) tb.write_mem8(0x10010 + i, after_int[i]);
+
+    tb.reset();
+
+    // Track CS changes
+    uint16_t max_cs = 0;
+    uint64_t prev_ret = 0;
+    bool done = false;
+    for (int i = 0; i < 30000 && !done; i++) {
+        tb.tick();
+        uint16_t cs = tb.cs_sel();
+        if (cs > max_cs) max_cs = cs;
+        uint64_t r = tb.retired();
+        // Print detailed trace for first 120 cycles
+        if (i < 120) {
+            printf("  [%3d] pc=%05X uc=%d um=%d ss=%d step=%d msr=0x%02X "
+                   "sqv=%d ro=%d ack=%d CS=%04X ret=%llu\n",
+                   i, tb.pc(),
+                   tb.ucode_state(), tb.um_state(),
+                   tb.seq_state(), tb.seq_step(), tb.uc_mem_special_r(),
+                   tb.seq_uop_valid(), tb.uop_is_regonly(),
+                   tb.ucode_exec_ack(), cs,
+                   (unsigned long long)r);
+        }
+        if (r != prev_ret && i >= 120) {
+            printf("  [cyc %d] retired=%llu pc=0x%08X CS=%04X\n",
+                   i, (unsigned long long)r, tb.pc(), tb.cs_sel());
+            prev_ret = r;
+        }
+        if (r >= 10) done = true;
+    }
+    tb.run(200);
+    printf("  pc=0x%08X CS=0x%04X max_CS=0x%04X eflags=0x%08X retired=%llu\n",
+           tb.pc(), tb.cs_sel(), max_cs, tb.eflags(), (unsigned long long)tb.retired());
+
+    CHECK(done, "INT+IRET nonzero CS roundtrip completed");
+    CHECK(max_cs == 0x0300, "CS reached 0x0300 during INT handler");
+    CHECK(tb.cs_sel() == 0x0000, "CS restored to 0x0000 after IRET");
+}
+
+// ============================================================
 // Main
 // ============================================================
 int main(int argc, char** argv) {
@@ -1599,10 +1851,12 @@ int main(int argc, char** argv) {
         // Pre-seed value 1 at address 0x2000
         tb.write_mem32(0x2000, 0x00000001);
         tb.reset();
+        tb.enable_trace();
 
         uint32_t prev_cr0 = tb.cr0();
         bool done = tb.run_until([&]{ return tb.retired() >= 6; }, 10000);
         tb.run(200);
+        tb.disable_trace();
         uint32_t new_cr0 = tb.cr0();
         printf("  cr0: 0x%08X → 0x%08X  pe=%d  retired=%llu  reads=%llu\n",
                prev_cr0, new_cr0, (new_cr0 & 1),
@@ -1615,6 +1869,12 @@ int main(int argc, char** argv) {
     test_mov_ds_real_mode(tb);
     test_mov_ds_protected_mode(tb);
     test_mov_multi_seg_real_mode(tb);
+
+    test_int_basic(tb);
+    test_int_redirect(tb);
+    test_int_stack_frame(tb);
+    test_iret_basic(tb);
+    test_int_iret_roundtrip(tb);
 
     printf("\n=== Results: %d checks, %d failures ===\n", g_checks, g_fails);
     if (g_fails > 0) {

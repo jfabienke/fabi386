@@ -377,6 +377,7 @@ module f386_ooo_core_top (
     sq_idx_t     uc_lsq_st_alloc_idx;     // Allocated SQ index
     logic        uc_lsq_lq_full;          // LQ full
     logic        uc_lsq_sq_full;          // SQ full
+    logic        uc_load_pipe_busy;       // Load pipeline busy (stalls microcode ld fire)
 
     // --- Dispatch Valid (derived signals used across sections) ---
     // V-pipe suppressed when U-pipe is OP_MICROCODE or OP_SYS_CALL:
@@ -1552,7 +1553,8 @@ module f386_ooo_core_top (
                     (uc_mem_special_cmd != UCMD_POP_FLAGS) &&
                     (uc_mem_special_cmd != UCMD_LOAD_DTR) &&
                     (uc_mem_special_cmd != UCMD_FAR_CALL) &&
-                    (uc_mem_special_cmd != UCMD_LOAD_SEG);
+                    (uc_mem_special_cmd != UCMD_LOAD_SEG) &&
+                    (uc_mem_special_cmd != UCMD_INT_ENTER);
             end
         end
 
@@ -1862,6 +1864,8 @@ module f386_ooo_core_top (
                     ld_in_flight <= 1'b1;
             end
 
+            assign uc_load_pipe_busy = ld_in_flight;
+
             // IQ stall: translation busy, or load in-flight, or existing guards
             assign lsq_load_issue_stall =
                 dtlb_busy ||
@@ -1914,6 +1918,8 @@ module f386_ooo_core_top (
                          && (!ea_is_mmio || io_path_ld_ready))
                     ld_in_flight <= 1'b1;
             end
+
+            assign uc_load_pipe_busy = ld_in_flight;
 
             // IQ stall (original logic)
             assign lsq_load_issue_stall =
@@ -2206,6 +2212,7 @@ module f386_ooo_core_top (
         assign lsq_dispatch_blocked   = 1'b0;
         assign lsq_cdb1_active        = 1'b0;
         assign lsq_load_issue_stall   = 1'b0;
+        assign uc_load_pipe_busy      = 1'b0;
         assign uc_lsq_lq_full         = 1'b1;   // Always full (no LSQ)
         assign uc_lsq_sq_full         = 1'b1;
         assign uc_lsq_ld_alloc_idx    = '0;
@@ -2360,6 +2367,9 @@ module f386_ooo_core_top (
         wire uop_is_load_seg = (seq_uop_special_cmd == UCMD_LOAD_SEG);
         wire uop_is_load_seg_mem = uop_is_load_seg && pe_mode;  // PE: GDT reads
 
+        wire uop_is_int_enter = (seq_uop_special_cmd == UCMD_INT_ENTER);
+        wire uop_is_int_exit  = (seq_uop_special_cmd == UCMD_INT_EXIT);
+
         // MOV Sreg step 0 (LOAD with UCMD_NOP): regonly for register form
         // The selector is already in macro_val_a from GPR source read at dispatch
         wire uop_is_mov_sreg_step0 = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
@@ -2373,18 +2383,25 @@ module f386_ooo_core_top (
                            seq_uop_special_cmd == UCMD_POP_FLAGS ||
                            seq_uop_special_cmd == UCMD_LOAD_DTR ||
                            uop_is_far_call_mem ||
-                           uop_is_load_seg_mem);
+                           uop_is_load_seg_mem ||
+                           uop_is_int_enter);
 
         // Detect PUSH variants (needs ESP on PRF port B)
         wire uop_is_push = uop_is_mem && (seq_uop_special_cmd == UCMD_PUSH_PRE ||
                                            seq_uop_special_cmd == UCMD_PUSH_FLAGS);
 
         // Detect register-only special commands (bypass execute, self-completing)
+        // Pure EFLAGS micro-ops (CLI/STI inside INT/IRET) — self-complete via regonly
+        wire uop_is_eflags_regonly = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
+            (seq_uop_special_cmd == UCMD_CLI || seq_uop_special_cmd == UCMD_STI);
+
         wire uop_is_regonly_cmd = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
             (seq_uop_special_cmd == UCMD_STORE_CR || seq_uop_special_cmd == UCMD_LOAD_CR ||
              (uop_is_far_call && !pe_mode) ||
              (uop_is_load_seg && !pe_mode) ||      // Real-mode MOV Sreg: no GDT reads
-             uop_is_mov_sreg_step0);               // MOV Sreg step 0 reg form: self-complete
+             uop_is_mov_sreg_step0 ||              // MOV Sreg step 0 reg form: self-complete
+             uop_is_int_exit ||                    // IRET INT_EXIT: regonly (CS+PC commit)
+             uop_is_eflags_regonly);               // CLI/STI: OP_SYS_CALL in ROM, can't go through execute
 
         // PRF port B needs ESP for PUSH variants and POP_FLAGS
         wire uop_needs_esp_b = uop_is_push ||
@@ -2427,9 +2444,21 @@ module f386_ooo_core_top (
         logic [15:0] macro_far_sel;    // New CS selector
         logic [31:0] macro_imm;        // New EIP (absolute offset from far ptr)
 
+        // Previous micro-op load result (forwarding — rename_com_map
+        // doesn't update mid-sequence, so PRF reads are stale).
+        logic [31:0] uc_prev_load_result;
+
         // FAR_CALL: GDT read phase tracking
         logic        uc_far_phase;     // 0=first GDT dword, 1=second
         logic [31:0] uc_far_desc_lo;   // Latched first GDT dword
+
+        // INT: PUSH data override tracking
+        logic        uc_int_push_phase; // 0=PUSH CS (first), 1=PUSH EIP (second)
+
+        // IRET: latched POP results
+        logic [31:0] uc_iret_eip;      // Popped EIP (step 0)
+        logic [31:0] uc_iret_cs;       // Popped CS (step 1)
+        logic        uc_iret_pop_phase; // 0=EIP (first POP), 1=CS (second POP)
 
         // Size constant: dword for 32-bit stack ops
         localparam logic [1:0] UC_MEM_SIZE = 2'd2;
@@ -2437,11 +2466,13 @@ module f386_ooo_core_top (
         localparam logic [31:0] ESP_DELTA = 32'd4;
 
         // Memory engine done pulse (for exec_ack)
+        // Only react to CDB1 for our own load (tag must match macro_rob_tag)
+        wire uc_cdb1_match = lsq_cdb1_active && (cdb1_tag == macro_rob_tag);
         // Suppress for intermediate GDT load (phase 0 → need second read)
         wire uc_gdt_phase0 = (uc_mem_special_r == UCMD_FAR_CALL ||
                               uc_mem_special_r == UCMD_LOAD_SEG) && !uc_far_phase;
         wire uc_mem_done = (uc_mem_state == UM_ISSUE && !uc_mem_is_load_r) ||
-                           (uc_mem_state == UM_LOAD_WAIT && lsq_cdb1_active &&
+                           (uc_mem_state == UM_LOAD_WAIT && uc_cdb1_match &&
                             !uc_gdt_phase0);
 
         always_ff @(posedge clk or negedge rst_n) begin
@@ -2464,23 +2495,34 @@ module f386_ooo_core_top (
                 macro_imm         <= 32'd0;
                 uc_far_phase      <= 1'b0;
                 uc_far_desc_lo    <= 32'd0;
+                uc_prev_load_result <= 32'd0;
+                uc_int_push_phase <= 1'b0;
+                uc_iret_eip       <= 32'd0;
+                uc_iret_cs        <= 32'd0;
+                uc_iret_pop_phase <= 1'b0;
             end else if (flush) begin
                 uc_mem_state      <= UM_IDLE;
                 uc_orig_esp_latched <= 1'b0;
                 uc_far_phase      <= 1'b0;
+                uc_int_push_phase <= 1'b0;
+                uc_iret_pop_phase <= 1'b0;
             end else begin
                 case (uc_mem_state)
                     UM_IDLE: begin
-                        // Clear PUSHA ESP latch when microcode sequence ends
-                        if (ucode_state == UC_IDLE)
+                        // Clear sequence-local state when microcode ends
+                        if (ucode_state == UC_IDLE) begin
                             uc_orig_esp_latched <= 1'b0;
+                            uc_int_push_phase   <= 1'b0;
+                            uc_iret_pop_phase   <= 1'b0;
+                        end
                         if (uop_is_mem) begin
                             uc_mem_state     <= UM_ALLOC;
                             uc_mem_is_load_r <= (seq_uop_op_type == OP_LOAD) ||
                                                (seq_uop_special_cmd == UCMD_POP_FLAGS) ||
                                                (seq_uop_special_cmd == UCMD_LOAD_DTR) ||
                                                uop_is_far_call_mem ||
-                                               uop_is_load_seg_mem;
+                                               uop_is_load_seg_mem ||
+                                               uop_is_int_enter;
                             uc_mem_special_r <= seq_uop_special_cmd;
                             uc_mem_phys_dest_r <= rename_com_map[seq_uop_dest_reg];
 
@@ -2494,9 +2536,21 @@ module f386_ooo_core_top (
                                         uc_orig_esp_r       <= prf_data_b;
                                         uc_orig_esp_latched <= 1'b1;
                                     end
-                                    // PUSHA step 4: push original ESP, not decremented value
-                                    uc_mem_data_r <= (seq_uop_src_a_reg == 3'd4) ?
-                                                      uc_orig_esp_r : prf_data_a;
+                                    // INT: override data for PUSH CS and PUSH EIP
+                                    if (macro_opcode == 8'hCD || macro_opcode == 8'hCC) begin
+                                        if (!uc_int_push_phase) begin
+                                            uc_mem_data_r     <= {16'd0, seg_cs_sel};
+                                            uc_int_push_phase <= 1'b1;
+                                        end else begin
+                                            // Return EIP = macro_pc + 2 (CD imm8) or +1 (CC)
+                                            uc_mem_data_r <= macro_pc +
+                                                ((macro_opcode == 8'hCD) ? 32'd2 : 32'd1);
+                                        end
+                                    end else begin
+                                        // PUSHA step 4: push original ESP, not decremented value
+                                        uc_mem_data_r <= (seq_uop_src_a_reg == 3'd4) ?
+                                                          uc_orig_esp_r : prf_data_a;
+                                    end
                                 end
                                 UCMD_PUSH_FLAGS: begin
                                     // PUSHF: push EFLAGS to stack (ESP-4)
@@ -2517,10 +2571,10 @@ module f386_ooo_core_top (
                                     uc_mem_esp_new_r <= prf_data_b + ESP_DELTA;
                                 end
                                 UCMD_LOAD_DTR: begin
-                                    // LGDT/LIDT step 1: capture step 0 result,
+                                    // LGDT/LIDT step 1: capture step 0 result (forwarded),
                                     // issue second dword load at EA+4
-                                    uc_dtr_low_r     <= prf_data_a;       // {base[15:0], limit[15:0]}
-                                    uc_mem_addr_r    <= macro_ea + 32'd4; // base[31:16] at offset 4
+                                    uc_dtr_low_r     <= uc_prev_load_result; // {base[15:0], limit[15:0]}
+                                    uc_mem_addr_r    <= macro_ea + 32'd4;    // base[31:16] at offset 4
                                     uc_mem_data_r    <= 32'd0;
                                     uc_mem_esp_new_r <= 32'd0;
                                 end
@@ -2539,6 +2593,13 @@ module f386_ooo_core_top (
                                     uc_mem_data_r    <= 32'd0;
                                     uc_mem_esp_new_r <= 32'd0;
                                     uc_far_phase     <= 1'b0;
+                                end
+                                UCMD_INT_ENTER: begin
+                                    // Real mode: read 4-byte IVT entry at vector * 4
+                                    // IVT layout: [offset:16][segment:16]
+                                    uc_mem_addr_r    <= {22'd0, macro_imm[7:0], 2'd0};
+                                    uc_mem_data_r    <= 32'd0;
+                                    uc_mem_esp_new_r <= 32'd0;
                                 end
                                 default: begin
                                     // Generic LOAD/STORE: address from macro EA
@@ -2561,14 +2622,17 @@ module f386_ooo_core_top (
                     end
 
                     UM_ISSUE: begin
-                        if (uc_mem_is_load_r)
+                        if (uc_mem_is_load_r && !uc_load_pipe_busy) begin
                             uc_mem_state <= UM_LOAD_WAIT;
-                        else
+                        end else if (!uc_mem_is_load_r)
                             uc_mem_state <= UM_IDLE;  // Store: done at issue
+                        // else: stay in UM_ISSUE until load pipe is free
                     end
 
                     UM_LOAD_WAIT: begin
-                        if (lsq_cdb1_active) begin
+                        if (uc_cdb1_match) begin
+                            // Forward load result for next micro-op
+                            uc_prev_load_result <= cdb1_data[31:0];
                             if ((uc_mem_special_r == UCMD_FAR_CALL ||
                                  uc_mem_special_r == UCMD_LOAD_SEG) && !uc_far_phase) begin
                                 // Phase 0 complete: latch low dword, issue second read
@@ -2578,6 +2642,16 @@ module f386_ooo_core_top (
                                 uc_mem_state     <= UM_ALLOC;  // Re-enter for second load
                             end else begin
                                 uc_mem_state     <= UM_IDLE;   // Normal completion
+                            end
+                            // IRET: latch popped values (EIP then CS)
+                            if (uc_mem_special_r == UCMD_POP_POST &&
+                                macro_opcode == 8'hCF) begin
+                                if (!uc_iret_pop_phase) begin
+                                    uc_iret_eip       <= cdb1_data[31:0];
+                                    uc_iret_pop_phase <= 1'b1;
+                                end else begin
+                                    uc_iret_cs        <= cdb1_data[31:0];
+                                end
                             end
                         end
                     end
@@ -2591,7 +2665,7 @@ module f386_ooo_core_top (
         assign uc_mem_ld_dispatch      = (uc_mem_state == UM_ALLOC) && uc_mem_is_load_r && !uc_lsq_lq_full;
         assign uc_mem_st_dispatch      = (uc_mem_state == UM_ALLOC) && !uc_mem_is_load_r && !uc_lsq_sq_full;
         assign uc_mem_dispatch_rob_tag = macro_rob_tag;
-        assign uc_mem_ld_fire          = (uc_mem_state == UM_ISSUE) && uc_mem_is_load_r;
+        assign uc_mem_ld_fire          = (uc_mem_state == UM_ISSUE) && uc_mem_is_load_r && !uc_load_pipe_busy;
         assign uc_mem_st_fire          = (uc_mem_state == UM_ISSUE) && !uc_mem_is_load_r;
         assign uc_mem_addr             = uc_mem_addr_r;
         assign uc_mem_lq_idx           = uc_mem_lq_idx_r;
@@ -2610,7 +2684,7 @@ module f386_ooo_core_top (
         wire esp_is_pop  = (uc_mem_special_r == UCMD_POP_POST) ||
                            (uc_mem_special_r == UCMD_POP_FLAGS);
         assign uc_mem_esp_cdb0_fire = (uc_mem_state == UM_ISSUE && !uc_mem_is_load_r && esp_is_push) ||
-                                       (uc_mem_state == UM_LOAD_WAIT && lsq_cdb1_active && esp_is_pop);
+                                       (uc_mem_state == UM_LOAD_WAIT && uc_cdb1_match && esp_is_pop);
         assign uc_mem_esp_cdb0_data = uc_mem_esp_new_r;
         assign uc_mem_esp_phys_dest = rename_com_map[3'd4];  // ESP = arch reg 4
 
@@ -2792,6 +2866,7 @@ module f386_ooo_core_top (
         logic ucode_has_eflags_cmd;
         assign ucode_has_eflags_cmd = (seq_uop_special_cmd inside {
             UCMD_CLC, UCMD_STC, UCMD_CMC, UCMD_CLD, UCMD_STD,
+            UCMD_CLI, UCMD_STI,
             UCMD_POP_FLAGS});
 
         always_comb begin
@@ -2817,6 +2892,14 @@ module f386_ooo_core_top (
                 UCMD_STD: begin  // Set DF
                     ucode_eflags_mask[EFLAGS_DF] = 1'b1;
                     ucode_eflags_din[EFLAGS_DF]  = 1'b1;
+                end
+                UCMD_CLI: begin  // Clear IF
+                    ucode_eflags_mask[EFLAGS_IF] = 1'b1;
+                    ucode_eflags_din[EFLAGS_IF]  = 1'b0;
+                end
+                UCMD_STI: begin  // Set IF
+                    ucode_eflags_mask[EFLAGS_IF] = 1'b1;
+                    ucode_eflags_din[EFLAGS_IF]  = 1'b1;
                 end
                 UCMD_POP_FLAGS: begin  // Pop EFLAGS from stack
                     // Writable: CF,PF,AF,ZF,SF,TF,IF,DF,OF,IOPL,NT,AC,ID
@@ -2906,18 +2989,55 @@ module f386_ooo_core_top (
             16'hFFFF                    // [15:0]  limit=0xFFFF
         };
 
-        assign ucode_seg_we    = uc_far_commit || uc_load_seg_commit;
-        assign ucode_seg_idx   = uc_far_commit ? SEG_CS : seg_idx_t'(macro_modrm_reg);
-        assign ucode_seg_sel   = uc_far_commit ? macro_far_sel : seg_load_selector;
-        assign ucode_seg_cache = uc_far_commit ?
-            (pe_mode ? gdt_desc : real_mode_cs_cache) :
+        // INT_ENTER commits (IVT read completes)
+        wire uc_int_enter_commit = uc_mem_done && (uc_mem_special_r == UCMD_INT_ENTER);
+
+        // INT_EXIT commits (IRET regonly)
+        wire uc_int_exit_commit = uc_regonly_done && (seq_uop_special_cmd == UCMD_INT_EXIT);
+
+        // INT_ENTER: IVT dword = {segment[31:16], offset[15:0]}
+        wire [15:0] ivt_segment = cdb1_data[31:16];
+        wire [15:0] ivt_offset  = cdb1_data[15:0];
+
+        // INT_EXIT: CS selector from IRET latched POP
+        wire [15:0] iret_cs_sel = uc_iret_cs[15:0];
+
+        // Real-mode CS cache builder for INT (same pattern as far JMP)
+        wire [15:0] int_cs_sel = uc_int_enter_commit ? ivt_segment : iret_cs_sel;
+        wire [31:0] rm_int_cs_base = {12'd0, int_cs_sel, 4'd0};
+        wire [63:0] real_mode_int_cs_cache = {
+            rm_int_cs_base[31:24],     // [63:56] base[31:24]
+            8'h00,                      // [55:48] G=0, D/B=0
+            8'h9B,                      // [47:40] P=1, DPL=00, S=1, type=code-RX-accessed
+            rm_int_cs_base[23:16],     // [39:32] base[23:16]
+            rm_int_cs_base[15:0],      // [31:16] base[15:0]
+            16'hFFFF                    // [15:0]  limit=0xFFFF
+        };
+
+        wire uc_int_commit = uc_int_enter_commit || uc_int_exit_commit;
+
+        assign ucode_seg_we    = uc_far_commit || uc_load_seg_commit || uc_int_commit;
+        assign ucode_seg_idx   = (uc_far_commit || uc_int_commit) ? SEG_CS :
+                                  seg_idx_t'(macro_modrm_reg);
+        assign ucode_seg_sel   = uc_far_commit   ? macro_far_sel :
+                                  uc_int_commit   ? int_cs_sel :
+                                  seg_load_selector;
+        assign ucode_seg_cache = (uc_far_commit || uc_int_commit) ?
+            (pe_mode ? gdt_desc : (uc_far_commit ? real_mode_cs_cache : real_mode_int_cs_cache)) :
             (pe_mode ? gdt_desc : real_mode_data_cache);
 
         // ---------------------------------------------------------
-        // PC redirect (far JMP: flush pipeline, redirect to new EIP)
+        // PC redirect (far JMP / INT / IRET: flush pipeline, redirect)
         // ---------------------------------------------------------
-        assign ucode_redirect_valid = uc_far_commit;
-        assign ucode_redirect_pc    = macro_imm;  // New EIP from far JMP offset
+        assign ucode_redirect_valid = uc_far_commit || uc_int_commit;
+        // PC redirect must produce a LINEAR address since fetch_addr = pc_current.
+        // Real mode: linear = CS.base + offset = (selector << 4) + offset
+        // PE mode: linear = GDT_CS_base + offset (base extracted from descriptor)
+        wire [31:0] gdt_cs_base = {gdt_desc[63:56], gdt_desc[39:32], gdt_desc[31:16]};
+        wire [31:0] far_redirect_base = pe_mode ? gdt_cs_base : rm_cs_base;
+        assign ucode_redirect_pc    = uc_far_commit      ? (far_redirect_base + macro_imm) :
+                                      uc_int_enter_commit ? (rm_int_cs_base + {16'd0, ivt_offset}) :
+                                      (rm_int_cs_base + uc_iret_eip);  // INT_EXIT
 
         // CR write flush redirect: next fetch block after microcode instruction
         // (V-pipe is always suppressed for OP_MICROCODE, so next block is correct)
@@ -2935,13 +3055,13 @@ module f386_ooo_core_top (
                     && seq_uop_special_cmd != UCMD_STORE_CR
                     && seq_uop_special_cmd != UCMD_LOAD_DTR
                     && seq_uop_special_cmd != UCMD_FAR_CALL
-                    && seq_uop_special_cmd != UCMD_LOAD_SEG) begin
+                    && seq_uop_special_cmd != UCMD_LOAD_SEG
+                    && seq_uop_special_cmd != UCMD_INT_ENTER
+                    && seq_uop_special_cmd != UCMD_INT_EXIT) begin
                     case (seq_uop_special_cmd)
                         UCMD_STORE_DTR,                    // deferred P3.2+
                         UCMD_STORE_SEG,                    // deferred P3.4+
-                        UCMD_INT_ENTER, UCMD_INT_EXIT,     // deferred P3.3
                         UCMD_LAHF, UCMD_SAHF,              // deferred
-                        UCMD_CLI, UCMD_STI,                // deferred P3.2+ (IOPL)
                         UCMD_HALT: begin end                // deferred P3.2+
                         default: begin end
                     endcase

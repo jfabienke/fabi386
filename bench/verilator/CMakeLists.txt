@@ -278,6 +278,38 @@ verilate(tb_ooo_core_tlb
 )
 
 # ============================================================
+# Test: ALU Opcode Encoding (P3.ALU)
+# ============================================================
+verilate(tb_ooo_core_alu
+    SOURCES
+        ${RTL_ROOT}/top/f386_pkg.sv
+        ${RTL_ROOT}/primitives/f386_distributed_ram.sv
+        ${RTL_ROOT}/primitives/f386_block_ram.sv
+        ${RTL_ROOT}/primitives/f386_picker.sv
+        ${RTL_ROOT}/primitives/f386_freelist_multiwidth.sv
+        ${RTL_ROOT}/core/f386_alu.v
+        ${RTL_ROOT}/core/f386_alu_simd.sv
+        ${RTL_ROOT}/core/f386_branch_predict_gshare.sv
+        ${RTL_ROOT}/core/f386_branch_predict_hybrid.sv
+        ${RTL_ROOT}/core/f386_branch_predict.sv
+        ${RTL_ROOT}/core/f386_decode.sv
+        ${RTL_ROOT}/core/f386_decode_cache.sv
+        ${RTL_ROOT}/core/f386_dispatch.sv
+        ${RTL_ROOT}/core/f386_execute_stage.sv
+        ${RTL_ROOT}/core/f386_issue_queue.sv
+        ${RTL_ROOT}/core/f386_microcode_rom.sv
+        ${RTL_ROOT}/core/f386_microcode_sequencer.sv
+        ${RTL_ROOT}/core/f386_register_rename.sv
+        ${RTL_ROOT}/core/f386_rob.sv
+        ${RTL_ROOT}/core/f386_seg_cache.sv
+        ${RTL_ROOT}/core/f386_ooo_core_top.sv
+    TOP_MODULE f386_ooo_core_top
+    CPP_SOURCES test_ooo_core_alu.cpp memory_model.h
+    FLAGS ${VERILATOR_COMMON_FLAGS}
+    INCLUDE_DIRS ${RTL_INCLUDE_DIRS}
+)
+
+# ============================================================
 # CTest integration
 # ============================================================
 enable_testing()
@@ -292,3 +324,4 @@ add_test(NAME page_walker COMMAND test_page_walker)
 add_test(NAME dtlb_frontend COMMAND test_dtlb_frontend)
 add_test(NAME ooo_core_ucode_mem COMMAND tb_ooo_core_ucode_mem)
 add_test(NAME ooo_core_tlb COMMAND tb_ooo_core_tlb)
+add_test(NAME ooo_core_alu COMMAND tb_ooo_core_alu)

@@ -79,12 +79,16 @@ module f386_execute_stage (
     // 1. Functional Unit Instantiation
     // =================================================================
 
+    // --- ALU op_b mux: route immediate for OP_ALU_IMM ---
+    wire [31:0] alu_u_op_b = (u_instr.op_category == OP_ALU_IMM) ? u_instr.imm_value : u_op_b;
+    wire [31:0] alu_v_op_b = (v_instr.op_category == OP_ALU_IMM) ? v_instr.imm_value : v_op_b;
+
     // --- Primary ALU (U-Pipe) ---
     logic [31:0] alu_u_res;
     logic [5:0]  alu_u_flags;
     f386_alu alu_u_inst (
         .op_a     (u_op_a),
-        .op_b     (u_op_b),
+        .op_b     (alu_u_op_b),
         .alu_op   (u_instr.opcode[5:0]),
         .cin      (u_instr.flags_in[0]),     // CF from EFLAGS
         .result   (alu_u_res),
@@ -96,7 +100,7 @@ module f386_execute_stage (
     logic [5:0]  alu_v_flags;
     f386_alu alu_v_inst (
         .op_a     (v_op_a),
-        .op_b     (v_op_b),
+        .op_b     (alu_v_op_b),
         .alu_op   (v_instr.opcode[5:0]),
         .cin      (v_instr.flags_in[0]),     // CF from EFLAGS
         .result   (alu_v_res),
@@ -315,14 +319,19 @@ module f386_execute_stage (
             case (u_instr.op_category)
 
                 OP_ALU_REG, OP_ALU_IMM: begin
-                    wb_data_u       = alu_u_res;
-                    wb_flags        = alu_u_flags;
+                    if (u_instr.opcode[7]) begin
+                        // Bypass: MOV/NOP passthrough — no ALU
+                        wb_data_u = (u_instr.op_category == OP_ALU_IMM) ? u_instr.imm_value : u_op_a;
+                        wb_flags  = 6'd0;
+                    end else begin
+                        wb_data_u = alu_u_res;
+                        wb_flags  = alu_u_flags;
+                    end
                     wb_we_u         = 1'b1;
-                    // CDB writeback to ROB (flags travel with data)
                     cdb0_valid      = 1'b1;
                     cdb0_tag        = u_instr.rob_tag;
-                    cdb0_data       = alu_u_res;
-                    cdb0_flags      = alu_u_flags;
+                    cdb0_data       = wb_data_u;
+                    cdb0_flags      = wb_flags;
                     cdb0_flags_mask = u_instr.flags_mask;
                     cdb0_exception  = 1'b0;
                 end
@@ -461,6 +470,9 @@ module f386_execute_stage (
                     if (v_instr.opcode[7:4] == 4'hF) begin
                         wb_data_v  = simd_res;
                         // SIMD ops don't produce ALU flags
+                    end else if (v_instr.opcode[7]) begin
+                        // Bypass: MOV/NOP passthrough — no ALU
+                        wb_data_v = (v_instr.op_category == OP_ALU_IMM) ? v_instr.imm_value : v_op_a;
                     end else begin
                         wb_data_v       = alu_v_res;
                         wb_flags        = alu_v_flags;

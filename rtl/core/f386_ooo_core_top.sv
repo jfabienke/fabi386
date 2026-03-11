@@ -791,6 +791,21 @@ module f386_ooo_core_top (
     // Micro-ops write committed physical registers directly via CDB→PRF
     wire ucode_dest_suppress = (dec_instr_u.op_cat == OP_MICROCODE);
 
+    // CDB data bypass for same-cycle dispatch.
+    // The busy table sees CDB clears combinationally (busy_next), so a source
+    // register cleared by CDB this cycle shows as "ready".  The PRF write is
+    // registered (non-blocking), so the PRF read returns stale data.  Bypass
+    // the CDB data into val_a/val_b to match the busy table's view.
+    wire cdb0_fwd_u_a = cdb0_wr_valid && (cdb0_phys_dest == src_phys_a);
+    wire cdb1_fwd_u_a = cdb1_wr_valid && (cdb1_phys_dest == src_phys_a);
+    wire cdb0_fwd_u_b = cdb0_wr_valid && (cdb0_phys_dest == src_phys_b);
+    wire cdb1_fwd_u_b = cdb1_wr_valid && (cdb1_phys_dest == src_phys_b);
+
+    wire cdb0_fwd_v_a = cdb0_wr_valid && (cdb0_phys_dest == src_phys_c);
+    wire cdb1_fwd_v_a = cdb1_wr_valid && (cdb1_phys_dest == src_phys_c);
+    wire cdb0_fwd_v_b = cdb0_wr_valid && (cdb0_phys_dest == src_phys_d);
+    wire cdb1_fwd_v_b = cdb1_wr_valid && (cdb1_phys_dest == src_phys_d);
+
     always_comb begin
         patched_u             = dec_instr_u;
         patched_u.rob_tag     = rob_tag_u;
@@ -801,8 +816,10 @@ module f386_ooo_core_top (
         patched_u.p_src_b     = src_phys_b;
         patched_u.src_a_ready = !src_busy_a;
         patched_u.src_b_ready = !src_busy_b;
-        patched_u.val_a       = prf_data_a;
-        patched_u.val_b       = prf_data_b;
+        patched_u.val_a       = cdb0_fwd_u_a ? cdb0_data :
+                                cdb1_fwd_u_a ? cdb1_data : prf_data_a;
+        patched_u.val_b       = cdb0_fwd_u_b ? cdb0_data :
+                                cdb1_fwd_u_b ? cdb1_data : prf_data_b;
         patched_u.addr_base_valid  = dec_u_addr_base_valid;
         patched_u.addr_index_valid = dec_u_addr_index_valid;
         patched_u.addr_scale  = dec_u_addr_scale;
@@ -819,8 +836,10 @@ module f386_ooo_core_top (
         patched_v.p_src_b     = src_phys_d;
         patched_v.src_a_ready = !src_busy_c;
         patched_v.src_b_ready = !src_busy_d;
-        patched_v.val_a       = prf_data_c;
-        patched_v.val_b       = prf_data_d;
+        patched_v.val_a       = cdb0_fwd_v_a ? cdb0_data :
+                                cdb1_fwd_v_a ? cdb1_data : prf_data_c;
+        patched_v.val_b       = cdb0_fwd_v_b ? cdb0_data :
+                                cdb1_fwd_v_b ? cdb1_data : prf_data_d;
         patched_v.addr_base_valid  = dec_v_addr_base_valid;
         patched_v.addr_index_valid = dec_v_addr_index_valid;
         patched_v.addr_scale  = dec_v_addr_scale;
@@ -1058,7 +1077,9 @@ module f386_ooo_core_top (
         exec_u_instr.imm_value   = iq_issue_instr.imm_value;
         exec_u_instr.flags_in    = alu_flags_current;
         exec_u_instr.flags_mask  = (iq_issue_instr.op_cat == OP_ALU_REG ||
-                                    iq_issue_instr.op_cat == OP_ALU_IMM) ? 6'b111111 : 6'b000000;
+                                    iq_issue_instr.op_cat == OP_ALU_IMM) ?
+                                   (iq_issue_instr.opcode[6] ? 6'b000000 : 6'b111111) :
+                                   6'b000000;
         exec_u_instr.pred_taken  = bp_predict_taken;
         exec_u_instr.pred_target = bp_next_pc;
         exec_u_instr.sem_tag     = SEM_NONE;  // Populated by decoder in future
@@ -1080,7 +1101,9 @@ module f386_ooo_core_top (
         exec_v_instr.imm_value   = patched_v.imm_value;
         exec_v_instr.flags_in    = alu_flags_current;
         exec_v_instr.flags_mask  = (patched_v.op_cat == OP_ALU_REG ||
-                                    patched_v.op_cat == OP_ALU_IMM) ? 6'b111111 : 6'b000000;
+                                    patched_v.op_cat == OP_ALU_IMM) ?
+                                   (patched_v.opcode[6] ? 6'b000000 : 6'b111111) :
+                                   6'b000000;
         exec_v_instr.pred_taken  = 1'b0;
         exec_v_instr.pred_target = 32'd0;
         exec_v_instr.sem_tag     = SEM_NONE;

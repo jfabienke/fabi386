@@ -932,6 +932,159 @@ module f386_decode (
         endcase
     endfunction
 
+    // --- ALU Opcode Re-encoding Helpers ---
+    // x86 Grp1 operation encoding → ALU internal op
+    // x86: 000=ADD 001=OR 010=ADC 011=SBB 100=AND 101=SUB 110=XOR 111=CMP
+    function automatic logic [3:0] grp1_to_alu(logic [2:0] x86_op);
+        case (x86_op)
+            3'd0: return 4'h0;  // ADD
+            3'd1: return 4'h3;  // OR
+            3'd2: return 4'h8;  // ADC
+            3'd3: return 4'h9;  // SBB
+            3'd4: return 4'h2;  // AND
+            3'd5: return 4'h1;  // SUB
+            3'd6: return 4'h4;  // XOR
+            3'd7: return 4'h1;  // CMP = SUB (dest_valid=0 handles no-writeback)
+        endcase
+    endfunction
+
+    // x86 Grp2 shift/rotate encoding → ALU internal op
+    function automatic logic [3:0] grp2_to_alu(logic [2:0] x86_op);
+        case (x86_op)
+            3'd0: return 4'hE;  // ROL
+            3'd1: return 4'hF;  // ROR
+            3'd2: return 4'hE;  // RCL → ROL placeholder
+            3'd3: return 4'hF;  // RCR → ROR placeholder
+            3'd4: return 4'h5;  // SHL
+            3'd5: return 4'h6;  // SHR
+            3'd6: return 4'h5;  // SAL = SHL
+            3'd7: return 4'h7;  // SAR
+        endcase
+    endfunction
+
+    // Re-encode raw x86 opcode → ALU-internal format {bypass, no_flags, opsz, alu_op}
+    // Only called for OP_ALU_REG / OP_ALU_IMM, one-byte (non-0F) opcodes
+    function automatic logic [7:0] encode_alu_op(predecode_t pd);
+        logic [3:0] alu_op;
+        logic [1:0] opsz;
+        logic       bypass, no_flags;
+        logic [1:0] wd_sz;
+
+        bypass   = 1'b0;
+        no_flags = 1'b0;
+        alu_op   = 4'h0;
+        wd_sz    = pd.eff_op32 ? 2'b00 : 2'b01;  // 32 or 16 from prefix/mode
+        opsz     = wd_sz;
+
+        casez (pd.opcode)
+            // --- Standard ALU + accumulator-immediate (00-3F) ---
+            8'b00??????: begin
+                alu_op = grp1_to_alu(pd.opcode[5:3]);
+                if (!pd.opcode[0]) opsz = 2'b10;  // byte form
+            end
+
+            // --- INC (40-47) / DEC (48-4F) ---
+            8'b0100????: begin
+                alu_op = pd.opcode[3] ? 4'hD : 4'hC;
+            end
+
+            // --- Grp1 (80-83) — operation in reg_field ---
+            8'b100000??: begin
+                alu_op = grp1_to_alu(pd.reg_field);
+                if (!pd.opcode[0]) opsz = 2'b10;  // 80/82 = byte
+            end
+
+            // --- TEST r/m,r (84/85) ---
+            8'h84, 8'h85: begin
+                alu_op = 4'h2;  // AND (flags only, dest_valid=0)
+                if (!pd.opcode[0]) opsz = 2'b10;
+            end
+
+            // --- XCHG r,r/m (86/87) — placeholder bypass ---
+            8'h86, 8'h87: begin
+                bypass = 1'b1; no_flags = 1'b1;
+                if (!pd.opcode[0]) opsz = 2'b10;
+            end
+
+            // --- MOV reg,reg (88-8B) — bypass ---
+            8'b100010??: begin
+                bypass = 1'b1; no_flags = 1'b1;
+                if (!pd.opcode[0]) opsz = 2'b10;
+            end
+
+            // --- MOV r/m,Sreg (8C) — bypass ---
+            8'h8C: begin
+                bypass = 1'b1; no_flags = 1'b1;
+            end
+
+            // --- LEA (8D) — bypass, result is computed_ea ---
+            8'h8D: begin
+                bypass = 1'b1; no_flags = 1'b1;
+            end
+
+            // --- NOP (90) ---
+            8'h90: begin
+                bypass = 1'b1; no_flags = 1'b1;
+            end
+
+            // --- TEST AL/eAX,imm (A8/A9) ---
+            8'hA8, 8'hA9: begin
+                alu_op = 4'h2;  // AND
+                if (!pd.opcode[0]) opsz = 2'b10;
+            end
+
+            // --- MOV reg,imm (B0-BF) — bypass ---
+            8'b1011????: begin
+                bypass = 1'b1; no_flags = 1'b1;
+                if (!pd.opcode[3]) opsz = 2'b10;  // B0-B7 = 8-bit
+            end
+
+            // --- Grp2 shift/rotate (C0/C1) ---
+            8'hC0, 8'hC1: begin
+                alu_op = grp2_to_alu(pd.reg_field);
+                if (!pd.opcode[0]) opsz = 2'b10;
+            end
+
+            // --- MOV r/m,imm (C6/C7) — bypass ---
+            8'hC6, 8'hC7: begin
+                bypass = 1'b1; no_flags = 1'b1;
+                if (!pd.opcode[0]) opsz = 2'b10;
+            end
+
+            // --- Grp2 shift/rotate (D0-D3) ---
+            8'hD0, 8'hD1, 8'hD2, 8'hD3: begin
+                alu_op = grp2_to_alu(pd.reg_field);
+                if (!pd.opcode[0]) opsz = 2'b10;
+            end
+
+            // --- Grp3 TEST/NOT/NEG (F6/F7) ---
+            8'hF6, 8'hF7: begin
+                if (!pd.opcode[0]) opsz = 2'b10;
+                case (pd.reg_field[1:0])
+                    2'b00, 2'b01: alu_op = 4'h2;   // TEST → AND
+                    2'b10: begin
+                        alu_op = 4'hA;               // NOT
+                        no_flags = 1'b1;
+                    end
+                    2'b11: alu_op = 4'hB;            // NEG
+                endcase
+            end
+
+            // --- Grp4/5 INC/DEC (FE/FF) ---
+            8'hFE, 8'hFF: begin
+                if (!pd.opcode[0]) opsz = 2'b10;
+                alu_op = pd.reg_field[0] ? 4'hD : 4'hC;
+            end
+
+            // --- Default: safe bypass for unhandled ---
+            default: begin
+                bypass = 1'b1; no_flags = 1'b1;
+            end
+        endcase
+
+        return {bypass, no_flags, opsz, alu_op};
+    endfunction
+
     //
     // Map opcode to op_type_t for the OoO pipeline. This determines which
     // execution unit handles the instruction.
@@ -1230,7 +1383,11 @@ module f386_decode (
 
         // Shift/Rotate Grp2 (C0/C1/D0/D1/D2/D3)
         case (pd.opcode)
-            8'hC0, 8'hC1, 8'hD0, 8'hD1, 8'hD2, 8'hD3:
+            // C0/C1: shift by imm8 — ALU op_b = immediate (shift count)
+            8'hC0, 8'hC1:
+                return (pd.mod != 2'b11) ? OP_LOAD : OP_ALU_IMM;
+            // D0-D3: shift by 1 or CL — ALU op_b from register/implicit
+            8'hD0, 8'hD1, 8'hD2, 8'hD3:
                 return (pd.mod != 2'b11) ? OP_LOAD : OP_ALU_REG;
             default: ;
         endcase
@@ -2414,6 +2571,20 @@ module f386_decode (
             else if (pd_u.opcode == 8'hBC && pd_u.pref_rep == 2'b10)
                 u_encoded_opcode = {4'd0, pd_u.pref_66 ? 2'b01 : 2'b10, 2'b10};
         end
+        // ALU re-encoding (one-byte opcodes only)
+        else if (!pd_u.is_0f &&
+                 (classify_op(pd_u) == OP_ALU_REG || classify_op(pd_u) == OP_ALU_IMM)) begin
+            u_encoded_opcode = encode_alu_op(pd_u);
+        end
+    end
+
+    logic [7:0] v_encoded_opcode;
+    always_comb begin
+        v_encoded_opcode = pd_v.opcode;
+        if (!pd_v.is_0f &&
+            (classify_op(pd_v) == OP_ALU_REG || classify_op(pd_v) == OP_ALU_IMM)) begin
+            v_encoded_opcode = encode_alu_op(pd_v);
+        end
     end
 
     // --- Stage 2 Output Register ---
@@ -2524,7 +2695,7 @@ module f386_decode (
             instr_v.valid       <= v_eligible;
             instr_v.pc          <= v_pc_r;
             instr_v.raw_instr   <= v_raw;
-            instr_v.opcode      <= pd_v.opcode;
+            instr_v.opcode      <= v_encoded_opcode;
             instr_v.op_cat      <= classify_op(pd_v);
             instr_v.p_dest      <= {2'b0, ru_v.dest};
             instr_v.dest_valid  <= ru_v.dest_valid;

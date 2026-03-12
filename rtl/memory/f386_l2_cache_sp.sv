@@ -21,6 +21,22 @@
  *       16 data BRAMs (4 ways x 4 words).  tag_valid and plru_bits remain
  *       in flip-flops.
  *
+ * v2.2: Secondary miss coalescing.  When a data-port load miss hits an
+ *       already-active MSHR (same cache line), the request is enqueued
+ *       in the MSHR's secondary queue (up to 3 per MSHR) instead of
+ *       stalling.  After the primary response, secondaries are drained
+ *       one per cycle from MH_COMPLETE before transitioning to MH_FREE.
+ *       If all 3 secondary slots are full, or the MSHR is already in
+ *       MH_COMPLETE, mshr_conflict still stalls. Stores are not
+ *       coalesced (they need write-allocate merge at install time).
+ *
+ * v2.3: Non-blocking ifetch/PT path.  Ifetch (non-cross-line) and PT read
+ *       misses now allocate MSHRs from the shared pool instead of stalling
+ *       the lookup pipeline.  At MH_COMPLETE, responses are routed to the
+ *       correct port based on per-MSHR source tracking (mh_source).
+ *       Cross-line ifetch misses and PT writes still use the blocking path.
+ *       Falls back to blocking path when no MSHR is free.
+ *
  * Feature-gated by CONF_ENABLE_MEM_FABRIC.
  */
 
@@ -250,8 +266,16 @@ module f386_l2_cache_sp (
         MH_COMPLETE     = 4'd7    // Response ready to deliver
     } mh_state_t;
 
+    // Per-MSHR source tracking (v2.3: non-blocking ifetch/PT)
+    typedef enum logic [1:0] {
+        MH_SRC_DATA   = 2'd0,
+        MH_SRC_IFETCH = 2'd1,
+        MH_SRC_PT     = 2'd2
+    } mh_source_t;
+
     // Per-MSHR state
     mh_state_t                         mh_state       [NUM_MSHR];
+    mh_source_t                        mh_source      [NUM_MSHR];
     logic [TAG_W-1:0]                  mh_tag         [NUM_MSHR];
     logic [INDEX_W-1:0]                mh_set_idx     [NUM_MSHR];
     logic [WORD_SEL_W-1:0]             mh_word_ofs    [NUM_MSHR];
@@ -270,6 +294,14 @@ module f386_l2_cache_sp (
     logic [1:0]                        mh_wb_cnt      [NUM_MSHR];
     logic [1:0]                        mh_fill_cnt    [NUM_MSHR];
     logic                              mh_fill_rd_issued [NUM_MSHR];
+
+    // Secondary miss coalescing queues (up to 3 secondaries per MSHR)
+    // 2-bit count: 0 = empty, 3 = full. Drain pointer indexes next to deliver.
+    localparam int NUM_SEC = 3;
+    logic [CONF_MEM_REQ_ID_W-1:0]      mh_sec_id      [NUM_MSHR][NUM_SEC];
+    logic [WORD_SEL_W-1:0]             mh_sec_ofs     [NUM_MSHR][NUM_SEC];
+    logic [1:0]                        mh_sec_count   [NUM_MSHR];
+    logic [1:0]                        mh_sec_drain   [NUM_MSHR]; // Drain pointer
 
     // =========================================================================
     // Lookup Pipeline States
@@ -368,14 +400,23 @@ module f386_l2_cache_sp (
 
     // MSHR conflict: new request matches set+tag of active MSHR
     wire [31:0] data_req_addr_a20 = apply_a20(data_req.addr, a20_gate);
-    logic mshr_conflict;
+    logic                  mshr_conflict;        // Any matching MSHR exists (stalls normal path)
+    logic                  mshr_sec_room;         // Matching MSHR has secondary queue room
+    logic [MSHR_ID_W-1:0]  mshr_conflict_id;     // Which MSHR matches
     always_comb begin
-        mshr_conflict = 1'b0;
+        mshr_conflict    = 1'b0;
+        mshr_sec_room    = 1'b0;
+        mshr_conflict_id = '0;
         for (int i = 0; i < NUM_MSHR; i++) begin
             if (mh_state[i] != MH_FREE &&
                 mh_set_idx[i] == addr_index(data_req_addr_a20) &&
-                mh_tag[i]     == addr_tag(data_req_addr_a20))
-                mshr_conflict = 1'b1;
+                mh_tag[i]     == addr_tag(data_req_addr_a20)) begin
+                mshr_conflict    = 1'b1;
+                mshr_conflict_id = MSHR_ID_W'(i);
+                // Secondary queue has room AND MSHR is not already draining
+                if (mh_sec_count[i] < 2'd3 && mh_state[i] != MH_COMPLETE)
+                    mshr_sec_room = 1'b1;
+            end
         end
     end
 
@@ -421,16 +462,30 @@ module f386_l2_cache_sp (
         end
     end
 
-    // MSHR completion: any MSHR in MH_COMPLETE
+    // MSHR completion: any MSHR in MH_COMPLETE (split by source)
     logic [MSHR_ID_W-1:0] mshr_complete_id;
-    logic                  mshr_any_complete;
+    logic                  mshr_any_complete;      // Any data-source MSHR ready
+    logic [MSHR_ID_W-1:0] mshr_nb_complete_id;
+    logic                  mshr_nb_ifetch_ready;   // Ifetch-source MSHR ready
+    logic                  mshr_nb_pt_ready;       // PT-source MSHR ready
     always_comb begin
-        mshr_any_complete = 1'b0;
-        mshr_complete_id  = '0;
+        mshr_any_complete   = 1'b0;
+        mshr_complete_id    = '0;
+        mshr_nb_ifetch_ready = 1'b0;
+        mshr_nb_pt_ready     = 1'b0;
+        mshr_nb_complete_id  = '0;
         for (int i = NUM_MSHR-1; i >= 0; i--) begin
             if (mh_state[i] == MH_COMPLETE) begin
-                mshr_any_complete = 1'b1;
-                mshr_complete_id  = MSHR_ID_W'(i);
+                if (mh_source[i] == MH_SRC_DATA) begin
+                    mshr_any_complete = 1'b1;
+                    mshr_complete_id  = MSHR_ID_W'(i);
+                end else if (mh_source[i] == MH_SRC_IFETCH) begin
+                    mshr_nb_ifetch_ready = 1'b1;
+                    mshr_nb_complete_id  = MSHR_ID_W'(i);
+                end else if (mh_source[i] == MH_SRC_PT) begin
+                    mshr_nb_pt_ready     = 1'b1;
+                    mshr_nb_complete_id  = MSHR_ID_W'(i);
+                end
             end
         end
     end
@@ -453,8 +508,16 @@ module f386_l2_cache_sp (
     // Uncacheable (MMIO) requests bypass MSHR checks — they go to LK_UC_ISSUE,
     // never allocate an MSHR, and don't conflict with in-flight cache lines.
     wire data_req_mshr_ok = mshr_any_free && !mshr_conflict && !mshr_starved;
+    // Coalescing path: conflict exists but secondary slot available.
+    // Coalesced requests bypass the lookup pipeline entirely (no MSHR alloc,
+    // no SRAM access), so they only need lk_idle + base conditions.
+    // Only loads can coalesce — stores need write-allocate merge at install.
+    wire data_req_coalesce_ok = mshr_conflict && mshr_sec_room
+                                && data_req.cacheable
+                                && (data_req.op == MEM_OP_LD);
     assign data_req_ready = data_req_base_ok &&
-                            (data_req_mshr_ok || !data_req.cacheable);
+                            (data_req_mshr_ok || data_req_coalesce_ok
+                             || !data_req.cacheable);
 
     // =========================================================================
     // Response Delivery Mux
@@ -509,9 +572,11 @@ module f386_l2_cache_sp (
     // =========================================================================
     logic [31:0] ctr_mshr_alloc;
     logic [31:0] ctr_mshr_stall_cyc;
+    logic [31:0] ctr_mshr_all_busy;     // P3.MSHR: cycles with all MSHRs active
     logic [31:0] ctr_hit_during_miss;
     logic [31:0] ctr_ddram_wb_bursts;
     logic [31:0] ctr_ddram_fill_bursts;
+    logic [31:0] ctr_mshr_coalesce;
 
     // Are any MSHRs active? (for hit-during-miss counting)
     logic any_mshr_active;
@@ -689,9 +754,11 @@ module f386_l2_cache_sp (
             rsp_last_was_lk <= 1'b0;
             ctr_mshr_alloc      <= 32'd0;
             ctr_mshr_stall_cyc  <= 32'd0;
+            ctr_mshr_all_busy   <= 32'd0;
             ctr_hit_during_miss <= 32'd0;
             ctr_ddram_wb_bursts <= 32'd0;
             ctr_ddram_fill_bursts <= 32'd0;
+            ctr_mshr_coalesce   <= 32'd0;
 
             for (int s = 0; s < NUM_SETS; s++) begin
                 tag_valid[s] <= '0;
@@ -700,6 +767,8 @@ module f386_l2_cache_sp (
             for (int m = 0; m < NUM_MSHR; m++) begin
                 mh_state[m]          <= MH_FREE;
                 mh_fill_rd_issued[m] <= 1'b0;
+                mh_sec_count[m]      <= 2'd0;
+                mh_sec_drain[m]      <= 2'd0;
             end
         end else begin
             // Pulse signals
@@ -714,8 +783,31 @@ module f386_l2_cache_sp (
                 rsp_last_was_lk <= 1'b1;
             end
             if (mshr_rsp_wins && data_rsp_ready) begin
-                mh_state[mshr_complete_id] <= MH_FREE;
+                if (mh_sec_count[mshr_complete_id] != 2'd0) begin
+                    // Drain next secondary: swap its ID/offset into primary fields
+                    mh_req_id  [mshr_complete_id] <= mh_sec_id [mshr_complete_id][mh_sec_drain[mshr_complete_id]];
+                    mh_word_ofs[mshr_complete_id] <= mh_sec_ofs[mshr_complete_id][mh_sec_drain[mshr_complete_id]];
+                    mh_sec_drain[mshr_complete_id] <= mh_sec_drain[mshr_complete_id] + 2'd1;
+                    mh_sec_count[mshr_complete_id] <= mh_sec_count[mshr_complete_id] - 2'd1;
+                    // Stay in MH_COMPLETE — response mux will pick up new ID/offset next cycle
+                end else begin
+                    mh_state[mshr_complete_id] <= MH_FREE;
+                end
                 rsp_last_was_lk <= 1'b0;
+            end
+
+            // v2.3: Non-blocking ifetch/PT completion delivery
+            // Self-consuming (no upstream handshake — pulse for 1 cycle)
+            if (mshr_nb_ifetch_ready) begin
+                ifetch_data  <= {mh_fill_buf[mshr_nb_complete_id][mh_word_ofs[mshr_nb_complete_id] + 2'd1],
+                                 mh_fill_buf[mshr_nb_complete_id][mh_word_ofs[mshr_nb_complete_id]]};
+                ifetch_valid <= 1'b1;
+                mh_state[mshr_nb_complete_id] <= MH_FREE;
+            end
+            if (mshr_nb_pt_ready && !mshr_nb_ifetch_ready) begin
+                pt_rdata <= mh_fill_buf[mshr_nb_complete_id][mh_word_ofs[mshr_nb_complete_id]][31:0];
+                pt_ack   <= 1'b1;
+                mh_state[mshr_nb_complete_id] <= MH_FREE;
             end
 
             // Credit management for SRAM interleaving
@@ -731,6 +823,9 @@ module f386_l2_cache_sp (
             // Perf: stall cycles (data_req_valid but not accepted)
             if (data_req_valid && !data_req_ready && lk_idle)
                 ctr_mshr_stall_cyc <= ctr_mshr_stall_cyc + 32'd1;
+            // P3.MSHR: all-busy utilization
+            if (!mshr_any_free && any_mshr_active)
+                ctr_mshr_all_busy <= ctr_mshr_all_busy + 32'd1;
 
             // ===========================================================
             // Lookup Pipeline FSM
@@ -759,6 +854,14 @@ module f386_l2_cache_sp (
                         lk_mshr_id  <= mshr_evict_id;
                         lk_mshr_cnt <= 2'd0;
                         lk_state    <= LK_MSHR_EVICT;
+                    end else if (data_req_valid && !rsp_buf_valid && data_req_coalesce_ok) begin
+                        // Secondary miss coalescing: enqueue into matching MSHR,
+                        // no SRAM access needed, stay in IDLE.
+                        mh_sec_id [mshr_conflict_id][mh_sec_count[mshr_conflict_id]] <= data_req.id;
+                        mh_sec_ofs[mshr_conflict_id][mh_sec_count[mshr_conflict_id]] <= addr_word(data_req_addr_a20);
+                        mh_sec_count[mshr_conflict_id] <= mh_sec_count[mshr_conflict_id] + 2'd1;
+                        ctr_mshr_coalesce <= ctr_mshr_coalesce + 32'd1;
+                        // lk_state stays LK_IDLE
                     end else if (data_req_valid && !rsp_buf_valid
                                  && (data_req_mshr_ok || !data_req.cacheable)) begin
                         arb_source    <= SRC_DATA;
@@ -828,9 +931,27 @@ module f386_l2_cache_sp (
                         endcase
                     end else begin
                         // --- MISS ---
-                        if (arb_source == SRC_DATA) begin
-                            // Allocate MSHR for data miss
+                        // v2.3: MSHR allocation for data, ifetch (non-cross-line), and PT reads
+                        // Falls back to blocking path when no MSHR available, or for
+                        // cross-line ifetch / PT writes, or MSHR set+tag conflict.
+                        // Check if any active MSHR already owns this cache line
+                        // (prevents duplicate set+tag allocation for ifetch/PT).
+                        automatic logic arb_mshr_conflict = 1'b0;
+                        for (int i = 0; i < NUM_MSHR; i++) begin
+                            if (mh_state[i] != MH_FREE &&
+                                mh_set_idx[i] == addr_index(arb_addr) &&
+                                mh_tag[i]     == addr_tag(arb_addr))
+                                arb_mshr_conflict = 1'b1;
+                        end
+
+                        if (arb_source == SRC_DATA ||
+                            (arb_source == SRC_IFETCH && !ifetch_cross_line && mshr_any_free && !arb_mshr_conflict) ||
+                            (arb_source == SRC_PT && !arb_wr && mshr_any_free && !arb_mshr_conflict)) begin
+                            // Allocate MSHR (non-blocking)
                             mh_state[mshr_free_id]       <= mh_evict_dirty_tmp ? MH_EVICT_PEND : MH_FILL_REQ;
+                            mh_source[mshr_free_id]      <= (arb_source == SRC_IFETCH) ? MH_SRC_IFETCH :
+                                                            (arb_source == SRC_PT)     ? MH_SRC_PT     :
+                                                                                         MH_SRC_DATA;
                             mh_tag[mshr_free_id]         <= addr_tag(arb_addr);
                             mh_set_idx[mshr_free_id]     <= addr_index(arb_addr);
                             mh_word_ofs[mshr_free_id]    <= addr_word(arb_addr);
@@ -845,12 +966,14 @@ module f386_l2_cache_sp (
                             mh_wb_cnt[mshr_free_id]      <= 2'd0;
                             mh_fill_cnt[mshr_free_id]    <= 2'd0;
                             mh_fill_rd_issued[mshr_free_id] <= 1'b0;
+                            mh_sec_count[mshr_free_id]   <= 2'd0;
+                            mh_sec_drain[mshr_free_id]   <= 2'd0;
 
                             ctr_mshr_alloc <= ctr_mshr_alloc + 32'd1;
                             lk_state <= LK_IDLE;  // Pipeline freed!
                         end else begin
-                            // ifetch/PT miss: blocking path
-                            // Prefer invalid way on cold sets; fall back to PLRU.
+                            // Blocking path fallback: cross-line ifetch, PT write,
+                            // or no MSHR free for ifetch/PT.
                             victim_way  <= select_victim(tag_valid_rd, plru_bits[addr_index(arb_addr)]);
                             evict_tag   <= tm_tag(tm_rd_data[select_victim(tag_valid_rd, plru_bits[addr_index(arb_addr)])]);
                             evict_dirty <= tag_valid_rd[select_victim(tag_valid_rd, plru_bits[addr_index(arb_addr)])] &&
@@ -1284,20 +1407,25 @@ module f386_l2_cache_sp (
     // Valid-ready contract: accepted request must transition to expected state
     logic        prev_data_accepted;
     logic        prev_data_cacheable;
+    logic        prev_data_coalesced;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             prev_data_accepted  <= 1'b0;
             prev_data_cacheable <= 1'b0;
+            prev_data_coalesced <= 1'b0;
         end else begin
             prev_data_accepted  <= data_req_valid && data_req_ready;
             prev_data_cacheable <= data_req.cacheable;
+            prev_data_coalesced <= data_req_coalesce_ok;
         end
     end
     always @(posedge clk) if (rst_n) begin
-        if (prev_data_accepted && prev_data_cacheable)
+        if (prev_data_accepted && prev_data_cacheable && !prev_data_coalesced)
             assert (lk_state == LK_TAG_RD)
                 else $error("L2_SP: cacheable req accepted but next state is %s (expected LK_TAG_RD)",
                             lk_state.name());
+        // Coalesced requests don't change lk_state — no transition assertion needed.
+        // (prev_data_coalesced covered by exclusion from the cacheable check above.)
         if (prev_data_accepted && !prev_data_cacheable)
             assert (lk_state == LK_UC_ISSUE)
                 else $error("L2_SP: uncacheable req accepted but next state is %s (expected LK_UC_ISSUE)",

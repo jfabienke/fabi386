@@ -42,6 +42,12 @@ module f386_exception_unit (
     input  rob_id_t      retire_rob_tag,
     input  logic [31:0]  retire_pc,          // PC of retiring instruction
     input  logic         retire_has_exc,     // This entry has an exception
+    input  logic [7:0]   retire_exc_vector,  // P3.EXC.b: from ROB exception metadata
+    input  logic [31:0]  retire_exc_code,
+    input  logic         retire_exc_has_error,
+
+    // --- Microcode completion feedback ---
+    input  logic         microcode_done,     // P3.EXC.b: exception handler complete
 
     // --- Exception Delivery (to microcode sequencer) ---
     output logic         deliver_exc,        // Start exception delivery
@@ -183,23 +189,25 @@ module f386_exception_unit (
                 EXC_IDLE: begin
                     // Check for exception at retirement
                     if (retire_valid && retire_has_exc) begin
-                        pending_vector     <= final_exc_vector;
-                        pending_error_code <= final_exc_error_code;
-                        pending_has_error  <= final_exc_has_error;
+                        // Use ROB-provided exception metadata (already decided at CDB time)
+                        pending_vector     <= retire_exc_vector;
+                        pending_error_code <= retire_exc_code;
+                        pending_has_error  <= retire_exc_has_error;
                         pending_eip        <= retire_pc;
-                        pending_cr2        <= final_exc_cr2;
+                        pending_cr2        <= (retire_exc_vector == EXC_PF) ?
+                                              exc_tlb_fault_addr : 32'd0;
 
                         // Deliver exception
                         deliver_exc        <= 1'b1;
-                        deliver_vector     <= final_exc_vector;
-                        deliver_error_code <= final_exc_error_code;
-                        deliver_has_error  <= final_exc_has_error;
+                        deliver_vector     <= retire_exc_vector;
+                        deliver_error_code <= retire_exc_code;
+                        deliver_has_error  <= retire_exc_has_error;
                         deliver_eip        <= retire_pc;
 
                         // Update CR2 for #PF
-                        if (final_exc_vector == EXC_PF) begin
+                        if (retire_exc_vector == EXC_PF) begin
                             cr2_we    <= 1'b1;
-                            cr2_value <= final_exc_cr2;
+                            cr2_value <= exc_tlb_fault_addr;
                         end
 
                         state <= EXC_DELIVER;
@@ -224,9 +232,8 @@ module f386_exception_unit (
 
                 EXC_WAIT_DONE: begin
                     // Wait for microcode exception handler to complete
-                    // For now, return to idle after one cycle
-                    // (Real implementation waits for microcode_done signal)
-                    state <= EXC_IDLE;
+                    if (microcode_done)
+                        state <= EXC_IDLE;
                 end
 
                 EXC_DOUBLE: begin

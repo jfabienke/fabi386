@@ -40,6 +40,9 @@ module f386_execute_stage (
     output logic [5:0]   cdb0_flags,       // ALU flags result {OF,SF,ZF,AF,PF,CF}
     output logic [5:0]   cdb0_flags_mask,  // Which flags this instruction writes
     output logic         cdb0_exception,
+    output logic [7:0]   cdb0_exc_vector,  // P3.EXC.a: exception vector
+    output logic [31:0]  cdb0_exc_code,    // P3.EXC.a: error code
+    output logic         cdb0_exc_has_error, // P3.EXC.a: error code valid
 
     output phys_reg_t    cdb0_phys_dest,   // Physical dest for PRF writeback
 
@@ -49,6 +52,9 @@ module f386_execute_stage (
     output logic [5:0]   cdb1_flags,
     output logic [5:0]   cdb1_flags_mask,
     output logic         cdb1_exception,
+    output logic [7:0]   cdb1_exc_vector,
+    output logic [31:0]  cdb1_exc_code,
+    output logic         cdb1_exc_has_error,
     output phys_reg_t    cdb1_phys_dest,   // Physical dest for PRF writeback
     output logic         cdb0_dest_valid,  // CDB0 result has a destination
     output logic         cdb1_dest_valid,  // CDB1 result has a destination
@@ -289,7 +295,10 @@ module f386_execute_stage (
         cdb0_data       = 32'd0;
         cdb0_flags      = 6'd0;
         cdb0_flags_mask = 6'd0;
-        cdb0_exception  = 1'b0;
+        cdb0_exception     = 1'b0;
+        cdb0_exc_vector    = 8'd0;
+        cdb0_exc_code      = 32'd0;
+        cdb0_exc_has_error = 1'b0;
         cdb0_phys_dest  = u_instr.phys_dest;
         cdb0_dest_valid = u_instr.dest_valid;
 
@@ -298,7 +307,10 @@ module f386_execute_stage (
         cdb1_data       = 32'd0;
         cdb1_flags      = 6'd0;
         cdb1_flags_mask = 6'd0;
-        cdb1_exception  = 1'b0;
+        cdb1_exception     = 1'b0;
+        cdb1_exc_vector    = 8'd0;
+        cdb1_exc_code      = 32'd0;
+        cdb1_exc_has_error = 1'b0;
         cdb1_phys_dest  = v_instr.phys_dest;
         cdb1_dest_valid = v_instr.dest_valid;
 
@@ -387,6 +399,7 @@ module f386_execute_stage (
                             cdb0_tag        = u_instr.rob_tag;
                             cdb0_data       = div_quotient;
                             cdb0_exception  = div_error;  // #DE
+                            cdb0_exc_vector = div_error ? EXC_DE : 8'd0;
                         end
                     end else begin
                         // MUL/IMUL — 2-cycle pipeline

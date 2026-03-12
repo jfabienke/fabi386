@@ -63,6 +63,7 @@ module f386_lsq_props (
         .flush             (flush),
         .ld_dispatch_valid (ld_dispatch_valid),
         .ld_dispatch_rob_tag(ld_dispatch_rob_tag),
+        .ld_dispatch_pc    (32'd0),
         .st_dispatch_valid (st_dispatch_valid),
         .st_dispatch_rob_tag(st_dispatch_rob_tag),
         .ld_dispatch_idx   (ld_dispatch_idx),

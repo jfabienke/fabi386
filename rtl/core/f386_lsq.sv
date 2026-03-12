@@ -39,6 +39,7 @@ module f386_lsq (
     // --- Dispatch Interface (from ROB) ---
     input  logic         ld_dispatch_valid,
     input  rob_id_t      ld_dispatch_rob_tag,
+    input  logic [31:0]  ld_dispatch_pc,        // Load PC (for MDP training)
     input  logic         st_dispatch_valid,
     input  rob_id_t      st_dispatch_rob_tag,
     output lq_idx_t      ld_dispatch_idx,
@@ -48,6 +49,7 @@ module f386_lsq (
 
     // --- Microcode Sideband Dispatch (mutually exclusive with normal dispatch) ---
     input  logic         uc_ld_dispatch_valid,
+    input  logic [31:0]  uc_ld_dispatch_pc,     // Microcode load PC (macro instruction PC)
     input  logic         uc_st_dispatch_valid,
     input  rob_id_t      uc_dispatch_rob_tag,
     output lq_idx_t      uc_ld_dispatch_idx,
@@ -76,6 +78,9 @@ module f386_lsq (
     output rob_id_t      ld_cdb_tag,
     output logic [31:0]  ld_cdb_data,
     output logic         ld_cdb_fault,
+    output logic [7:0]   ld_cdb_exc_vector,   // P3.EXC.a: exception vector
+    output logic [31:0]  ld_cdb_exc_code,      // P3.EXC.a: error code
+    output logic         ld_cdb_exc_has_error,  // P3.EXC.a: error code valid
 
     // --- Retirement Interface ---
     input  logic         retire_st_valid,
@@ -109,7 +114,12 @@ module f386_lsq (
 
     // --- Memory Dependency Predictor ---
     output logic         mdp_violation,      // Memory ordering violation detected
-    output logic [31:0]  mdp_violation_pc    // PC of the violated load
+    output logic [31:0]  mdp_violation_pc,   // PC of the violated load
+
+    // --- Store Drain Fault (P3.EXC.c) ---
+    output logic         sq_drain_fault,
+    output logic [7:0]   sq_drain_fault_vector,
+    output logic [31:0]  sq_drain_fault_code
 );
 
     localparam int LQ_N = CONF_LSQ_LQ_ENTRIES;  // 8
@@ -155,6 +165,7 @@ module f386_lsq (
     logic [3:0]        lq_byte_en [LQ_N];
     rob_id_t           lq_rob_tag [LQ_N];
     logic [31:0]       lq_data    [LQ_N];
+    logic [31:0]       lq_pc      [LQ_N];   // Load PC (for MDP violation training)
     // Note: lq_signed intentionally omitted — sign info flows through
     // ld_pipe_signed_r → ld_wait_signed → extraction. LQ replay, if
     // added later, should re-derive from lq_size + opcode.
@@ -189,9 +200,54 @@ module f386_lsq (
     assign uc_ld_dispatch_idx = lq_tail;
     assign uc_st_dispatch_idx = sq_tail;
 
-    // Default MDP signals
-    assign mdp_violation    = 1'b0;  // TODO: detect ordering violations at execute
-    assign mdp_violation_pc = 32'd0;
+    // =========================================================
+    // Memory Dependency Predictor — Violation Detection
+    // =========================================================
+    // When a store address resolves (agu_st_valid), scan the LQ for
+    // younger loads that have already executed with an overlapping address.
+    // If found, flag a memory ordering violation for MDP training.
+    generate
+        if (CONF_ENABLE_MEM_DEP_PRED) begin : gen_mdp
+            // ROB-order "younger" comparison: circular buffer distance.
+            // B is younger than A when B is between A and the tail (exclusive).
+            // With power-of-2 ROB, (b - a) mod N gives unsigned distance;
+            // if distance > 0 and < N/2, B is younger (dispatched later).
+            function automatic logic rob_is_younger(
+                input rob_id_t store_tag, input rob_id_t load_tag
+            );
+                logic [ROB_ID_WIDTH-1:0] diff;
+                diff = load_tag - store_tag;
+                // diff != 0 and diff < half the ROB means load is younger
+                rob_is_younger = (diff != '0) && !diff[ROB_ID_WIDTH-1];
+            endfunction
+
+            logic        mdp_viol_det;
+            logic [31:0] mdp_viol_pc_det;
+
+            always_comb begin
+                mdp_viol_det    = 1'b0;
+                mdp_viol_pc_det = 32'd0;
+
+                if (agu_st_valid) begin
+                    for (int i = 0; i < LQ_N; i++) begin
+                        if (lq_valid[i] && lq_addr_valid[i] && lq_executed[i] &&
+                            rob_is_younger(sq_rob_tag[agu_st_idx], lq_rob_tag[i]) &&
+                            lq_addr[i][31:2] == agu_st_addr[31:2]) begin
+                            // Younger executed load overlaps with resolving store
+                            mdp_viol_det    = 1'b1;
+                            mdp_viol_pc_det = lq_pc[i];
+                        end
+                    end
+                end
+            end
+
+            assign mdp_violation    = mdp_viol_det;
+            assign mdp_violation_pc = mdp_viol_pc_det;
+        end else begin : gen_no_mdp
+            assign mdp_violation    = 1'b0;
+            assign mdp_violation_pc = 32'd0;
+        end
+    endgenerate
 
     // =========================================================
     // Load Completion Combinational Signals
@@ -248,6 +304,8 @@ module f386_lsq (
                 lq_executed[lq_tail]   <= 1'b0;
                 lq_rob_tag[lq_tail]    <= uc_ld_dispatch_valid ? uc_dispatch_rob_tag
                                                                : ld_dispatch_rob_tag;
+                lq_pc[lq_tail]         <= uc_ld_dispatch_valid ? uc_ld_dispatch_pc
+                                                               : ld_dispatch_pc;
                 lq_tail                <= lq_tail + lq_idx_t'(1);
                 lq_count               <= lq_count + (LQ_ID_WIDTH+1)'(1);
             end
@@ -305,11 +363,11 @@ module f386_lsq (
             // ---- Combined sq_count update (avoids last-assignment-wins bug) ----
             automatic logic sq_enq = (st_dispatch_valid || uc_st_dispatch_valid) && !sq_full;
             automatic logic sq_deq = store_drain_ack && sq_valid[sq_head] && sq_committed[sq_head];
-            case ({sq_enq, sq_deq})
-                2'b10:   sq_count <= sq_count + (SQ_ID_WIDTH+1)'(1);
-                2'b01:   sq_count <= sq_count - (SQ_ID_WIDTH+1)'(1);
-                default: ; // 2'b11: net zero; 2'b00: no change
-            endcase
+            // P3.SBO: coalesced drain retires 2 entries in one ack
+            automatic logic sq_deq2 = sq_deq && store_drain_coalesced;
+            sq_count <= sq_count
+                        + (sq_enq  ? (SQ_ID_WIDTH+1)'(1) : (SQ_ID_WIDTH+1)'(0))
+                        - (sq_deq2 ? (SQ_ID_WIDTH+1)'(2) : sq_deq ? (SQ_ID_WIDTH+1)'(1) : (SQ_ID_WIDTH+1)'(0));
 
             // Dispatch new store (normal or microcode sideband — mutually exclusive)
             if (sq_enq) begin
@@ -339,9 +397,15 @@ module f386_lsq (
                 sq_committed[uc_retire_st_idx] <= 1'b1;
 
             // Dequeue committed store after cache/memory write completes
+            // P3.SBO: coalesced drain dequeues 2 entries (sq_head and sq_head+1)
             if (sq_deq) begin
                 sq_valid[sq_head] <= 1'b0;
-                sq_head           <= sq_head + sq_idx_t'(1);
+                if (sq_deq2) begin
+                    sq_valid[sq_head + sq_idx_t'(1)] <= 1'b0;
+                    sq_head <= sq_head + sq_idx_t'(2);
+                end else begin
+                    sq_head <= sq_head + sq_idx_t'(1);
+                end
             end
         end
     end
@@ -437,6 +501,7 @@ module f386_lsq (
 
     // Store drain acknowledge
     logic store_drain_ack;
+    logic store_drain_coalesced;  // P3.SBO: ack retires 2 SQ entries
 
     // Microcode store drain feedback (any drain completion — core_top qualifies by idx)
     assign uc_store_drain_done = store_drain_ack;
@@ -462,6 +527,7 @@ module f386_lsq (
             assign mem_resp_valid = dcache_resp_valid;
             assign mem_resp_data  = dcache_resp_data;
             assign store_drain_ack = dcache_req_ready && drain_store;
+            assign store_drain_coalesced = 1'b0;  // No coalescing in dcache path
 
             always_comb begin
                 dcache_req_valid   = 1'b0;
@@ -490,7 +556,15 @@ module f386_lsq (
             assign mem_rsp_ready = 1'b0;
 
             // No fault detection in dcache path
-            assign ld_cdb_fault = 1'b0;
+            assign ld_cdb_fault        = 1'b0;
+            assign ld_cdb_exc_vector   = 8'd0;
+            assign ld_cdb_exc_code     = 32'd0;
+            assign ld_cdb_exc_has_error = 1'b0;
+
+            // No store drain fault detection in dcache path
+            assign sq_drain_fault        = 1'b0;
+            assign sq_drain_fault_vector = 8'd0;
+            assign sq_drain_fault_code   = 32'd0;
 
             // Load execution FSM (dcache path — same structure, dcache response)
             always_ff @(posedge clk or negedge rst_n) begin
@@ -561,6 +635,7 @@ module f386_lsq (
                 logic [31:0]    addr;         // for load extraction (addr[2:0])
                 logic [1:0]     size;         // for load extraction
                 logic           is_signed;    // for load extraction
+                logic           is_coalesced; // P3.SBO: merged two SQ entries into one request
             } pend_entry_t;
 
             pend_entry_t               pend_data [PEND_DEPTH];
@@ -579,6 +654,36 @@ module f386_lsq (
             wire drain_store_mo = sq_valid[sq_drain_ptr] && sq_committed[sq_drain_ptr] &&
                                   sq_addr_valid[sq_drain_ptr] && sq_data_valid[sq_drain_ptr];
 
+            // ---- P3.SBO: Store Buffer Coalescing ----
+            // When enabled, peek at sq_drain_ptr+1; if both stores target the
+            // same aligned dword and are committed, merge byte_en and data
+            // into a single memory request (newer store's bytes win).
+            wire sq_idx_t sq_next_ptr = sq_drain_ptr + sq_idx_t'(1);
+
+            wire drain_next_ready = sq_valid[sq_next_ptr] && sq_committed[sq_next_ptr] &&
+                                    sq_addr_valid[sq_next_ptr] && sq_data_valid[sq_next_ptr];
+
+            // Coalesce only when: gate ON, head drainable, next drainable,
+            // same dword address, and neither is MMIO (strong-order).
+            wire coalesce_hit = CONF_ENABLE_SQ_COALESCE &&
+                                drain_store_mo && drain_next_ready &&
+                                (sq_addr[sq_drain_ptr][31:2] == sq_addr[sq_next_ptr][31:2]) &&
+                                !is_mmio_addr(sq_addr[sq_drain_ptr]);
+
+            // Merged data: newer store (sq_next_ptr) bytes take priority
+            logic [31:0] coal_merged_data;
+            logic [3:0]  coal_merged_byte_en;
+            always_comb begin
+                coal_merged_data    = sq_data[sq_drain_ptr];
+                coal_merged_byte_en = sq_byte_en[sq_drain_ptr];
+                for (int b = 0; b < 4; b++) begin
+                    if (sq_byte_en[sq_next_ptr][b]) begin
+                        coal_merged_data[b*8 +: 8]  = sq_data[sq_next_ptr][b*8 +: 8];
+                        coal_merged_byte_en[b]       = 1'b1;
+                    end
+                end
+            end
+
             // ---- Load Request-Issued Flag ----
             logic ld_req_issued;  // Prevents double-issue of same load
 
@@ -586,12 +691,26 @@ module f386_lsq (
             logic        be_resp_valid;
             logic [31:0] be_resp_data;
             logic        be_resp_fault;
+            logic [7:0]  be_resp_exc_vector;
+            logic [31:0] be_resp_exc_code;
+            logic        be_resp_exc_has_error;
             logic        store_drain_ack_be;
+            logic        store_drain_coalesced_be;  // P3.SBO: ack retires 2 entries
+            logic        sq_drain_fault_be;
+            logic [7:0]  sq_drain_fault_vector_be;
+            logic [31:0] sq_drain_fault_code_be;
 
-            assign mem_resp_valid  = be_resp_valid;
-            assign mem_resp_data   = be_resp_data;
-            assign ld_cdb_fault    = be_resp_fault;
-            assign store_drain_ack = store_drain_ack_be;
+            assign mem_resp_valid       = be_resp_valid;
+            assign mem_resp_data        = be_resp_data;
+            assign ld_cdb_fault         = be_resp_fault;
+            assign ld_cdb_exc_vector    = be_resp_exc_vector;
+            assign ld_cdb_exc_code      = be_resp_exc_code;
+            assign ld_cdb_exc_has_error = be_resp_exc_has_error;
+            assign store_drain_ack       = store_drain_ack_be;
+            assign store_drain_coalesced = store_drain_coalesced_be;
+            assign sq_drain_fault        = sq_drain_fault_be;
+            assign sq_drain_fault_vector = sq_drain_fault_vector_be;
+            assign sq_drain_fault_code   = sq_drain_fault_code_be;
 
             // ---- Response Handshake ----
             // Ready only when incoming response ID matches a valid pending entry.
@@ -620,12 +739,16 @@ module f386_lsq (
                                    || rsp_consume_at_head;
 
             // ---- Store Alignment: addr[2] dword-half selection (sq_drain_ptr) ----
+            // P3.SBO: when coalescing, use merged data/byte_en instead of single entry
+            wire [31:0] st_eff_data    = coalesce_hit ? coal_merged_data    : sq_data[sq_drain_ptr];
+            wire [3:0]  st_eff_byte_en = coalesce_hit ? coal_merged_byte_en : sq_byte_en[sq_drain_ptr];
+
             wire [63:0] st_wdata_aligned = sq_addr[sq_drain_ptr][2]
-                ? {sq_data[sq_drain_ptr], 32'd0}
-                : {32'd0, sq_data[sq_drain_ptr]};
+                ? {st_eff_data, 32'd0}
+                : {32'd0, st_eff_data};
             wire [7:0]  st_byte_en_aligned = sq_addr[sq_drain_ptr][2]
-                ? {sq_byte_en[sq_drain_ptr], 4'h0}
-                : {4'h0, sq_byte_en[sq_drain_ptr]};
+                ? {st_eff_byte_en, 4'h0}
+                : {4'h0, st_eff_byte_en};
 
             // ---- Load Extraction from 64-bit raw beat (indexed pending entry) ----
             wire pend_entry_t rsp_entry = pend_data[rsp_pend_idx];
@@ -664,19 +787,40 @@ module f386_lsq (
             // ---- Response Handling (registered) ----
             always_ff @(posedge clk or negedge rst_n) begin
                 if (!rst_n) begin
-                    be_resp_valid      <= 1'b0;
-                    be_resp_data       <= 32'd0;
-                    be_resp_fault      <= 1'b0;
-                    store_drain_ack_be <= 1'b0;
+                    be_resp_valid              <= 1'b0;
+                    be_resp_data               <= 32'd0;
+                    be_resp_fault              <= 1'b0;
+                    be_resp_exc_vector         <= 8'd0;
+                    be_resp_exc_code           <= 32'd0;
+                    be_resp_exc_has_error      <= 1'b0;
+                    store_drain_ack_be         <= 1'b0;
+                    store_drain_coalesced_be   <= 1'b0;
+                    sq_drain_fault_be          <= 1'b0;
+                    sq_drain_fault_vector_be   <= 8'd0;
+                    sq_drain_fault_code_be     <= 32'd0;
                 end else if (flush) begin
-                    be_resp_valid      <= 1'b0;
-                    be_resp_data       <= 32'd0;
-                    be_resp_fault      <= 1'b0;
-                    store_drain_ack_be <= 1'b0;
+                    be_resp_valid              <= 1'b0;
+                    be_resp_data               <= 32'd0;
+                    be_resp_fault              <= 1'b0;
+                    be_resp_exc_vector         <= 8'd0;
+                    be_resp_exc_code           <= 32'd0;
+                    be_resp_exc_has_error      <= 1'b0;
+                    store_drain_ack_be         <= 1'b0;
+                    store_drain_coalesced_be   <= 1'b0;
+                    sq_drain_fault_be          <= 1'b0;
+                    sq_drain_fault_vector_be   <= 8'd0;
+                    sq_drain_fault_code_be     <= 32'd0;
                 end else begin
-                    be_resp_valid      <= 1'b0;
-                    be_resp_fault      <= 1'b0;
-                    store_drain_ack_be <= 1'b0;
+                    be_resp_valid              <= 1'b0;
+                    be_resp_fault              <= 1'b0;
+                    be_resp_exc_vector         <= 8'd0;
+                    be_resp_exc_code           <= 32'd0;
+                    be_resp_exc_has_error      <= 1'b0;
+                    store_drain_ack_be         <= 1'b0;
+                    store_drain_coalesced_be   <= 1'b0;
+                    sq_drain_fault_be          <= 1'b0;
+                    sq_drain_fault_vector_be   <= 8'd0;
+                    sq_drain_fault_code_be     <= 32'd0;
 
                     if (rsp_consume) begin
                         if (rsp_entry.is_load) begin
@@ -686,9 +830,12 @@ module f386_lsq (
                                     be_resp_data  <= extracted;
                                 end
                                 default: begin // MEM_RESP_FAULT, MEM_RESP_MISALIGN
-                                    be_resp_valid <= 1'b1;
-                                    be_resp_data  <= 32'hDEAD_BEEF;
-                                    be_resp_fault <= 1'b1;
+                                    be_resp_valid         <= 1'b1;
+                                    be_resp_data          <= 32'hDEAD_BEEF;
+                                    be_resp_fault         <= 1'b1;
+                                    be_resp_exc_vector    <= (mem_rsp_in.resp == MEM_RESP_FAULT) ? EXC_PF : EXC_GP;
+                                    be_resp_exc_code      <= 32'd0;  // Error code filled by exception unit
+                                    be_resp_exc_has_error <= 1'b1;   // Both #PF and #GP have error codes
                                     `ifndef SYNTHESIS
                                     $warning("LSQ-MO: fault resp %s on load addr=%08h",
                                              mem_rsp_in.resp.name(), rsp_entry.addr);
@@ -696,13 +843,18 @@ module f386_lsq (
                                 end
                             endcase
                         end else begin
-                            // Store drain response — ack regardless of fault
-                            store_drain_ack_be <= 1'b1;
-                            `ifndef SYNTHESIS
-                            if (mem_rsp_in.resp != MEM_RESP_OK)
+                            // Store drain response — only ack on OK
+                            store_drain_ack_be       <= (mem_rsp_in.resp == MEM_RESP_OK);
+                            store_drain_coalesced_be <= (mem_rsp_in.resp == MEM_RESP_OK) && rsp_entry.is_coalesced;
+                            if (mem_rsp_in.resp != MEM_RESP_OK) begin
+                                sq_drain_fault_be        <= 1'b1;
+                                sq_drain_fault_vector_be <= (mem_rsp_in.resp == MEM_RESP_FAULT) ? EXC_PF : EXC_GP;
+                                sq_drain_fault_code_be   <= 32'd0;
+                                `ifndef SYNTHESIS
                                 $warning("LSQ-MO: fault resp %s on store addr=%08h",
                                          mem_rsp_in.resp.name(), rsp_entry.addr);
-                            `endif
+                                `endif
+                            end
                         end
                     end
                 end
@@ -727,11 +879,12 @@ module f386_lsq (
                     // Pending write (on issue)
                     if (issue_fire) begin
                         pend_data[pend_wr_ptr] <= '{
-                            is_load:   issue_load,
-                            lq_idx:    ld_result_idx,
-                            addr:      issue_load ? ld_wait_addr : sq_addr[sq_drain_ptr],
-                            size:      issue_load ? ld_wait_size : sq_size[sq_drain_ptr],
-                            is_signed: issue_load ? ld_wait_signed : 1'b0
+                            is_load:     issue_load,
+                            lq_idx:      ld_result_idx,
+                            addr:        issue_load ? ld_wait_addr : sq_addr[sq_drain_ptr],
+                            size:        issue_load ? ld_wait_size : sq_size[sq_drain_ptr],
+                            is_signed:   issue_load ? ld_wait_signed : 1'b0,
+                            is_coalesced: issue_store && coalesce_hit
                         };
                         pend_valid[pend_wr_ptr] <= 1'b1;
                         pend_wr_ptr <= pend_wr_ptr + PEND_ID_W'(1);
@@ -755,9 +908,9 @@ module f386_lsq (
                         default: ;
                     endcase
 
-                    // sq_drain_ptr advances on store issue
+                    // sq_drain_ptr advances on store issue (+2 when coalesced)
                     if (issue_fire && issue_store)
-                        sq_drain_ptr <= sq_drain_ptr + sq_idx_t'(1);
+                        sq_drain_ptr <= sq_drain_ptr + (coalesce_hit ? sq_idx_t'(2) : sq_idx_t'(1));
 
                 end
             end

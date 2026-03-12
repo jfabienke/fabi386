@@ -53,6 +53,7 @@ package f386_pkg;
     localparam bit CONF_ENABLE_PENTIUM_EXT  = 1'b0;  // P5/P6: CMOVcc, basic MMX, RDPMC
     localparam bit CONF_ENABLE_P3_EXT       = 1'b0;  // PIII/P4: PREFETCH, CLFLUSH, fences
     localparam bit CONF_ENABLE_NEHALEM_EXT  = 1'b0;  // Nehalem+: POPCNT, LZCNT, TZCNT
+    localparam bit CONF_ENABLE_HW_WATCHDOG = 1'b0;  // P3.WDG: hardware watchdog / NMI timeout
     localparam bit CONF_ENABLE_DECODE_CACHE = 1'b0;  // Phase 1: decode output cache
     localparam int CONF_DEC_CACHE_ENTRIES   = 256;
     localparam int CONF_DEC_CACHE_IDX_W     = $clog2(CONF_DEC_CACHE_ENTRIES); // 8
@@ -63,6 +64,9 @@ package f386_pkg;
 `else
     localparam bit CONF_ENABLE_MICROCODE  = 1'b0;
 `endif
+
+    // --- P3.MDP: Memory Dependency Predictor ---
+    localparam bit CONF_ENABLE_MEM_DEP_PRED = 1'b0;  // Memory ordering violation detection in LSQ
 
     // --- P2: Memory Integration Gates ---
 `ifdef SYNTHESIS_ENABLE_MEMORY
@@ -96,6 +100,7 @@ package f386_pkg;
     localparam int CONF_MEM_REQ_ID_W        = 6;     // Memory transaction ID width
     localparam int CONF_LSQ_OUTSTANDING_DEPTH = 4;   // Max requests in flight from LSQ
     localparam int CONF_LSQ_PEND_ID_W = $clog2(CONF_LSQ_OUTSTANDING_DEPTH);  // 2
+    localparam bit CONF_ENABLE_SQ_COALESCE = 1'b0;  // P3.SBO: merge adjacent committed stores at drain
 
     // --- Derived Type Widths ---
     localparam int PHYS_REG_WIDTH = $clog2(CONF_PHYS_REG_NUM);  // 5 for 32
@@ -464,9 +469,11 @@ package f386_pkg;
     localparam logic [3:0] DESC_TASK_GATE           = 4'h5;
 
     // --- MMIO Address Classification ---
-    // P2: VGA hole only. TODO: expand to PCI config, APIC, ISA MMIO.
+    // P3.MMIO.a: VGA hole + Local APIC + IOAPIC
     function automatic logic is_mmio_addr(input logic [31:0] addr);
-        return (addr >= 32'h000A_0000 && addr <= 32'h000B_FFFF);
+        return (addr >= 32'h000A_0000 && addr <= 32'h000B_FFFF) ||  // VGA hole
+               (addr >= 32'hFEE0_0000 && addr <= 32'hFEE0_0FFF) ||  // Local APIC
+               (addr >= 32'hFEC0_0000 && addr <= 32'hFEC0_03FF);     // IOAPIC
     endfunction
 
     // --- Exception Vector Constants (ao486 defines.v:34-51) ---

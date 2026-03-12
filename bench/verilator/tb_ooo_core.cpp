@@ -58,6 +58,8 @@ public:
         top_->mem_ack = 0;
         top_->irq = 0;
         top_->irq_vector = 0;
+        top_->io_port_rdata = 0;
+        top_->io_port_ack = 0;
 
         for (uint64_t i = 0; i < RESET_CYCLES * 2; i++) {
             top_->clk = !top_->clk;

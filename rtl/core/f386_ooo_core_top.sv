@@ -67,6 +67,15 @@ module f386_ooo_core_top (
     output telemetry_pkt_t trace_out,
     output logic           trace_valid,
 
+    // --- I/O Port Interface (P3.MMIO.b) ---
+    output logic [15:0]  io_port_addr,
+    output logic [31:0]  io_port_wdata,
+    output logic         io_port_wr,
+    output logic         io_port_rd,
+    output logic [1:0]   io_port_size,
+    input  logic [31:0]  io_port_rdata,
+    input  logic         io_port_ack,
+
     // --- External Interrupts ---
     input  logic         irq,
     input  logic [7:0]   irq_vector
@@ -183,6 +192,11 @@ module f386_ooo_core_top (
     logic        rob_retire_u_valid, rob_retire_v_valid;
     logic [5:0]  rob_retire_u_flags, rob_retire_u_flags_mask;
     logic [5:0]  rob_retire_v_flags, rob_retire_v_flags_mask;
+    // P3.EXC.b: retirement exception metadata
+    logic        rob_retire_u_has_exc, rob_retire_v_has_exc;
+    logic [7:0]  rob_retire_u_exc_vector, rob_retire_v_exc_vector;
+    logic [31:0] rob_retire_u_exc_code, rob_retire_v_exc_code;
+    logic        rob_retire_u_exc_has_error, rob_retire_v_exc_has_error;
 
     // --- Execute Stage → CDB (raw from exec, muxed in gen_lsq_memif) ---
     logic        raw_cdb0_valid, raw_cdb1_valid;
@@ -191,6 +205,9 @@ module f386_ooo_core_top (
     logic [5:0]  raw_cdb0_flags, raw_cdb1_flags;
     logic [5:0]  raw_cdb0_flags_mask, raw_cdb1_flags_mask;
     logic        raw_cdb0_exception, raw_cdb1_exception;
+    logic [7:0]  raw_cdb0_exc_vector, raw_cdb1_exc_vector;
+    logic [31:0] raw_cdb0_exc_code, raw_cdb1_exc_code;
+    logic        raw_cdb0_exc_has_error, raw_cdb1_exc_has_error;
     phys_reg_t   raw_cdb0_phys_dest, raw_cdb1_phys_dest;
     logic        raw_cdb0_dest_valid, raw_cdb1_dest_valid;
 
@@ -201,6 +218,9 @@ module f386_ooo_core_top (
     logic [5:0]  cdb0_flags, cdb1_flags;
     logic [5:0]  cdb0_flags_mask, cdb1_flags_mask;
     logic        cdb0_exception, cdb1_exception;
+    logic [7:0]  cdb0_exc_vector, cdb1_exc_vector;
+    logic [31:0] cdb0_exc_code, cdb1_exc_code;
+    logic        cdb0_exc_has_error, cdb1_exc_has_error;
 
     // --- Execute Stage → Writeback ---
     logic [31:0] wb_data_u, wb_data_v;
@@ -335,6 +355,7 @@ module f386_ooo_core_top (
     logic [1:0]  uc_mem_size;             // Memory size (2=dword)
     logic [3:0]  uc_mem_byte_en;          // Byte enables
     logic        uc_mem_ld_dispatch;       // LQ sideband dispatch
+    logic [31:0] uc_mem_ld_dispatch_pc;    // LQ sideband dispatch PC (macro instruction PC)
     logic        uc_mem_st_dispatch;       // SQ sideband dispatch
     rob_id_t     uc_mem_dispatch_rob_tag;  // Dispatch ROB tag
     logic        uc_mem_retire_st;         // SQ sideband commitment
@@ -349,6 +370,11 @@ module f386_ooo_core_top (
     logic [31:0] uc_regonly_cdb0_data;
     phys_reg_t   uc_regonly_phys_dest;
     logic        uc_regonly_dest_valid;
+    // P3.MMIO.b: IO port CDB0 synthesis (IN result writeback)
+    logic        uc_io_cdb0_fire;
+    logic [31:0] uc_io_cdb0_data;
+    phys_reg_t   uc_io_cdb0_phys_dest;
+    logic        uc_io_cdb0_dest_valid;
     // Microcode special command bridge (gen_microcode → gen_lsq_memif)
     logic [7:0]  uc_mem_special_cmd;         // Current UM FSM special command
     // Microcode CR write port
@@ -933,22 +959,36 @@ module f386_ooo_core_top (
         .cdb0_flags        (cdb0_flags),
         .cdb0_flags_mask   (cdb0_flags_mask),
         .cdb0_exception    (cdb0_exception),
+        .cdb0_exc_vector   (cdb0_exc_vector),
+        .cdb0_exc_code     (cdb0_exc_code),
+        .cdb0_exc_has_error(cdb0_exc_has_error),
         .cdb1_valid        (cdb1_valid),
         .cdb1_tag          (cdb1_tag),
         .cdb1_data         (cdb1_data),
         .cdb1_flags        (cdb1_flags),
         .cdb1_flags_mask   (cdb1_flags_mask),
         .cdb1_exception    (cdb1_exception),
+        .cdb1_exc_vector   (cdb1_exc_vector),
+        .cdb1_exc_code     (cdb1_exc_code),
+        .cdb1_exc_has_error(cdb1_exc_has_error),
 
         // Retirement (flags forwarded to sys_regs for architectural commit)
         .retire_u          (rob_retire_u),
         .retire_u_valid    (rob_retire_u_valid),
         .retire_u_flags    (rob_retire_u_flags),
         .retire_u_flags_mask(rob_retire_u_flags_mask),
+        .retire_u_has_exc      (rob_retire_u_has_exc),
+        .retire_u_exc_vector   (rob_retire_u_exc_vector),
+        .retire_u_exc_code     (rob_retire_u_exc_code),
+        .retire_u_exc_has_error(rob_retire_u_exc_has_error),
         .retire_v          (rob_retire_v),
         .retire_v_valid    (rob_retire_v_valid),
         .retire_v_flags    (rob_retire_v_flags),
         .retire_v_flags_mask(rob_retire_v_flags_mask),
+        .retire_v_has_exc      (rob_retire_v_has_exc),
+        .retire_v_exc_vector   (rob_retire_v_exc_vector),
+        .retire_v_exc_code     (rob_retire_v_exc_code),
+        .retire_v_exc_has_error(rob_retire_v_exc_has_error),
 
         // Old physical register (for freelist reclaim at retirement)
         .dispatch_u_old_phys (rename_old_phys_u),
@@ -1134,6 +1174,9 @@ module f386_ooo_core_top (
         .cdb0_flags      (raw_cdb0_flags),
         .cdb0_flags_mask (raw_cdb0_flags_mask),
         .cdb0_exception  (raw_cdb0_exception),
+        .cdb0_exc_vector (raw_cdb0_exc_vector),
+        .cdb0_exc_code   (raw_cdb0_exc_code),
+        .cdb0_exc_has_error(raw_cdb0_exc_has_error),
         .cdb0_phys_dest  (raw_cdb0_phys_dest),
         .cdb0_dest_valid (raw_cdb0_dest_valid),
         .cdb1_valid      (raw_cdb1_valid),
@@ -1142,6 +1185,9 @@ module f386_ooo_core_top (
         .cdb1_flags      (raw_cdb1_flags),
         .cdb1_flags_mask (raw_cdb1_flags_mask),
         .cdb1_exception  (raw_cdb1_exception),
+        .cdb1_exc_vector (raw_cdb1_exc_vector),
+        .cdb1_exc_code   (raw_cdb1_exc_code),
+        .cdb1_exc_has_error(raw_cdb1_exc_has_error),
         .cdb1_phys_dest  (raw_cdb1_phys_dest),
         .cdb1_dest_valid (raw_cdb1_dest_valid),
 
@@ -1518,18 +1564,24 @@ module f386_ooo_core_top (
         wire cdb0_suppress_load = (iq_issue_instr.op_cat == OP_LOAD);
 
         // cdb0: suppress OP_LOAD broadcast (LSQ delivers load data on cdb1)
-        // OR in microcode CDB0 synthesis (ESP / regonly, mutually exclusive with exec CDB0)
-        wire uc_synth_cdb0 = uc_mem_esp_cdb0_fire || uc_regonly_cdb0_fire;
+        // OR in microcode CDB0 synthesis (ESP / regonly / IO, mutually exclusive with exec CDB0)
+        wire uc_synth_cdb0 = uc_mem_esp_cdb0_fire || uc_regonly_cdb0_fire || uc_io_cdb0_fire;
         assign cdb0_valid      = (raw_cdb0_valid && !cdb0_suppress_load) || uc_synth_cdb0;
         assign cdb0_tag        = uc_synth_cdb0         ? uc_mem_dispatch_rob_tag : raw_cdb0_tag;
-        assign cdb0_data       = uc_regonly_cdb0_fire  ? uc_regonly_cdb0_data    :
+        assign cdb0_data       = uc_io_cdb0_fire       ? uc_io_cdb0_data        :
+                                 uc_regonly_cdb0_fire   ? uc_regonly_cdb0_data    :
                                  uc_mem_esp_cdb0_fire   ? uc_mem_esp_cdb0_data    : raw_cdb0_data;
         assign cdb0_flags      = uc_synth_cdb0         ? 6'd0                    : raw_cdb0_flags;
         assign cdb0_flags_mask = uc_synth_cdb0         ? 6'd0                    : raw_cdb0_flags_mask;
-        assign cdb0_exception  = uc_synth_cdb0         ? 1'b0                    : raw_cdb0_exception;
-        assign cdb0_phys_dest  = uc_regonly_cdb0_fire  ? uc_regonly_phys_dest    :
+        assign cdb0_exception      = uc_synth_cdb0     ? 1'b0                    : raw_cdb0_exception;
+        assign cdb0_exc_vector     = uc_synth_cdb0     ? 8'd0                    : raw_cdb0_exc_vector;
+        assign cdb0_exc_code       = uc_synth_cdb0     ? 32'd0                   : raw_cdb0_exc_code;
+        assign cdb0_exc_has_error  = uc_synth_cdb0     ? 1'b0                    : raw_cdb0_exc_has_error;
+        assign cdb0_phys_dest  = uc_io_cdb0_fire       ? uc_io_cdb0_phys_dest   :
+                                 uc_regonly_cdb0_fire   ? uc_regonly_phys_dest    :
                                  uc_mem_esp_cdb0_fire   ? uc_mem_esp_phys_dest    : raw_cdb0_phys_dest;
-        assign cdb0_dest_valid = uc_regonly_cdb0_fire  ? uc_regonly_dest_valid   :
+        assign cdb0_dest_valid = uc_io_cdb0_fire       ? uc_io_cdb0_dest_valid  :
+                                 uc_regonly_cdb0_fire   ? uc_regonly_dest_valid   :
                                  uc_mem_esp_cdb0_fire   ? 1'b1                    : raw_cdb0_dest_valid;
 
         // ---------------------------------------------------------
@@ -1539,6 +1591,9 @@ module f386_ooo_core_top (
         rob_id_t     lsq_ld_cdb_tag;
         logic [31:0] lsq_ld_cdb_data;
         logic        lsq_ld_cdb_fault;
+        logic [7:0]  lsq_ld_cdb_exc_vector;
+        logic [31:0] lsq_ld_cdb_exc_code;
+        logic        lsq_ld_cdb_exc_has_error;
 
         // ---------------------------------------------------------
         // IO path CDB load result (MMIO loads)
@@ -1548,6 +1603,9 @@ module f386_ooo_core_top (
         logic [31:0] io_ld_cdb_data;
         lq_idx_t     io_ld_cdb_lq_idx;
         logic        io_ld_cdb_fault;
+        logic [7:0]  io_ld_cdb_exc_vector;
+        logic [31:0] io_ld_cdb_exc_code;
+        logic        io_ld_cdb_exc_has_error;
 
         // Combined CDB1 active flag (gates V-pipe exec CDB)
         assign lsq_cdb1_active = lsq_ld_cdb_valid || io_ld_cdb_valid;
@@ -1583,6 +1641,8 @@ module f386_ooo_core_top (
 
         // Microcode regonly CDB0 phys_dest (needs rob_phys_dest_tbl from this generate block)
         assign uc_regonly_phys_dest = rob_phys_dest_tbl[uc_mem_dispatch_rob_tag];
+        // Microcode IO CDB0 phys_dest (same source — newly allocated phys reg, not committed map)
+        assign uc_io_cdb0_phys_dest = rob_phys_dest_tbl[uc_mem_dispatch_rob_tag];
 
         // cdb1: IO path > LSQ > V-pipe execute priority
         wire any_ld_cdb = io_ld_cdb_valid || lsq_ld_cdb_valid;
@@ -1598,9 +1658,18 @@ module f386_ooo_core_top (
                                                    : raw_cdb1_dest_valid;
         assign cdb1_flags      = any_ld_cdb        ? 6'd0                             : raw_cdb1_flags;
         assign cdb1_flags_mask = any_ld_cdb        ? 6'd0                             : raw_cdb1_flags_mask;
-        assign cdb1_exception  = io_ld_cdb_valid   ? io_ld_cdb_fault                  :
-                                 lsq_ld_cdb_valid  ? lsq_ld_cdb_fault                :
-                                                     raw_cdb1_exception;
+        assign cdb1_exception      = io_ld_cdb_valid   ? io_ld_cdb_fault              :
+                                     lsq_ld_cdb_valid  ? lsq_ld_cdb_fault            :
+                                                         raw_cdb1_exception;
+        assign cdb1_exc_vector     = io_ld_cdb_valid   ? io_ld_cdb_exc_vector        :
+                                     lsq_ld_cdb_valid  ? lsq_ld_cdb_exc_vector       :
+                                                         raw_cdb1_exc_vector;
+        assign cdb1_exc_code       = io_ld_cdb_valid   ? io_ld_cdb_exc_code          :
+                                     lsq_ld_cdb_valid  ? lsq_ld_cdb_exc_code         :
+                                                         raw_cdb1_exc_code;
+        assign cdb1_exc_has_error  = io_ld_cdb_valid   ? io_ld_cdb_exc_has_error     :
+                                     lsq_ld_cdb_valid  ? lsq_ld_cdb_exc_has_error    :
+                                                         raw_cdb1_exc_has_error;
 
         // ---------------------------------------------------------
         // AGU (Finding #1): combinational effective address
@@ -1996,6 +2065,7 @@ module f386_ooo_core_top (
             // Dispatch
             .ld_dispatch_valid (lsq_ld_dispatch_valid && !mem_dispatch_blocked),
             .ld_dispatch_rob_tag(rob_tag_u),
+            .ld_dispatch_pc   (dec_instr_u.pc),
             .st_dispatch_valid (lsq_st_dispatch_valid && !mem_dispatch_blocked),
             .st_dispatch_rob_tag(rob_tag_u),
             .ld_dispatch_idx  (lsq_ld_dispatch_idx),
@@ -2005,6 +2075,7 @@ module f386_ooo_core_top (
 
             // Microcode sideband dispatch/retirement
             .uc_ld_dispatch_valid (uc_mem_ld_dispatch),
+            .uc_ld_dispatch_pc (uc_mem_ld_dispatch_pc),
             .uc_st_dispatch_valid (uc_mem_st_dispatch),
             .uc_dispatch_rob_tag  (uc_mem_dispatch_rob_tag),
             .uc_ld_dispatch_idx   (uc_lsq_ld_alloc_idx),
@@ -2034,6 +2105,9 @@ module f386_ooo_core_top (
             .ld_cdb_tag       (lsq_ld_cdb_tag),
             .ld_cdb_data      (lsq_ld_cdb_data),
             .ld_cdb_fault     (lsq_ld_cdb_fault),
+            .ld_cdb_exc_vector   (lsq_ld_cdb_exc_vector),
+            .ld_cdb_exc_code     (lsq_ld_cdb_exc_code),
+            .ld_cdb_exc_has_error(lsq_ld_cdb_exc_has_error),
 
             // Retirement
             .retire_st_valid  (rob_retire_u_valid && rob_retire_u_is_store_w),
@@ -2067,7 +2141,12 @@ module f386_ooo_core_top (
 
             // MDP
             .mdp_violation    (lsq_mdp_violation),
-            .mdp_violation_pc (lsq_mdp_violation_pc)
+            .mdp_violation_pc (lsq_mdp_violation_pc),
+
+            // Store drain fault (P3.EXC.c — wired in core_top later)
+            .sq_drain_fault        (),
+            .sq_drain_fault_vector (),
+            .sq_drain_fault_code   ()
         );
 
         // ---------------------------------------------------------
@@ -2096,6 +2175,9 @@ module f386_ooo_core_top (
             .ld_cdb_data      (io_ld_cdb_data),
             .ld_cdb_lq_idx    (io_ld_cdb_lq_idx),
             .ld_cdb_fault     (io_ld_cdb_fault),
+            .ld_cdb_exc_vector   (io_ld_cdb_exc_vector),
+            .ld_cdb_exc_code     (io_ld_cdb_exc_code),
+            .ld_cdb_exc_has_error(io_ld_cdb_exc_has_error),
 
             // Downstream: split-phase memory (to arbiter client 1)
             .mem_req_valid    (io_mem_req_valid),
@@ -2260,26 +2342,34 @@ module f386_ooo_core_top (
 
         // Microcode regonly CDB0 phys_dest stub
         assign uc_regonly_phys_dest = '0;
+        // Microcode IO CDB0 phys_dest stub
+        assign uc_io_cdb0_phys_dest = '0;
 
         // Macro EA bridge stub (no AGU when LSQ disabled)
         assign uc_macro_ea = 32'd0;
 
-        // CDB passthrough (no muxing)
-        assign cdb0_valid      = raw_cdb0_valid;
-        assign cdb0_tag        = raw_cdb0_tag;
-        assign cdb0_data       = raw_cdb0_data;
-        assign cdb0_flags      = raw_cdb0_flags;
-        assign cdb0_flags_mask = raw_cdb0_flags_mask;
-        assign cdb0_exception  = raw_cdb0_exception;
-        assign cdb0_phys_dest  = raw_cdb0_phys_dest;
-        assign cdb0_dest_valid = raw_cdb0_dest_valid;
+        // CDB passthrough (no LSQ muxing, but IO CDB0 synthesis still active)
+        assign cdb0_valid      = raw_cdb0_valid || uc_io_cdb0_fire;
+        assign cdb0_tag        = uc_io_cdb0_fire       ? uc_mem_dispatch_rob_tag : raw_cdb0_tag;
+        assign cdb0_data       = uc_io_cdb0_fire       ? uc_io_cdb0_data        : raw_cdb0_data;
+        assign cdb0_flags      = uc_io_cdb0_fire       ? 6'd0                   : raw_cdb0_flags;
+        assign cdb0_flags_mask = uc_io_cdb0_fire       ? 6'd0                   : raw_cdb0_flags_mask;
+        assign cdb0_exception      = uc_io_cdb0_fire   ? 1'b0                   : raw_cdb0_exception;
+        assign cdb0_exc_vector     = uc_io_cdb0_fire   ? 8'd0                   : raw_cdb0_exc_vector;
+        assign cdb0_exc_code       = uc_io_cdb0_fire   ? 32'd0                  : raw_cdb0_exc_code;
+        assign cdb0_exc_has_error  = uc_io_cdb0_fire   ? 1'b0                   : raw_cdb0_exc_has_error;
+        assign cdb0_phys_dest  = uc_io_cdb0_fire       ? uc_io_cdb0_phys_dest   : raw_cdb0_phys_dest;
+        assign cdb0_dest_valid = uc_io_cdb0_fire       ? uc_io_cdb0_dest_valid  : raw_cdb0_dest_valid;
 
         assign cdb1_valid      = raw_cdb1_valid;
         assign cdb1_tag        = raw_cdb1_tag;
         assign cdb1_data       = raw_cdb1_data;
         assign cdb1_flags      = raw_cdb1_flags;
         assign cdb1_flags_mask = raw_cdb1_flags_mask;
-        assign cdb1_exception  = raw_cdb1_exception;
+        assign cdb1_exception      = raw_cdb1_exception;
+        assign cdb1_exc_vector     = raw_cdb1_exc_vector;
+        assign cdb1_exc_code       = raw_cdb1_exc_code;
+        assign cdb1_exc_has_error  = raw_cdb1_exc_has_error;
         assign cdb1_phys_dest  = raw_cdb1_phys_dest;
         assign cdb1_dest_valid = raw_cdb1_dest_valid;
 
@@ -2426,15 +2516,23 @@ module f386_ooo_core_top (
              uop_is_int_exit ||                    // IRET INT_EXIT: regonly (CS+PC commit)
              uop_is_eflags_regonly);               // CLI/STI: OP_SYS_CALL in ROM, can't go through execute
 
+        // P3.MMIO.b: Detect IO port micro-ops (IN/OUT)
+        wire uop_is_io_in  = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
+            (seq_uop_special_cmd == UCMD_IO_IN);
+        wire uop_is_io_out = (ucode_state == UC_ACTIVE) && seq_uop_valid &&
+            (seq_uop_special_cmd == UCMD_IO_OUT);
+        wire uop_is_io_cmd = uop_is_io_in || uop_is_io_out;
+
         // PRF port B needs ESP for PUSH variants and POP_FLAGS
         wire uop_needs_esp_b = uop_is_push ||
                                (uop_is_mem && seq_uop_special_cmd == UCMD_POP_FLAGS);
 
-        typedef enum logic [1:0] {
-            UM_IDLE      = 2'd0,
-            UM_ALLOC     = 2'd1,
-            UM_ISSUE     = 2'd2,
-            UM_LOAD_WAIT = 2'd3
+        typedef enum logic [2:0] {
+            UM_IDLE      = 3'd0,
+            UM_ALLOC     = 3'd1,
+            UM_ISSUE     = 3'd2,
+            UM_LOAD_WAIT = 3'd3,
+            UM_IO_WAIT   = 3'd4
         } uc_mem_state_t;
 
         uc_mem_state_t uc_mem_state;
@@ -2483,6 +2581,12 @@ module f386_ooo_core_top (
         logic [31:0] uc_iret_cs;       // Popped CS (step 1)
         logic        uc_iret_pop_phase; // 0=EIP (first POP), 1=CS (second POP)
 
+        // P3.MMIO.b: IO port transaction latches
+        logic        uc_io_is_read_r;   // 1=IN, 0=OUT
+        logic [15:0] uc_io_addr_r;      // IO port address
+        logic [31:0] uc_io_wdata_r;     // OUT write data (from EAX)
+        logic [1:0]  uc_io_size_r;      // 0=byte, 1=word, 2=dword
+
         // Size constant: dword for 32-bit stack ops
         localparam logic [1:0] UC_MEM_SIZE = 2'd2;
         localparam logic [3:0] UC_MEM_BYTE_EN = 4'b1111;
@@ -2497,6 +2601,9 @@ module f386_ooo_core_top (
         wire uc_mem_done = (uc_mem_state == UM_ISSUE && !uc_mem_is_load_r) ||
                            (uc_mem_state == UM_LOAD_WAIT && uc_cdb1_match &&
                             !uc_gdt_phase0);
+
+        // P3.MMIO.b: IO port transaction done (iobus ack)
+        wire uc_io_done = (uc_mem_state == UM_IO_WAIT && io_port_ack);
 
         always_ff @(posedge clk or negedge rst_n) begin
             if (!rst_n) begin
@@ -2523,6 +2630,10 @@ module f386_ooo_core_top (
                 uc_iret_eip       <= 32'd0;
                 uc_iret_cs        <= 32'd0;
                 uc_iret_pop_phase <= 1'b0;
+                uc_io_is_read_r   <= 1'b0;
+                uc_io_addr_r      <= 16'd0;
+                uc_io_wdata_r     <= 32'd0;
+                uc_io_size_r      <= 2'd0;
             end else if (flush) begin
                 uc_mem_state      <= UM_IDLE;
                 uc_orig_esp_latched <= 1'b0;
@@ -2632,6 +2743,33 @@ module f386_ooo_core_top (
                                 end
                             endcase
                         end
+                        // P3.MMIO.b: IO port path (IN/OUT)
+                        else if (uop_is_io_cmd) begin
+                            uc_mem_state      <= UM_IO_WAIT;
+                            uc_io_is_read_r   <= uop_is_io_in;
+                            // Port address: imm8 for E4-E7, DX for EC-EF
+                            // For imm8 form: macro_imm has the immediate byte
+                            // For DX form: prf_data_a has DX (ROM sets src_a=EDX)
+                            if (macro_opcode == 8'hE4 || macro_opcode == 8'hE5 ||
+                                macro_opcode == 8'hE6 || macro_opcode == 8'hE7) begin
+                                uc_io_addr_r <= macro_imm[15:0];
+                            end else begin
+                                uc_io_addr_r <= prf_data_a[15:0]; // DX value
+                            end
+                            // OUT data: EAX via PRF
+                            // imm8 form (E6/E7): ROM src_a=EAX → prf_data_a = EAX
+                            // DX form (EE/EF): ROM src_a=EDX, src_b=EAX → prf_data_b = EAX
+                            if (uop_is_io_out) begin
+                                if (macro_opcode == 8'hE6 || macro_opcode == 8'hE7)
+                                    uc_io_wdata_r <= prf_data_a;
+                                else
+                                    uc_io_wdata_r <= prf_data_b;
+                            end else begin
+                                uc_io_wdata_r <= 32'd0;
+                            end
+                            // IO size: byte for E4/E6/EC/EE, word/dword for E5/E7/ED/EF
+                            uc_io_size_r <= macro_opcode[0] ? 2'd2 : 2'd0;
+                        end
                     end
 
                     UM_ALLOC: begin
@@ -2679,6 +2817,13 @@ module f386_ooo_core_top (
                         end
                     end
 
+                    UM_IO_WAIT: begin
+                        // P3.MMIO.b: Wait for IO bus ack
+                        if (io_port_ack) begin
+                            uc_mem_state <= UM_IDLE;
+                        end
+                    end
+
                     default: uc_mem_state <= UM_IDLE;
                 endcase
             end
@@ -2686,6 +2831,7 @@ module f386_ooo_core_top (
 
         // Drive bridge signals
         assign uc_mem_ld_dispatch      = (uc_mem_state == UM_ALLOC) && uc_mem_is_load_r && !uc_lsq_lq_full;
+        assign uc_mem_ld_dispatch_pc   = macro_pc;
         assign uc_mem_st_dispatch      = (uc_mem_state == UM_ALLOC) && !uc_mem_is_load_r && !uc_lsq_sq_full;
         assign uc_mem_dispatch_rob_tag = macro_rob_tag;
         assign uc_mem_ld_fire          = (uc_mem_state == UM_ISSUE) && uc_mem_is_load_r && !uc_load_pipe_busy;
@@ -2715,6 +2861,18 @@ module f386_ooo_core_top (
         assign uc_mem_special_cmd = uc_mem_special_r;
 
         // ---------------------------------------------------------
+        // P3.MMIO.b: IO Port Interface Drivers
+        // ---------------------------------------------------------
+        // Assert rd/wr for one cycle when entering UM_IO_WAIT.
+        // The iobus module latches addr/wdata on the first cycle of rd/wr.
+        // We hold the request until io_port_ack returns.
+        assign io_port_addr  = uc_io_addr_r;
+        assign io_port_wdata = uc_io_wdata_r;
+        assign io_port_size  = uc_io_size_r;
+        assign io_port_rd    = (uc_mem_state == UM_IO_WAIT) && uc_io_is_read_r && !io_port_ack;
+        assign io_port_wr    = (uc_mem_state == UM_IO_WAIT) && !uc_io_is_read_r && !io_port_ack;
+
+        // ---------------------------------------------------------
         // Drain FSM
         // ---------------------------------------------------------
         // Register-only special command self-completing path (1-cycle delay)
@@ -2727,9 +2885,9 @@ module f386_ooo_core_top (
         wire uc_regonly_done = uc_regonly_pending_r;
 
         // Microcode exec_ack: CDB0 for ALU ops, UM done for memory ops,
-        // regonly done for register-only special commands
+        // IO done for IN/OUT, regonly done for register-only special commands
         wire ucode_exec_ack = (ucode_state == UC_ACTIVE) &&
-                              (raw_cdb0_valid || uc_mem_done || uc_regonly_done);
+                              (raw_cdb0_valid || uc_mem_done || uc_io_done || uc_regonly_done);
 
         // Latched operand value for STORE_CR (source GPR value from IQ issue)
         logic [31:0] macro_val_a;
@@ -2759,8 +2917,24 @@ module f386_ooo_core_top (
             end else begin
                 case (ucode_state)
                     UC_IDLE: begin
-                        // Detect OP_MICROCODE issued from IQ
-                        if (iq_issue_valid && iq_issue_instr.op_cat == OP_MICROCODE) begin
+                        // P3.EXC.b: Exception delivery — bypass IQ, jump to UC_ACTIVE
+                        if (uc_exc_pending_r) begin
+                            ucode_state      <= UC_ACTIVE;
+                            macro_rob_tag    <= rob_head_ptr;
+                            macro_opcode     <= 8'hCD;  // Reuse INT microcode
+                            macro_is_0f      <= 1'b0;
+                            macro_modrm_reg  <= 3'd0;
+                            macro_is_32bit   <= 1'b1;
+                            macro_is_rep     <= 1'b0;
+                            macro_is_repne   <= 1'b0;
+                            macro_pc         <= exc_eip;
+                            macro_val_a      <= 32'd0;
+                            macro_ea         <= 32'd0;
+                            macro_far_sel    <= 16'd0;
+                            macro_imm        <= {24'd0, exc_vector};
+                        end
+                        // Normal: Detect OP_MICROCODE issued from IQ
+                        else if (iq_issue_valid && iq_issue_instr.op_cat == OP_MICROCODE) begin
                             ucode_state      <= UC_DRAINING;
                             // Latch macro-op info from IQ issue
                             macro_rob_tag    <= iq_issue_instr.rob_tag;
@@ -2814,7 +2988,7 @@ module f386_ooo_core_top (
         // During UC_ACTIVE: sequencer drives valid (skipping memory + regonly ops)
         // On dequeue cycle: suppress (macro-op consumed, not executed)
         assign eff_exec_u_valid =
-            (ucode_state == UC_ACTIVE) ? (seq_uop_valid && !uop_is_mem && !uop_is_regonly_cmd) :
+            (ucode_state == UC_ACTIVE) ? (seq_uop_valid && !uop_is_mem && !uop_is_regonly_cmd && !uop_is_io_cmd) :
             iq_force_dequeue           ? 1'b0 :
             iq_issue_valid;
 
@@ -2956,6 +3130,17 @@ module f386_ooo_core_top (
         // uc_regonly_phys_dest assigned in gen_lsq_memif (where rob_phys_dest_tbl lives)
         assign uc_regonly_dest_valid = (seq_uop_special_cmd == UCMD_LOAD_CR);
 
+        // ---------------------------------------------------------
+        // P3.MMIO.b: IO port CDB0 synthesis (IN/OUT completion)
+        // ---------------------------------------------------------
+        // Both IN and OUT need CDB0 to mark ROB entry complete.
+        // IN: writes io_port_rdata to EAX via phys_dest.
+        // OUT: fires CDB0 with dest_valid=0 (no register write, ROB completion only).
+        assign uc_io_cdb0_fire      = uc_io_done;
+        assign uc_io_cdb0_data      = uc_io_is_read_r ? io_port_rdata : 32'd0;
+        // uc_io_cdb0_phys_dest assigned in gen_lsq_memif (where rob_phys_dest_tbl lives)
+        assign uc_io_cdb0_dest_valid = uc_io_is_read_r;  // IN writes EAX, OUT does not
+
         // CR write port (STORE_CR: write macro_val_a to CR[macro_modrm_reg])
         // Note: no !flush gate — CR3 write itself causes flush (avoid comb loop)
         assign ucode_cr_we  = uc_regonly_done && (seq_uop_special_cmd == UCMD_STORE_CR);
@@ -3066,6 +3251,91 @@ module f386_ooo_core_top (
         // (V-pipe is always suppressed for OP_MICROCODE, so next block is correct)
         assign ucode_cr_flush_next_pc = {macro_pc[31:4], 4'h0} + 32'd16;
 
+        // ---------------------------------------------------------
+        // P3.EXC.b: Exception Unit Instantiation
+        // ---------------------------------------------------------
+        logic        exc_deliver;
+        logic [7:0]  exc_vector;
+        logic [31:0] exc_error_code;
+        logic        exc_has_error;
+        logic [31:0] exc_eip;
+        logic        exc_cr2_we;
+        logic [31:0] exc_cr2_value;
+        logic        exc_triple_fault;
+        logic        exc_handling;
+
+        // microcode_done for exception handler: sequencer finishes the INT sequence
+        // triggered by exception delivery (ucode_state returns to UC_IDLE)
+        wire exc_microcode_done = (ucode_state == UC_IDLE) && exc_handling;
+
+        f386_exception_unit exc_unit (
+            .clk              (clk),
+            .rst_n            (rst_n),
+            .flush            (flush),
+
+            // Exception sources (P3.EXC.c: wire from execute/TLB later)
+            .exc_from_exec    (1'b0),
+            .exc_exec_vector  (8'd0),
+            .exc_exec_error_code(32'd0),
+            .exc_exec_has_error(1'b0),
+            .exc_exec_rob_tag ('0),
+
+            .exc_from_tlb     (1'b0),
+            .exc_tlb_fault_addr(dtlb_fault_addr),
+            .exc_tlb_fault_code(4'd0),
+            .exc_tlb_rob_tag  ('0),
+
+            // Retirement interface
+            .retire_valid     (rob_retire_u_valid),
+            .retire_rob_tag   (rob_head_ptr),
+            .retire_pc        (rob_retire_u.instr.pc),
+            .retire_has_exc   (rob_retire_u_has_exc),
+            .retire_exc_vector   (rob_retire_u_exc_vector),
+            .retire_exc_code     (rob_retire_u_exc_code),
+            .retire_exc_has_error(rob_retire_u_exc_has_error),
+
+            .microcode_done   (exc_microcode_done),
+
+            // Delivery to microcode
+            .deliver_exc      (exc_deliver),
+            .deliver_vector   (exc_vector),
+            .deliver_error_code(exc_error_code),
+            .deliver_has_error(exc_has_error),
+            .deliver_eip      (exc_eip),
+
+            // CR2 update
+            .cr2_we           (exc_cr2_we),
+            .cr2_value        (exc_cr2_value),
+
+            // Triple fault
+            .triple_fault     (exc_triple_fault),
+
+            // Status
+            .handling_exception(exc_handling),
+            .handling_double_fault()
+        );
+
+        // ---------------------------------------------------------
+        // P3.EXC.b: Exception Delivery → Microcode INT path
+        // ---------------------------------------------------------
+        // When exc_deliver fires, force the drain FSM into UC_ACTIVE
+        // with INT parameters, bypassing normal IQ issue + drain.
+        // This reuses the existing INT (0xCD) microcode sequence.
+        //
+        // Integration: exc_deliver sets uc_exc_pending_r, which is
+        // consumed on the next cycle to force UC_ACTIVE entry.
+        logic uc_exc_pending_r;
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n)
+                uc_exc_pending_r <= 1'b0;
+            else if (flush)
+                uc_exc_pending_r <= 1'b0;
+            else if (exc_deliver && ucode_state == UC_IDLE)
+                uc_exc_pending_r <= 1'b1;
+            else if (uc_exc_pending_r)
+                uc_exc_pending_r <= 1'b0;  // Consumed
+        end
+
         // Deferred special commands (sim-only log)
         // synopsys translate_off
         always_ff @(posedge clk) begin
@@ -3080,7 +3350,9 @@ module f386_ooo_core_top (
                     && seq_uop_special_cmd != UCMD_FAR_CALL
                     && seq_uop_special_cmd != UCMD_LOAD_SEG
                     && seq_uop_special_cmd != UCMD_INT_ENTER
-                    && seq_uop_special_cmd != UCMD_INT_EXIT) begin
+                    && seq_uop_special_cmd != UCMD_INT_EXIT
+                    && seq_uop_special_cmd != UCMD_IO_IN
+                    && seq_uop_special_cmd != UCMD_IO_OUT) begin
                     case (seq_uop_special_cmd)
                         UCMD_STORE_DTR,                    // deferred P3.2+
                         UCMD_STORE_SEG,                    // deferred P3.4+
@@ -3098,6 +3370,16 @@ module f386_ooo_core_top (
         // ---------------------------------------------------------
         // Gate OFF: All signals passthrough (zero behavior change)
         // ---------------------------------------------------------
+        // P3.EXC.b: no exception unit when microcode is off
+        logic exc_deliver, exc_handling, exc_triple_fault;
+        logic exc_cr2_we;
+        logic [31:0] exc_cr2_value;
+        assign exc_deliver      = 1'b0;
+        assign exc_handling     = 1'b0;
+        assign exc_triple_fault = 1'b0;
+        assign exc_cr2_we       = 1'b0;
+        assign exc_cr2_value    = 32'd0;
+
         assign ucode_active          = 1'b0;
         assign dbg_ucode_state       = 2'd0;
         // Microcode memory engine bridge tie-offs
@@ -3110,6 +3392,7 @@ module f386_ooo_core_top (
         assign uc_mem_size             = 2'd0;
         assign uc_mem_byte_en          = 4'd0;
         assign uc_mem_ld_dispatch      = 1'b0;
+        assign uc_mem_ld_dispatch_pc   = 32'd0;
         assign uc_mem_st_dispatch      = 1'b0;
         assign uc_mem_dispatch_rob_tag = '0;
         assign uc_mem_retire_st        = 1'b0;
@@ -3124,6 +3407,16 @@ module f386_ooo_core_top (
         assign uc_regonly_cdb0_data    = 32'd0;
         // uc_regonly_phys_dest assigned in gen_lsq_memif / gen_no_lsq_memif
         assign uc_regonly_dest_valid   = 1'b0;
+        // P3.MMIO.b: IO port tie-offs (gate OFF)
+        assign uc_io_cdb0_fire        = 1'b0;
+        assign uc_io_cdb0_data        = 32'd0;
+        // uc_io_cdb0_phys_dest assigned in gen_lsq_memif / gen_no_lsq_memif
+        assign uc_io_cdb0_dest_valid  = 1'b0;
+        assign io_port_addr           = 16'd0;
+        assign io_port_wdata          = 32'd0;
+        assign io_port_wr             = 1'b0;
+        assign io_port_rd             = 1'b0;
+        assign io_port_size           = 2'd0;
         assign ucode_cr_we            = 1'b0;
         assign ucode_cr_idx           = CR_0;
         assign ucode_cr_din           = 32'd0;
@@ -3151,6 +3444,30 @@ module f386_ooo_core_top (
         assign ucode_eflags_din      = 32'h0;
         assign ucode_eflags_mask     = 32'h0;
         assign ucode_eflags_we       = 1'b0;
+
+    end endgenerate
+
+    // =================================================================
+    // P3.WDG: Hardware Watchdog / NMI Timeout
+    // =================================================================
+    // Fires a single-cycle NMI pulse (vector 2) when the core fails to
+    // retire any instruction within ~16M cycles. The exception unit will
+    // consume watchdog_nmi when the NMI path is fully wired.
+    logic watchdog_nmi;
+
+    generate if (CONF_ENABLE_HW_WATCHDOG) begin : gen_hw_watchdog
+
+        f386_hw_watchdog u_hw_watchdog (
+            .clk         (clk),
+            .rst_n       (rst_n),
+            .enable      (1'b1),
+            .heartbeat   (rob_retire_u_valid),
+            .nmi_timeout (watchdog_nmi)
+        );
+
+    end else begin : gen_no_hw_watchdog
+
+        assign watchdog_nmi = 1'b0;
 
     end endgenerate
 

@@ -78,6 +78,8 @@ public:
         top_->irq_vector = 0;
         top_->test_force_flush = 0;
         top_->a20_gate = 1;
+        top_->io_port_rdata = 0;
+        top_->io_port_ack = 0;
 
         // Split-phase ports (inactive)
         top_->sp_data_req_ready = 0;

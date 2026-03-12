@@ -297,6 +297,14 @@ module f386_emu (
 
         .a20_gate        (a20_gate),
 
+        .io_port_addr    (cpu_io_addr),
+        .io_port_wdata   (cpu_io_wdata),
+        .io_port_wr      (cpu_io_wr),
+        .io_port_rd      (cpu_io_rd),
+        .io_port_size    (cpu_io_size),
+        .io_port_rdata   (cpu_io_rdata),
+        .io_port_ack     (cpu_io_ack),
+
         .pt_addr         (pt_addr),
         .pt_wdata        (pt_wdata),
         .pt_rdata        (pt_rdata),
@@ -466,19 +474,12 @@ module f386_emu (
     logic        pic_cs, pit_cs, ps2_cs, vga_cs, rtc_cs, dma_cs;
     logic [7:0]  pic_rdata, pit_rdata, ps2_rdata, vga_rdata, rtc_rdata, dma_rdata;
 
-    // CPU I/O bus (stub — will be driven by execute stage I/O micro-ops)
+    // CPU I/O bus (driven by core_top microcode IN/OUT micro-ops)
     logic [15:0] cpu_io_addr;
     logic [31:0] cpu_io_wdata, cpu_io_rdata;
     logic        cpu_io_wr, cpu_io_rd;
     logic [1:0]  cpu_io_size;
     logic        cpu_io_ack;
-
-    // Stub: no I/O operations until microcode drives IN/OUT
-    assign cpu_io_addr  = 16'd0;
-    assign cpu_io_wdata = 32'd0;
-    assign cpu_io_wr    = 1'b0;
-    assign cpu_io_rd    = 1'b0;
-    assign cpu_io_size  = 2'd0;
 
     f386_iobus iobus (
         .clk             (cpu_clk),

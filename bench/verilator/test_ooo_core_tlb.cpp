@@ -77,6 +77,9 @@ public:
         top_->irq_vector = 0;
         top_->a20_gate = 0;
         top_->test_force_flush = 0;
+        // IO port (inactive)
+        top_->io_port_rdata = 0;
+        top_->io_port_ack = 0;
         // Page walker memory port
         top_->pt_rdata = 0;
         top_->pt_ack = 0;

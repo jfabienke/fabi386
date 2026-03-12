@@ -88,6 +88,10 @@ public:
         top_->test_force_flush = 0;
         top_->a20_gate = 1;
 
+        // IO port (inactive — default no ack)
+        top_->io_port_rdata = 0;
+        top_->io_port_ack = 0;
+
         // Page walker port (inactive — TLB gate OFF)
         top_->pt_rdata = 0;
         top_->pt_ack = 0;

@@ -1310,14 +1310,24 @@ module f386_decode (
             default: ;
         endcase
 
-        // I/O port access
-        case (pd.opcode)
-            8'hE4, 8'hE5, 8'hEC, 8'hED:             // IN
-                return OP_IO_READ;
-            8'hE6, 8'hE7, 8'hEE, 8'hEF:             // OUT
-                return OP_IO_WRITE;
-            default: ;
-        endcase
+        // I/O port access — routed through microcode when enabled
+        if (CONF_ENABLE_MICROCODE) begin
+            case (pd.opcode)
+                8'hE4, 8'hE5, 8'hEC, 8'hED:         // IN
+                    return OP_MICROCODE;
+                8'hE6, 8'hE7, 8'hEE, 8'hEF:         // OUT
+                    return OP_MICROCODE;
+                default: ;
+            endcase
+        end else begin
+            case (pd.opcode)
+                8'hE4, 8'hE5, 8'hEC, 8'hED:         // IN
+                    return OP_IO_READ;
+                8'hE6, 8'hE7, 8'hEE, 8'hEF:         // OUT
+                    return OP_IO_WRITE;
+                default: ;
+            endcase
+        end
 
         `ifdef VERILATOR
         // Test opcode 0xD6: microcode mem bring-up (PUSH EAX → POP EBX)
@@ -2254,6 +2264,37 @@ module f386_decode (
             ru.dest_valid = (pd.opcode != 8'hE3); // JCXZ doesn't modify ECX
             return ru;
         end
+
+        // IN (E4/E5/EC/ED) — implicit EAX dest
+        // OUT (E6/E7/EE/EF) — implicit EAX source
+        // DX-form (EC-EF): DX is port address (read via microcode ROM src_a override)
+        case (pd.opcode)
+            8'hE4, 8'hE5: begin // IN AL/eAX, imm8 — writes EAX
+                ru.dest = REG_EAX;
+                ru.dest_valid = 1;
+                return ru;
+            end
+            8'hEC, 8'hED: begin // IN AL/eAX, DX — writes EAX, reads DX
+                ru.dest = REG_EAX;
+                ru.dest_valid = 1;
+                ru.src_a = REG_EDX;
+                ru.src_a_valid = 1;
+                return ru;
+            end
+            8'hE6, 8'hE7: begin // OUT imm8, AL/eAX — reads EAX
+                ru.src_a = REG_EAX;
+                ru.src_a_valid = 1;
+                return ru;
+            end
+            8'hEE, 8'hEF: begin // OUT DX, AL/eAX — reads EAX and DX
+                ru.src_a = REG_EAX;
+                ru.src_a_valid = 1;
+                ru.src_b = REG_EDX;
+                ru.src_b_valid = 1;
+                return ru;
+            end
+            default: ;
+        endcase
 
         // Grp3 (F6/F7): TEST/NOT/NEG/MUL/IMUL/DIV/IDIV
         if (pd.opcode == 8'hF6 || pd.opcode == 8'hF7) begin

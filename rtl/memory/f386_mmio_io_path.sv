@@ -39,6 +39,9 @@ module f386_mmio_io_path (
     output logic [31:0]  ld_cdb_data,
     output lq_idx_t      ld_cdb_lq_idx,
     output logic         ld_cdb_fault,
+    output logic [7:0]   ld_cdb_exc_vector,    // P3.EXC.a
+    output logic [31:0]  ld_cdb_exc_code,
+    output logic         ld_cdb_exc_has_error,
 
     // --- Downstream: split-phase memory interface ---
     output logic         mem_req_valid,
@@ -89,6 +92,7 @@ module f386_mmio_io_path (
     // Latched response data
     logic [63:0]  lat_rdata;
     logic         lat_fault;
+    logic         lat_fault_is_pf;  // P3.EXC.a: distinguish #PF from #GP
 
     // =========================================================
     // Load data extraction (byte-level shift, mirrors LSQ)
@@ -169,9 +173,10 @@ module f386_mmio_io_path (
     // =========================================================
     always_ff @(posedge clk) begin
         if (state_q == IO_WAIT && mem_rsp_valid) begin
-            lat_rdata <= mem_rsp_in.rdata[63:0];
-            lat_fault <= (mem_rsp_in.resp == MEM_RESP_FAULT) ||
-                         (mem_rsp_in.resp == MEM_RESP_MISALIGN);
+            lat_rdata       <= mem_rsp_in.rdata[63:0];
+            lat_fault       <= (mem_rsp_in.resp == MEM_RESP_FAULT) ||
+                               (mem_rsp_in.resp == MEM_RESP_MISALIGN);
+            lat_fault_is_pf <= (mem_rsp_in.resp == MEM_RESP_FAULT);
         end
     end
 
@@ -202,11 +207,14 @@ module f386_mmio_io_path (
     // =========================================================
     // CDB Output (one cycle in IO_CDB)
     // =========================================================
-    assign ld_cdb_valid  = (state_q == IO_CDB);
-    assign ld_cdb_tag    = lat_rob_tag;
-    assign ld_cdb_data   = lat_fault ? 32'hDEAD_BEEF : extracted;
-    assign ld_cdb_lq_idx = lat_lq_idx;
-    assign ld_cdb_fault  = lat_fault;
+    assign ld_cdb_valid       = (state_q == IO_CDB);
+    assign ld_cdb_tag         = lat_rob_tag;
+    assign ld_cdb_data        = lat_fault ? 32'hDEAD_BEEF : extracted;
+    assign ld_cdb_lq_idx      = lat_lq_idx;
+    assign ld_cdb_fault       = lat_fault;
+    assign ld_cdb_exc_vector   = lat_fault ? (lat_fault_is_pf ? EXC_PF : EXC_GP) : 8'd0;
+    assign ld_cdb_exc_code     = 32'd0;
+    assign ld_cdb_exc_has_error = lat_fault;
 
     // =========================================================
     // Assertions (simulation only)

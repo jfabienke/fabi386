@@ -310,6 +310,43 @@ verilate(tb_ooo_core_alu
 )
 
 # ============================================================
+# Test: Boot Integration (PM boot, INT/IRET, IO ports)
+# ============================================================
+verilate(tb_boot_integration
+    SOURCES
+        ${RTL_ROOT}/top/f386_pkg.sv
+        ${RTL_ROOT}/primitives/f386_distributed_ram.sv
+        ${RTL_ROOT}/primitives/f386_block_ram.sv
+        ${RTL_ROOT}/primitives/f386_picker.sv
+        ${RTL_ROOT}/primitives/f386_freelist_multiwidth.sv
+        ${RTL_ROOT}/core/f386_alu.v
+        ${RTL_ROOT}/core/f386_alu_simd.sv
+        ${RTL_ROOT}/core/f386_branch_predict_gshare.sv
+        ${RTL_ROOT}/core/f386_branch_predict_hybrid.sv
+        ${RTL_ROOT}/core/f386_branch_predict.sv
+        ${RTL_ROOT}/core/f386_decode.sv
+        ${RTL_ROOT}/core/f386_decode_cache.sv
+        ${RTL_ROOT}/core/f386_dispatch.sv
+        ${RTL_ROOT}/core/f386_execute_stage.sv
+        ${RTL_ROOT}/core/f386_issue_queue.sv
+        ${RTL_ROOT}/core/f386_microcode_rom.sv
+        ${RTL_ROOT}/core/f386_microcode_sequencer.sv
+        ${RTL_ROOT}/core/f386_register_rename.sv
+        ${RTL_ROOT}/core/f386_rob.sv
+        ${RTL_ROOT}/core/f386_seg_cache.sv
+        ${RTL_ROOT}/core/f386_agu.sv
+        ${RTL_ROOT}/core/f386_lsq.sv
+        ${RTL_ROOT}/memory/f386_lsq_to_memctrl_shim.sv
+        ${RTL_ROOT}/memory/f386_mmio_io_path.sv
+        ${RTL_ROOT}/memory/f386_mem_req_arbiter.sv
+        ${RTL_ROOT}/core/f386_ooo_core_top.sv
+    TOP_MODULE f386_ooo_core_top
+    CPP_SOURCES test_ooo_core_boot_integration.cpp memory_model.h
+    FLAGS ${VERILATOR_COMMON_FLAGS} +define+VERILATOR_ENABLE_MICROCODE +define+VERILATOR_ENABLE_LSQ_MEMIF
+    INCLUDE_DIRS ${RTL_INCLUDE_DIRS}
+)
+
+# ============================================================
 # CTest integration
 # ============================================================
 enable_testing()
@@ -325,3 +362,4 @@ add_test(NAME dtlb_frontend COMMAND test_dtlb_frontend)
 add_test(NAME ooo_core_ucode_mem COMMAND tb_ooo_core_ucode_mem)
 add_test(NAME ooo_core_tlb COMMAND tb_ooo_core_tlb)
 add_test(NAME ooo_core_alu COMMAND tb_ooo_core_alu)
+add_test(NAME boot_integration COMMAND tb_boot_integration)

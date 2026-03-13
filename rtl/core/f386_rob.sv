@@ -40,6 +40,7 @@ module f386_rob (
     input  logic [7:0]   cdb0_exc_vector,  // Exception vector (P3.EXC.a)
     input  logic [31:0]  cdb0_exc_code,    // Exception error code
     input  logic         cdb0_exc_has_error, // Error code valid
+    input  logic [31:0]  cdb0_exc_fault_addr, // Faulting address (CR2 for #PF)
 
     input  logic         cdb1_valid,       // Completion port 1
     input  rob_id_t      cdb1_tag,
@@ -50,6 +51,7 @@ module f386_rob (
     input  logic [7:0]   cdb1_exc_vector,
     input  logic [31:0]  cdb1_exc_code,
     input  logic         cdb1_exc_has_error,
+    input  logic [31:0]  cdb1_exc_fault_addr,
 
     // --- Retirement Interface (to Arch Register File / Free List) ---
     output rob_entry_t   retire_u,
@@ -60,6 +62,7 @@ module f386_rob (
     output logic [7:0]   retire_u_exc_vector,
     output logic [31:0]  retire_u_exc_code,
     output logic         retire_u_exc_has_error,
+    output logic [31:0]  retire_u_exc_fault_addr,
     output rob_entry_t   retire_v,
     output logic         retire_v_valid,
     output logic [5:0]   retire_v_flags,
@@ -68,6 +71,7 @@ module f386_rob (
     output logic [7:0]   retire_v_exc_vector,
     output logic [31:0]  retire_v_exc_code,
     output logic         retire_v_exc_has_error,
+    output logic [31:0]  retire_v_exc_fault_addr,
 
     // --- LSQ Index Pairing ---
     input  lq_idx_t      dispatch_u_lq_idx,  // Load queue index for U-pipe
@@ -101,7 +105,11 @@ module f386_rob (
     input  logic         flush,
 
     // --- P3: Head pointer export (for microcode drain) ---
-    output rob_id_t      rob_head_out
+    output rob_id_t      rob_head_out,
+
+    // --- P3.EXC: Architectural state for NMI EIP ---
+    output logic         rob_empty,        // ROB has no valid entries
+    output logic [31:0]  rob_head_pc       // PC of oldest in-flight instruction
 );
 
     // =========================================================
@@ -120,9 +128,10 @@ module f386_rob (
     logic [31:0]   entry_data  [N];
 
     // Per-entry exception metadata (P3.EXC.a)
-    logic [7:0]    entry_exc_vector   [N];  // Exception vector (0-31)
-    logic [31:0]   entry_exc_code     [N];  // Error code
-    logic [N-1:0]  entry_exc_has_error;     // Error code valid flag
+    logic [7:0]    entry_exc_vector     [N];  // Exception vector (0-31)
+    logic [31:0]   entry_exc_code       [N];  // Error code
+    logic [N-1:0]  entry_exc_has_error;       // Error code valid flag
+    logic [31:0]   entry_exc_fault_addr [N];  // Faulting address (CR2 for #PF)
 
     // Per-entry old physical register (for freelist reclaim at retirement)
     phys_reg_t     entry_old_phys [N];
@@ -142,6 +151,8 @@ module f386_rob (
     rob_id_t head, tail;
     logic [ROB_ID_WIDTH:0] count;  // +1 bit to represent 0..N
     assign rob_head_out = head;
+    assign rob_empty    = (count == 0);
+    assign rob_head_pc  = entry_instr[head].pc;
 
     // =========================================================
     // Occupancy
@@ -197,18 +208,20 @@ module f386_rob (
         retire_u_valid      = 1'b0;
         retire_u_flags      = 6'd0;
         retire_u_flags_mask = 6'd0;
-        retire_u_has_exc       = 1'b0;
-        retire_u_exc_vector    = 8'd0;
-        retire_u_exc_code      = 32'd0;
-        retire_u_exc_has_error = 1'b0;
+        retire_u_has_exc        = 1'b0;
+        retire_u_exc_vector     = 8'd0;
+        retire_u_exc_code       = 32'd0;
+        retire_u_exc_has_error  = 1'b0;
+        retire_u_exc_fault_addr = 32'd0;
         retire_v            = '0;
         retire_v_valid      = 1'b0;
         retire_v_flags      = 6'd0;
         retire_v_flags_mask = 6'd0;
-        retire_v_has_exc       = 1'b0;
-        retire_v_exc_vector    = 8'd0;
-        retire_v_exc_code      = 32'd0;
-        retire_v_exc_has_error = 1'b0;
+        retire_v_has_exc        = 1'b0;
+        retire_v_exc_vector     = 8'd0;
+        retire_v_exc_code       = 32'd0;
+        retire_v_exc_has_error  = 1'b0;
+        retire_v_exc_fault_addr = 32'd0;
         retire_count        = 2'd0;
 
         // Default LSQ retirement outputs
@@ -230,10 +243,11 @@ module f386_rob (
             retire_u_flags      = entry_flags[head];
             retire_u_flags_mask = entry_flags_mask[head];
             retire_u_is_store   = (entry_instr[head].op_cat == OP_STORE);
-            retire_u_has_exc       = entry_exception[head];
-            retire_u_exc_vector    = entry_exc_vector[head];
-            retire_u_exc_code      = entry_exc_code[head];
-            retire_u_exc_has_error = entry_exc_has_error[head];
+            retire_u_has_exc        = entry_exception[head];
+            retire_u_exc_vector     = entry_exc_vector[head];
+            retire_u_exc_code       = entry_exc_code[head];
+            retire_u_exc_has_error  = entry_exc_has_error[head];
+            retire_u_exc_fault_addr = entry_exc_fault_addr[head];
             retire_count        = 2'd1;
 
             // V retires only if both U and V are exception-free (precise exceptions)
@@ -246,10 +260,11 @@ module f386_rob (
                 retire_v_flags      = entry_flags[head_plus1];
                 retire_v_flags_mask = entry_flags_mask[head_plus1];
                 retire_v_is_store   = (entry_instr[head_plus1].op_cat == OP_STORE);
-                retire_v_has_exc       = entry_exception[head_plus1];
-                retire_v_exc_vector    = entry_exc_vector[head_plus1];
-                retire_v_exc_code      = entry_exc_code[head_plus1];
-                retire_v_exc_has_error = entry_exc_has_error[head_plus1];
+                retire_v_has_exc        = entry_exception[head_plus1];
+                retire_v_exc_vector     = entry_exc_vector[head_plus1];
+                retire_v_exc_code       = entry_exc_code[head_plus1];
+                retire_v_exc_has_error  = entry_exc_has_error[head_plus1];
+                retire_v_exc_fault_addr = entry_exc_fault_addr[head_plus1];
                 retire_count        = 2'd2;
             end
         end
@@ -326,10 +341,11 @@ module f386_rob (
                 entry_data[cdb0_tag]       <= cdb0_data;
                 entry_flags[cdb0_tag]      <= cdb0_flags;
                 entry_flags_mask[cdb0_tag] <= cdb0_flags_mask;
-                entry_exception[cdb0_tag]     <= cdb0_exception;
-                entry_exc_vector[cdb0_tag]    <= cdb0_exc_vector;
-                entry_exc_code[cdb0_tag]      <= cdb0_exc_code;
-                entry_exc_has_error[cdb0_tag] <= cdb0_exc_has_error;
+                entry_exception[cdb0_tag]      <= cdb0_exception;
+                entry_exc_vector[cdb0_tag]     <= cdb0_exc_vector;
+                entry_exc_code[cdb0_tag]       <= cdb0_exc_code;
+                entry_exc_has_error[cdb0_tag]  <= cdb0_exc_has_error;
+                entry_exc_fault_addr[cdb0_tag] <= cdb0_exc_fault_addr;
             end
             if (cdb1_valid && (entry_valid[cdb1_tag] ||
                     (dispatch_u_valid && !full && cdb1_tag == tail) ||
@@ -338,10 +354,11 @@ module f386_rob (
                 entry_data[cdb1_tag]          <= cdb1_data;
                 entry_flags[cdb1_tag]         <= cdb1_flags;
                 entry_flags_mask[cdb1_tag]    <= cdb1_flags_mask;
-                entry_exception[cdb1_tag]     <= cdb1_exception;
-                entry_exc_vector[cdb1_tag]    <= cdb1_exc_vector;
-                entry_exc_code[cdb1_tag]      <= cdb1_exc_code;
-                entry_exc_has_error[cdb1_tag] <= cdb1_exc_has_error;
+                entry_exception[cdb1_tag]      <= cdb1_exception;
+                entry_exc_vector[cdb1_tag]     <= cdb1_exc_vector;
+                entry_exc_code[cdb1_tag]       <= cdb1_exc_code;
+                entry_exc_has_error[cdb1_tag]  <= cdb1_exc_has_error;
+                entry_exc_fault_addr[cdb1_tag] <= cdb1_exc_fault_addr;
             end
 
             // --- SpecBits: clear resolved branch bit from all entries ---

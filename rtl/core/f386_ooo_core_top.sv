@@ -174,6 +174,8 @@ module f386_ooo_core_top (
 
     // --- ROB head pointer (for microcode drain) ---
     rob_id_t     rob_head_ptr;
+    logic        rob_empty;
+    logic [31:0] rob_head_pc;
 
     // --- PRF read data ---
     logic [31:0] prf_data_a, prf_data_b, prf_data_c, prf_data_d;
@@ -197,6 +199,7 @@ module f386_ooo_core_top (
     logic [7:0]  rob_retire_u_exc_vector, rob_retire_v_exc_vector;
     logic [31:0] rob_retire_u_exc_code, rob_retire_v_exc_code;
     logic        rob_retire_u_exc_has_error, rob_retire_v_exc_has_error;
+    logic [31:0] rob_retire_u_exc_fault_addr, rob_retire_v_exc_fault_addr;
 
     // --- Execute Stage → CDB (raw from exec, muxed in gen_lsq_memif) ---
     logic        raw_cdb0_valid, raw_cdb1_valid;
@@ -208,6 +211,7 @@ module f386_ooo_core_top (
     logic [7:0]  raw_cdb0_exc_vector, raw_cdb1_exc_vector;
     logic [31:0] raw_cdb0_exc_code, raw_cdb1_exc_code;
     logic        raw_cdb0_exc_has_error, raw_cdb1_exc_has_error;
+    logic [31:0] raw_cdb0_exc_fault_addr, raw_cdb1_exc_fault_addr;
     phys_reg_t   raw_cdb0_phys_dest, raw_cdb1_phys_dest;
     logic        raw_cdb0_dest_valid, raw_cdb1_dest_valid;
 
@@ -221,6 +225,7 @@ module f386_ooo_core_top (
     logic [7:0]  cdb0_exc_vector, cdb1_exc_vector;
     logic [31:0] cdb0_exc_code, cdb1_exc_code;
     logic        cdb0_exc_has_error, cdb1_exc_has_error;
+    logic [31:0] cdb0_exc_fault_addr, cdb1_exc_fault_addr;
 
     // --- Execute Stage → Writeback ---
     logic [31:0] wb_data_u, wb_data_v;
@@ -331,9 +336,10 @@ module f386_ooo_core_top (
     // --- LSQ load issue stall (gates IQ exec_ready to prevent load dequeue when LD_WAIT busy) ---
     logic lsq_load_issue_stall;
 
-    // --- DTLB fault signals (driven by gen_dtlb or gen_no_dtlb, read by sys_regs CR2) ---
+    // --- DTLB fault signals (driven by gen_dtlb or gen_no_dtlb, read by sys_regs CR2 + exc_unit) ---
     logic        dtlb_fault;
     logic [31:0] dtlb_fault_addr;
+    logic [3:0]  dtlb_fault_code;
 
     // --- LSQ ↔ ROB wiring (driven by gen_lsq_memif, stubbed when gate OFF) ---
     lq_idx_t  rob_dispatch_u_lq_idx;
@@ -341,8 +347,22 @@ module f386_ooo_core_top (
     sq_idx_t  rob_retire_u_sq_idx_w;
     logic     rob_retire_u_is_store_w;
 
+    // --- Store drain fault (driven by gen_lsq_memif, used by gen_microcode exc_unit) ---
+    logic        lsq_sq_drain_fault;
+    logic [7:0]  lsq_sq_drain_fault_vector;
+    logic [31:0] lsq_sq_drain_fault_code;
+    logic [31:0] lsq_sq_drain_fault_addr;
+    logic [31:0] lsq_sq_drain_fault_pc;
+
     // --- P3: Microcode active (driven by gen_microcode, 0 when gate OFF) ---
     logic ucode_active;
+
+    // --- P3.WDG: Watchdog NMI (driven by gen_hw_watchdog, used by gen_microcode exc_unit) ---
+    logic watchdog_nmi;
+
+    // --- P3.EXC.b: Exception unit CR2 write (driven by gen_microcode/gen_no_microcode) ---
+    logic        exc_cr2_we;
+    logic [31:0] exc_cr2_value;
 
     // --- P3.1b: Microcode memory engine bridge (gen_microcode ↔ gen_lsq_memif) ---
     // From gen_microcode → gen_lsq_memif
@@ -962,6 +982,7 @@ module f386_ooo_core_top (
         .cdb0_exc_vector   (cdb0_exc_vector),
         .cdb0_exc_code     (cdb0_exc_code),
         .cdb0_exc_has_error(cdb0_exc_has_error),
+        .cdb0_exc_fault_addr(cdb0_exc_fault_addr),
         .cdb1_valid        (cdb1_valid),
         .cdb1_tag          (cdb1_tag),
         .cdb1_data         (cdb1_data),
@@ -971,6 +992,7 @@ module f386_ooo_core_top (
         .cdb1_exc_vector   (cdb1_exc_vector),
         .cdb1_exc_code     (cdb1_exc_code),
         .cdb1_exc_has_error(cdb1_exc_has_error),
+        .cdb1_exc_fault_addr(cdb1_exc_fault_addr),
 
         // Retirement (flags forwarded to sys_regs for architectural commit)
         .retire_u          (rob_retire_u),
@@ -981,6 +1003,7 @@ module f386_ooo_core_top (
         .retire_u_exc_vector   (rob_retire_u_exc_vector),
         .retire_u_exc_code     (rob_retire_u_exc_code),
         .retire_u_exc_has_error(rob_retire_u_exc_has_error),
+        .retire_u_exc_fault_addr(rob_retire_u_exc_fault_addr),
         .retire_v          (rob_retire_v),
         .retire_v_valid    (rob_retire_v_valid),
         .retire_v_flags    (rob_retire_v_flags),
@@ -989,6 +1012,7 @@ module f386_ooo_core_top (
         .retire_v_exc_vector   (rob_retire_v_exc_vector),
         .retire_v_exc_code     (rob_retire_v_exc_code),
         .retire_v_exc_has_error(rob_retire_v_exc_has_error),
+        .retire_v_exc_fault_addr(rob_retire_v_exc_fault_addr),
 
         // Old physical register (for freelist reclaim at retirement)
         .dispatch_u_old_phys (rename_old_phys_u),
@@ -1020,7 +1044,11 @@ module f386_ooo_core_top (
         .flush             (flush),
 
         // P3: Head pointer export (for microcode drain)
-        .rob_head_out      (rob_head_ptr)
+        .rob_head_out      (rob_head_ptr),
+
+        // P3.EXC: Architectural state for NMI EIP
+        .rob_empty         (rob_empty),
+        .rob_head_pc       (rob_head_pc)
     );
 
     // =================================================================
@@ -1177,6 +1205,7 @@ module f386_ooo_core_top (
         .cdb0_exc_vector (raw_cdb0_exc_vector),
         .cdb0_exc_code   (raw_cdb0_exc_code),
         .cdb0_exc_has_error(raw_cdb0_exc_has_error),
+        .cdb0_exc_fault_addr(raw_cdb0_exc_fault_addr),
         .cdb0_phys_dest  (raw_cdb0_phys_dest),
         .cdb0_dest_valid (raw_cdb0_dest_valid),
         .cdb1_valid      (raw_cdb1_valid),
@@ -1188,6 +1217,7 @@ module f386_ooo_core_top (
         .cdb1_exc_vector (raw_cdb1_exc_vector),
         .cdb1_exc_code   (raw_cdb1_exc_code),
         .cdb1_exc_has_error(raw_cdb1_exc_has_error),
+        .cdb1_exc_fault_addr(raw_cdb1_exc_fault_addr),
         .cdb1_phys_dest  (raw_cdb1_phys_dest),
         .cdb1_dest_valid (raw_cdb1_dest_valid),
 
@@ -1258,9 +1288,9 @@ module f386_ooo_core_top (
         .cr_din          (ucode_cr_din),
         .cr_we           (ucode_cr_we),
 
-        // Page fault CR2 (undriven until MMU)
-        .pf_cr2_din      (dtlb_fault_addr),
-        .pf_cr2_we       (dtlb_fault),
+        // Page fault CR2 — retirement-qualified via exception unit (P3.EXC.b)
+        .pf_cr2_din      (exc_cr2_value),
+        .pf_cr2_we       (exc_cr2_we),
 
         // EFLAGS write port (microcode special commands)
         .eflags_din      (ucode_eflags_din),
@@ -1577,6 +1607,7 @@ module f386_ooo_core_top (
         assign cdb0_exc_vector     = uc_synth_cdb0     ? 8'd0                    : raw_cdb0_exc_vector;
         assign cdb0_exc_code       = uc_synth_cdb0     ? 32'd0                   : raw_cdb0_exc_code;
         assign cdb0_exc_has_error  = uc_synth_cdb0     ? 1'b0                    : raw_cdb0_exc_has_error;
+        assign cdb0_exc_fault_addr = uc_synth_cdb0   ? 32'd0                   : raw_cdb0_exc_fault_addr;
         assign cdb0_phys_dest  = uc_io_cdb0_fire       ? uc_io_cdb0_phys_dest   :
                                  uc_regonly_cdb0_fire   ? uc_regonly_phys_dest    :
                                  uc_mem_esp_cdb0_fire   ? uc_mem_esp_phys_dest    : raw_cdb0_phys_dest;
@@ -1594,6 +1625,7 @@ module f386_ooo_core_top (
         logic [7:0]  lsq_ld_cdb_exc_vector;
         logic [31:0] lsq_ld_cdb_exc_code;
         logic        lsq_ld_cdb_exc_has_error;
+        logic [31:0] lsq_ld_cdb_exc_fault_addr;
 
         // ---------------------------------------------------------
         // IO path CDB load result (MMIO loads)
@@ -1606,6 +1638,7 @@ module f386_ooo_core_top (
         logic [7:0]  io_ld_cdb_exc_vector;
         logic [31:0] io_ld_cdb_exc_code;
         logic        io_ld_cdb_exc_has_error;
+        logic [31:0] io_ld_cdb_exc_fault_addr;
 
         // Combined CDB1 active flag (gates V-pipe exec CDB)
         assign lsq_cdb1_active = lsq_ld_cdb_valid || io_ld_cdb_valid;
@@ -1670,6 +1703,9 @@ module f386_ooo_core_top (
         assign cdb1_exc_has_error  = io_ld_cdb_valid   ? io_ld_cdb_exc_has_error     :
                                      lsq_ld_cdb_valid  ? lsq_ld_cdb_exc_has_error    :
                                                          raw_cdb1_exc_has_error;
+        assign cdb1_exc_fault_addr = io_ld_cdb_valid   ? io_ld_cdb_exc_fault_addr   :
+                                     lsq_ld_cdb_valid  ? lsq_ld_cdb_exc_fault_addr  :
+                                                         raw_cdb1_exc_fault_addr;
 
         // ---------------------------------------------------------
         // AGU (Finding #1): combinational effective address
@@ -1815,11 +1851,10 @@ module f386_ooo_core_top (
         logic        eff_is_mmio;       // MMIO classification for routing
 
         // DTLB signals (driven by gen_dtlb, tied off by gen_no_dtlb)
-        // dtlb_fault and dtlb_fault_addr are at module scope (for CR2 wiring)
+        // dtlb_fault, dtlb_fault_addr, dtlb_fault_code are at module scope
         logic        dtlb_busy;
         logic        dtlb_resp_valid;
         logic [31:0] dtlb_paddr;
-        logic [3:0]  dtlb_fault_code;
 
         // ---------------------------------------------------------
         // DTLB Integration (P3.TLB.a)
@@ -2049,7 +2084,7 @@ module f386_ooo_core_top (
         mem_rsp_t   arb_mem_rsp_in;
 
         // ---------------------------------------------------------
-        // MDP signals (unused in P2a)
+        // MDP signals
         // ---------------------------------------------------------
         logic        lsq_mdp_violation;
         logic [31:0] lsq_mdp_violation_pc;
@@ -2068,6 +2103,7 @@ module f386_ooo_core_top (
             .ld_dispatch_pc   (dec_instr_u.pc),
             .st_dispatch_valid (lsq_st_dispatch_valid && !mem_dispatch_blocked),
             .st_dispatch_rob_tag(rob_tag_u),
+            .st_dispatch_pc   (dec_instr_u.pc),
             .ld_dispatch_idx  (lsq_ld_dispatch_idx),
             .st_dispatch_idx  (lsq_st_dispatch_idx),
             .lq_full          (lsq_lq_full),
@@ -2077,6 +2113,7 @@ module f386_ooo_core_top (
             .uc_ld_dispatch_valid (uc_mem_ld_dispatch),
             .uc_ld_dispatch_pc (uc_mem_ld_dispatch_pc),
             .uc_st_dispatch_valid (uc_mem_st_dispatch),
+            .uc_st_dispatch_pc    (uc_mem_ld_dispatch_pc),  // Macro PC (same for ld/st)
             .uc_dispatch_rob_tag  (uc_mem_dispatch_rob_tag),
             .uc_ld_dispatch_idx   (uc_lsq_ld_alloc_idx),
             .uc_st_dispatch_idx   (uc_lsq_st_alloc_idx),
@@ -2108,6 +2145,7 @@ module f386_ooo_core_top (
             .ld_cdb_exc_vector   (lsq_ld_cdb_exc_vector),
             .ld_cdb_exc_code     (lsq_ld_cdb_exc_code),
             .ld_cdb_exc_has_error(lsq_ld_cdb_exc_has_error),
+            .ld_cdb_exc_fault_addr(lsq_ld_cdb_exc_fault_addr),
 
             // Retirement
             .retire_st_valid  (rob_retire_u_valid && rob_retire_u_is_store_w),
@@ -2143,10 +2181,12 @@ module f386_ooo_core_top (
             .mdp_violation    (lsq_mdp_violation),
             .mdp_violation_pc (lsq_mdp_violation_pc),
 
-            // Store drain fault (P3.EXC.c — wired in core_top later)
-            .sq_drain_fault        (),
-            .sq_drain_fault_vector (),
-            .sq_drain_fault_code   ()
+            // Store drain fault (P3.EXC.c → exception unit)
+            .sq_drain_fault        (lsq_sq_drain_fault),
+            .sq_drain_fault_vector (lsq_sq_drain_fault_vector),
+            .sq_drain_fault_code   (lsq_sq_drain_fault_code),
+            .sq_drain_fault_addr   (lsq_sq_drain_fault_addr),
+            .sq_drain_fault_pc     (lsq_sq_drain_fault_pc)
         );
 
         // ---------------------------------------------------------
@@ -2178,6 +2218,7 @@ module f386_ooo_core_top (
             .ld_cdb_exc_vector   (io_ld_cdb_exc_vector),
             .ld_cdb_exc_code     (io_ld_cdb_exc_code),
             .ld_cdb_exc_has_error(io_ld_cdb_exc_has_error),
+            .ld_cdb_exc_fault_addr(io_ld_cdb_exc_fault_addr),
 
             // Downstream: split-phase memory (to arbiter client 1)
             .mem_req_valid    (io_mem_req_valid),
@@ -2326,6 +2367,12 @@ module f386_ooo_core_top (
         assign rob_dispatch_u_sq_idx  = '0;
         assign dtlb_fault             = 1'b0;
         assign dtlb_fault_addr        = 32'd0;
+        assign dtlb_fault_code        = 4'd0;
+        assign lsq_sq_drain_fault        = 1'b0;
+        assign lsq_sq_drain_fault_vector = 8'd0;
+        assign lsq_sq_drain_fault_code   = 32'd0;
+        assign lsq_sq_drain_fault_addr   = 32'd0;
+        assign lsq_sq_drain_fault_pc     = 32'd0;
 
         assign mem_addr         = 32'd0;
         assign mem_wdata        = 64'd0;
@@ -2358,6 +2405,7 @@ module f386_ooo_core_top (
         assign cdb0_exc_vector     = uc_io_cdb0_fire   ? 8'd0                   : raw_cdb0_exc_vector;
         assign cdb0_exc_code       = uc_io_cdb0_fire   ? 32'd0                  : raw_cdb0_exc_code;
         assign cdb0_exc_has_error  = uc_io_cdb0_fire   ? 1'b0                   : raw_cdb0_exc_has_error;
+        assign cdb0_exc_fault_addr = uc_io_cdb0_fire   ? 32'd0                  : raw_cdb0_exc_fault_addr;
         assign cdb0_phys_dest  = uc_io_cdb0_fire       ? uc_io_cdb0_phys_dest   : raw_cdb0_phys_dest;
         assign cdb0_dest_valid = uc_io_cdb0_fire       ? uc_io_cdb0_dest_valid  : raw_cdb0_dest_valid;
 
@@ -2370,6 +2418,7 @@ module f386_ooo_core_top (
         assign cdb1_exc_vector     = raw_cdb1_exc_vector;
         assign cdb1_exc_code       = raw_cdb1_exc_code;
         assign cdb1_exc_has_error  = raw_cdb1_exc_has_error;
+        assign cdb1_exc_fault_addr = raw_cdb1_exc_fault_addr;
         assign cdb1_phys_dest  = raw_cdb1_phys_dest;
         assign cdb1_dest_valid = raw_cdb1_dest_valid;
 
@@ -2767,8 +2816,10 @@ module f386_ooo_core_top (
                             end else begin
                                 uc_io_wdata_r <= 32'd0;
                             end
-                            // IO size: byte for E4/E6/EC/EE, word/dword for E5/E7/ED/EF
-                            uc_io_size_r <= macro_opcode[0] ? 2'd2 : 2'd0;
+                            // IO size: byte for E4/E6/EC/EE;
+                            // word (16-bit) or dword (32-bit) for E5/E7/ED/EF per operand size
+                            uc_io_size_r <= macro_opcode[0] ? (macro_is_32bit ? 2'd2 : 2'd1)
+                                                            : 2'd0;
                         end
                     end
 
@@ -3259,8 +3310,6 @@ module f386_ooo_core_top (
         logic [31:0] exc_error_code;
         logic        exc_has_error;
         logic [31:0] exc_eip;
-        logic        exc_cr2_we;
-        logic [31:0] exc_cr2_value;
         logic        exc_triple_fault;
         logic        exc_handling;
 
@@ -3268,21 +3317,46 @@ module f386_ooo_core_top (
         // triggered by exception delivery (ucode_state returns to UC_IDLE)
         wire exc_microcode_done = (ucode_state == UC_IDLE) && exc_handling;
 
+        // Combine store-drain fault + watchdog NMI into exc_from_exec
+        wire exc_sq_drain  = lsq_sq_drain_fault;
+        wire exc_nmi       = watchdog_nmi;
+        wire exc_exec_fire = exc_sq_drain || exc_nmi;
+        wire [7:0]  exc_exec_vec  = exc_sq_drain ? lsq_sq_drain_fault_vector : 8'd2; // NMI=2
+        wire [31:0] exc_exec_code = exc_sq_drain ? lsq_sq_drain_fault_code   : 32'd0;
+        wire        exc_exec_herr = exc_sq_drain; // Store faults have error codes; NMI does not
+        wire [31:0] exc_exec_faddr = exc_sq_drain ? lsq_sq_drain_fault_addr  : 32'd0;
+        // Precise EIP: store drain → faulting store's instruction PC.
+        // NMI → oldest in-flight instruction's PC (ROB head) when ROB is non-empty,
+        // or last retired PC as fallback when ROB is empty (pipeline idle — the
+        // watchdog practically only fires when the ROB is non-empty / stuck).
+        logic [31:0] nmi_last_retire_pc;
+        always_ff @(posedge clk or negedge rst_n)
+            if (!rst_n)              nmi_last_retire_pc <= 32'h0000_FFF0;
+            else if (rob_retire_v_valid) nmi_last_retire_pc <= rob_retire_v.instr.pc;
+            else if (rob_retire_u_valid) nmi_last_retire_pc <= rob_retire_u.instr.pc;
+        wire [31:0] nmi_eip = rob_empty ? nmi_last_retire_pc : rob_head_pc;
+        wire [31:0] exc_exec_pc = exc_sq_drain ? lsq_sq_drain_fault_pc : nmi_eip;
+
+        // DTLB page-fault fires when TLB response is a fault (during delivery → #DF)
+        wire exc_tlb_fire = dtlb_fault && exc_handling;
+
         f386_exception_unit exc_unit (
             .clk              (clk),
             .rst_n            (rst_n),
             .flush            (flush),
 
-            // Exception sources (P3.EXC.c: wire from execute/TLB later)
-            .exc_from_exec    (1'b0),
-            .exc_exec_vector  (8'd0),
-            .exc_exec_error_code(32'd0),
-            .exc_exec_has_error(1'b0),
+            // Exception sources: store-drain faults, watchdog NMI, DTLB page faults
+            .exc_from_exec    (exc_exec_fire),
+            .exc_exec_vector  (exc_exec_vec),
+            .exc_exec_error_code(exc_exec_code),
+            .exc_exec_has_error(exc_exec_herr),
+            .exc_exec_fault_addr(exc_exec_faddr),
+            .exc_exec_eip     (exc_exec_pc),
             .exc_exec_rob_tag ('0),
 
-            .exc_from_tlb     (1'b0),
+            .exc_from_tlb     (exc_tlb_fire),
             .exc_tlb_fault_addr(dtlb_fault_addr),
-            .exc_tlb_fault_code(4'd0),
+            .exc_tlb_fault_code(dtlb_fault_code),
             .exc_tlb_rob_tag  ('0),
 
             // Retirement interface
@@ -3293,6 +3367,7 @@ module f386_ooo_core_top (
             .retire_exc_vector   (rob_retire_u_exc_vector),
             .retire_exc_code     (rob_retire_u_exc_code),
             .retire_exc_has_error(rob_retire_u_exc_has_error),
+            .retire_exc_fault_addr(rob_retire_u_exc_fault_addr),
 
             .microcode_done   (exc_microcode_done),
 
@@ -3372,8 +3447,6 @@ module f386_ooo_core_top (
         // ---------------------------------------------------------
         // P3.EXC.b: no exception unit when microcode is off
         logic exc_deliver, exc_handling, exc_triple_fault;
-        logic exc_cr2_we;
-        logic [31:0] exc_cr2_value;
         assign exc_deliver      = 1'b0;
         assign exc_handling     = 1'b0;
         assign exc_triple_fault = 1'b0;
@@ -3451,10 +3524,8 @@ module f386_ooo_core_top (
     // P3.WDG: Hardware Watchdog / NMI Timeout
     // =================================================================
     // Fires a single-cycle NMI pulse (vector 2) when the core fails to
-    // retire any instruction within ~16M cycles. The exception unit will
-    // consume watchdog_nmi when the NMI path is fully wired.
-    logic watchdog_nmi;
-
+    // retire any instruction within ~16M cycles. Wired to exception unit
+    // via exc_from_exec in gen_microcode.
     generate if (CONF_ENABLE_HW_WATCHDOG) begin : gen_hw_watchdog
 
         f386_hw_watchdog u_hw_watchdog (

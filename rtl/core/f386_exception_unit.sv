@@ -30,6 +30,8 @@ module f386_exception_unit (
     input  logic [7:0]   exc_exec_vector,
     input  logic [31:0]  exc_exec_error_code,
     input  logic         exc_exec_has_error,
+    input  logic [31:0]  exc_exec_fault_addr, // Faulting address (CR2 for store drain #PF)
+    input  logic [31:0]  exc_exec_eip,       // Precise EIP for post-retirement exceptions
     input  rob_id_t      exc_exec_rob_tag,
 
     input  logic         exc_from_tlb,       // Page fault from TLB
@@ -45,6 +47,7 @@ module f386_exception_unit (
     input  logic [7:0]   retire_exc_vector,  // P3.EXC.b: from ROB exception metadata
     input  logic [31:0]  retire_exc_code,
     input  logic         retire_exc_has_error,
+    input  logic [31:0]  retire_exc_fault_addr, // Per-ROB latched fault address (CR2)
 
     // --- Microcode completion feedback ---
     input  logic         microcode_done,     // P3.EXC.b: exception handler complete
@@ -89,6 +92,7 @@ module f386_exception_unit (
     logic [31:0] pending_eip;
     logic [31:0] pending_cr2;
 
+
     assign handling_exception    = (state != EXC_IDLE);
     assign handling_double_fault = (state == EXC_DOUBLE);
     assign triple_fault          = (state == EXC_TRIPLE);
@@ -104,6 +108,7 @@ module f386_exception_unit (
     logic [31:0] final_exc_error_code;
     logic        final_exc_has_error;
     logic [31:0] final_exc_cr2;
+    logic [31:0] final_exc_eip;
 
     // Priority encoding function
     // Returns priority value (lower = higher priority)
@@ -140,6 +145,7 @@ module f386_exception_unit (
         final_exc_error_code = 32'd0;
         final_exc_has_error  = 1'b0;
         final_exc_cr2        = 32'd0;
+        final_exc_eip        = 32'd0;
 
         if (exc_from_tlb && exc_from_exec) begin
             // Both sources — pick higher priority
@@ -149,11 +155,14 @@ module f386_exception_unit (
                 final_exc_error_code = {28'd0, exc_tlb_fault_code};
                 final_exc_has_error  = 1'b1;
                 final_exc_cr2        = exc_tlb_fault_addr;
+                final_exc_eip        = exc_exec_eip;  // TLB path uses exec EIP
             end else begin
                 final_exc_valid      = 1'b1;
                 final_exc_vector     = exc_exec_vector;
                 final_exc_error_code = exc_exec_error_code;
                 final_exc_has_error  = exc_exec_has_error;
+                final_exc_cr2        = exc_exec_fault_addr;
+                final_exc_eip        = exc_exec_eip;
             end
         end else if (exc_from_tlb) begin
             final_exc_valid      = 1'b1;
@@ -161,11 +170,14 @@ module f386_exception_unit (
             final_exc_error_code = {28'd0, exc_tlb_fault_code};
             final_exc_has_error  = 1'b1;
             final_exc_cr2        = exc_tlb_fault_addr;
+            final_exc_eip        = exc_exec_eip;
         end else if (exc_from_exec) begin
             final_exc_valid      = 1'b1;
             final_exc_vector     = exc_exec_vector;
             final_exc_error_code = exc_exec_error_code;
             final_exc_has_error  = exc_exec_has_error;
+            final_exc_cr2        = exc_exec_fault_addr;
+            final_exc_eip        = exc_exec_eip;
         end
     end
 
@@ -174,9 +186,9 @@ module f386_exception_unit (
     // =========================================================
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state        <= EXC_IDLE;
-            deliver_exc  <= 1'b0;
-            cr2_we       <= 1'b0;
+            state          <= EXC_IDLE;
+            deliver_exc    <= 1'b0;
+            cr2_we         <= 1'b0;
         end else if (flush) begin
             state        <= EXC_IDLE;
             deliver_exc  <= 1'b0;
@@ -194,8 +206,7 @@ module f386_exception_unit (
                         pending_error_code <= retire_exc_code;
                         pending_has_error  <= retire_exc_has_error;
                         pending_eip        <= retire_pc;
-                        pending_cr2        <= (retire_exc_vector == EXC_PF) ?
-                                              exc_tlb_fault_addr : 32'd0;
+                        pending_cr2        <= retire_exc_fault_addr;
 
                         // Deliver exception
                         deliver_exc        <= 1'b1;
@@ -207,7 +218,31 @@ module f386_exception_unit (
                         // Update CR2 for #PF
                         if (retire_exc_vector == EXC_PF) begin
                             cr2_we    <= 1'b1;
-                            cr2_value <= exc_tlb_fault_addr;
+                            cr2_value <= retire_exc_fault_addr;
+                        end
+
+                        state <= EXC_DELIVER;
+                    end else if (final_exc_valid) begin
+                        // Post-retirement exception (store drain fault, NMI, etc.)
+                        // These arrive via exc_from_exec / exc_from_tlb while pipeline
+                        // is otherwise idle — deliver immediately.
+                        // EIP source: exc_exec_eip provides the precise EIP per source
+                        // (store drain → faulting store's PC, NMI → next instruction PC).
+                        pending_vector     <= final_exc_vector;
+                        pending_error_code <= final_exc_error_code;
+                        pending_has_error  <= final_exc_has_error;
+                        pending_eip        <= final_exc_eip;
+                        pending_cr2        <= final_exc_cr2;
+
+                        deliver_exc        <= 1'b1;
+                        deliver_vector     <= final_exc_vector;
+                        deliver_error_code <= final_exc_error_code;
+                        deliver_has_error  <= final_exc_has_error;
+                        deliver_eip        <= final_exc_eip;
+
+                        if (final_exc_vector == EXC_PF) begin
+                            cr2_we    <= 1'b1;
+                            cr2_value <= final_exc_cr2;
                         end
 
                         state <= EXC_DELIVER;

@@ -43,6 +43,7 @@ module f386_execute_stage (
     output logic [7:0]   cdb0_exc_vector,  // P3.EXC.a: exception vector
     output logic [31:0]  cdb0_exc_code,    // P3.EXC.a: error code
     output logic         cdb0_exc_has_error, // P3.EXC.a: error code valid
+    output logic [31:0]  cdb0_exc_fault_addr, // Faulting address (0 for ALU exceptions)
 
     output phys_reg_t    cdb0_phys_dest,   // Physical dest for PRF writeback
 
@@ -55,6 +56,7 @@ module f386_execute_stage (
     output logic [7:0]   cdb1_exc_vector,
     output logic [31:0]  cdb1_exc_code,
     output logic         cdb1_exc_has_error,
+    output logic [31:0]  cdb1_exc_fault_addr,
     output phys_reg_t    cdb1_phys_dest,   // Physical dest for PRF writeback
     output logic         cdb0_dest_valid,  // CDB0 result has a destination
     output logic         cdb1_dest_valid,  // CDB1 result has a destination
@@ -297,8 +299,9 @@ module f386_execute_stage (
         cdb0_flags_mask = 6'd0;
         cdb0_exception     = 1'b0;
         cdb0_exc_vector    = 8'd0;
-        cdb0_exc_code      = 32'd0;
-        cdb0_exc_has_error = 1'b0;
+        cdb0_exc_code       = 32'd0;
+        cdb0_exc_has_error  = 1'b0;
+        cdb0_exc_fault_addr = 32'd0;
         cdb0_phys_dest  = u_instr.phys_dest;
         cdb0_dest_valid = u_instr.dest_valid;
 
@@ -308,9 +311,10 @@ module f386_execute_stage (
         cdb1_flags      = 6'd0;
         cdb1_flags_mask = 6'd0;
         cdb1_exception     = 1'b0;
-        cdb1_exc_vector    = 8'd0;
-        cdb1_exc_code      = 32'd0;
-        cdb1_exc_has_error = 1'b0;
+        cdb1_exc_vector     = 8'd0;
+        cdb1_exc_code       = 32'd0;
+        cdb1_exc_has_error  = 1'b0;
+        cdb1_exc_fault_addr = 32'd0;
         cdb1_phys_dest  = v_instr.phys_dest;
         cdb1_dest_valid = v_instr.dest_valid;
 

@@ -42,6 +42,7 @@ module f386_lsq (
     input  logic [31:0]  ld_dispatch_pc,        // Load PC (for MDP training)
     input  logic         st_dispatch_valid,
     input  rob_id_t      st_dispatch_rob_tag,
+    input  logic [31:0]  st_dispatch_pc,
     output lq_idx_t      ld_dispatch_idx,
     output sq_idx_t      st_dispatch_idx,
     output logic         lq_full,
@@ -51,6 +52,7 @@ module f386_lsq (
     input  logic         uc_ld_dispatch_valid,
     input  logic [31:0]  uc_ld_dispatch_pc,     // Microcode load PC (macro instruction PC)
     input  logic         uc_st_dispatch_valid,
+    input  logic [31:0]  uc_st_dispatch_pc,
     input  rob_id_t      uc_dispatch_rob_tag,
     output lq_idx_t      uc_ld_dispatch_idx,
     output sq_idx_t      uc_st_dispatch_idx,
@@ -78,9 +80,10 @@ module f386_lsq (
     output rob_id_t      ld_cdb_tag,
     output logic [31:0]  ld_cdb_data,
     output logic         ld_cdb_fault,
-    output logic [7:0]   ld_cdb_exc_vector,   // P3.EXC.a: exception vector
-    output logic [31:0]  ld_cdb_exc_code,      // P3.EXC.a: error code
-    output logic         ld_cdb_exc_has_error,  // P3.EXC.a: error code valid
+    output logic [7:0]   ld_cdb_exc_vector,    // P3.EXC.a: exception vector
+    output logic [31:0]  ld_cdb_exc_code,       // P3.EXC.a: error code
+    output logic         ld_cdb_exc_has_error,   // P3.EXC.a: error code valid
+    output logic [31:0]  ld_cdb_exc_fault_addr,  // Faulting address (CR2 for #PF)
 
     // --- Retirement Interface ---
     input  logic         retire_st_valid,
@@ -119,7 +122,9 @@ module f386_lsq (
     // --- Store Drain Fault (P3.EXC.c) ---
     output logic         sq_drain_fault,
     output logic [7:0]   sq_drain_fault_vector,
-    output logic [31:0]  sq_drain_fault_code
+    output logic [31:0]  sq_drain_fault_code,
+    output logic [31:0]  sq_drain_fault_addr,    // Faulting store address (CR2 for #PF)
+    output logic [31:0]  sq_drain_fault_pc       // Faulting store's instruction PC
 );
 
     localparam int LQ_N = CONF_LSQ_LQ_ENTRIES;  // 8
@@ -185,6 +190,7 @@ module f386_lsq (
     logic [1:0]        sq_size    [SQ_N];
     logic [3:0]        sq_byte_en [SQ_N];
     rob_id_t           sq_rob_tag [SQ_N];
+    logic [31:0]       sq_pc      [SQ_N];  // Instruction PC (for drain fault EIP)
 
     sq_idx_t sq_head, sq_tail;
     logic [SQ_ID_WIDTH:0] sq_count;
@@ -377,6 +383,8 @@ module f386_lsq (
                 sq_committed[sq_tail]  <= 1'b0;
                 sq_rob_tag[sq_tail]    <= uc_st_dispatch_valid ? uc_dispatch_rob_tag
                                                                : st_dispatch_rob_tag;
+                sq_pc[sq_tail]         <= uc_st_dispatch_valid ? uc_st_dispatch_pc
+                                                               : st_dispatch_pc;
                 sq_tail                <= sq_tail + sq_idx_t'(1);
             end
 
@@ -556,15 +564,18 @@ module f386_lsq (
             assign mem_rsp_ready = 1'b0;
 
             // No fault detection in dcache path
-            assign ld_cdb_fault        = 1'b0;
-            assign ld_cdb_exc_vector   = 8'd0;
-            assign ld_cdb_exc_code     = 32'd0;
+            assign ld_cdb_fault         = 1'b0;
+            assign ld_cdb_exc_vector    = 8'd0;
+            assign ld_cdb_exc_code      = 32'd0;
             assign ld_cdb_exc_has_error = 1'b0;
+            assign ld_cdb_exc_fault_addr = 32'd0;
 
             // No store drain fault detection in dcache path
             assign sq_drain_fault        = 1'b0;
             assign sq_drain_fault_vector = 8'd0;
             assign sq_drain_fault_code   = 32'd0;
+            assign sq_drain_fault_addr   = 32'd0;
+            assign sq_drain_fault_pc     = 32'd0;
 
             // Load execution FSM (dcache path — same structure, dcache response)
             always_ff @(posedge clk or negedge rst_n) begin
@@ -636,6 +647,7 @@ module f386_lsq (
                 logic [1:0]     size;         // for load extraction
                 logic           is_signed;    // for load extraction
                 logic           is_coalesced; // P3.SBO: merged two SQ entries into one request
+                logic [31:0]    pc;           // Instruction PC (for store drain fault EIP)
             } pend_entry_t;
 
             pend_entry_t               pend_data [PEND_DEPTH];
@@ -699,18 +711,24 @@ module f386_lsq (
             logic        sq_drain_fault_be;
             logic [7:0]  sq_drain_fault_vector_be;
             logic [31:0] sq_drain_fault_code_be;
+            logic [31:0] sq_drain_fault_addr_be;
+            logic [31:0] sq_drain_fault_pc_be;
+            logic [31:0] be_resp_fault_addr;
 
-            assign mem_resp_valid       = be_resp_valid;
-            assign mem_resp_data        = be_resp_data;
-            assign ld_cdb_fault         = be_resp_fault;
-            assign ld_cdb_exc_vector    = be_resp_exc_vector;
-            assign ld_cdb_exc_code      = be_resp_exc_code;
-            assign ld_cdb_exc_has_error = be_resp_exc_has_error;
+            assign mem_resp_valid        = be_resp_valid;
+            assign mem_resp_data         = be_resp_data;
+            assign ld_cdb_fault          = be_resp_fault;
+            assign ld_cdb_exc_vector     = be_resp_exc_vector;
+            assign ld_cdb_exc_code       = be_resp_exc_code;
+            assign ld_cdb_exc_has_error  = be_resp_exc_has_error;
+            assign ld_cdb_exc_fault_addr = be_resp_fault_addr;
             assign store_drain_ack       = store_drain_ack_be;
             assign store_drain_coalesced = store_drain_coalesced_be;
             assign sq_drain_fault        = sq_drain_fault_be;
             assign sq_drain_fault_vector = sq_drain_fault_vector_be;
             assign sq_drain_fault_code   = sq_drain_fault_code_be;
+            assign sq_drain_fault_addr   = sq_drain_fault_addr_be;
+            assign sq_drain_fault_pc     = sq_drain_fault_pc_be;
 
             // ---- Response Handshake ----
             // Ready only when incoming response ID matches a valid pending entry.
@@ -793,11 +811,14 @@ module f386_lsq (
                     be_resp_exc_vector         <= 8'd0;
                     be_resp_exc_code           <= 32'd0;
                     be_resp_exc_has_error      <= 1'b0;
+                    be_resp_fault_addr         <= 32'd0;
                     store_drain_ack_be         <= 1'b0;
                     store_drain_coalesced_be   <= 1'b0;
                     sq_drain_fault_be          <= 1'b0;
                     sq_drain_fault_vector_be   <= 8'd0;
                     sq_drain_fault_code_be     <= 32'd0;
+                    sq_drain_fault_addr_be     <= 32'd0;
+                    sq_drain_fault_pc_be       <= 32'd0;
                 end else if (flush) begin
                     be_resp_valid              <= 1'b0;
                     be_resp_data               <= 32'd0;
@@ -805,22 +826,28 @@ module f386_lsq (
                     be_resp_exc_vector         <= 8'd0;
                     be_resp_exc_code           <= 32'd0;
                     be_resp_exc_has_error      <= 1'b0;
+                    be_resp_fault_addr         <= 32'd0;
                     store_drain_ack_be         <= 1'b0;
                     store_drain_coalesced_be   <= 1'b0;
                     sq_drain_fault_be          <= 1'b0;
                     sq_drain_fault_vector_be   <= 8'd0;
                     sq_drain_fault_code_be     <= 32'd0;
+                    sq_drain_fault_addr_be     <= 32'd0;
+                    sq_drain_fault_pc_be       <= 32'd0;
                 end else begin
                     be_resp_valid              <= 1'b0;
                     be_resp_fault              <= 1'b0;
                     be_resp_exc_vector         <= 8'd0;
                     be_resp_exc_code           <= 32'd0;
                     be_resp_exc_has_error      <= 1'b0;
+                    be_resp_fault_addr         <= 32'd0;
                     store_drain_ack_be         <= 1'b0;
                     store_drain_coalesced_be   <= 1'b0;
                     sq_drain_fault_be          <= 1'b0;
                     sq_drain_fault_vector_be   <= 8'd0;
                     sq_drain_fault_code_be     <= 32'd0;
+                    sq_drain_fault_addr_be     <= 32'd0;
+                    sq_drain_fault_pc_be       <= 32'd0;
 
                     if (rsp_consume) begin
                         if (rsp_entry.is_load) begin
@@ -836,6 +863,7 @@ module f386_lsq (
                                     be_resp_exc_vector    <= (mem_rsp_in.resp == MEM_RESP_FAULT) ? EXC_PF : EXC_GP;
                                     be_resp_exc_code      <= 32'd0;  // Error code filled by exception unit
                                     be_resp_exc_has_error <= 1'b1;   // Both #PF and #GP have error codes
+                                    be_resp_fault_addr    <= rsp_entry.addr;
                                     `ifndef SYNTHESIS
                                     $warning("LSQ-MO: fault resp %s on load addr=%08h",
                                              mem_rsp_in.resp.name(), rsp_entry.addr);
@@ -850,6 +878,8 @@ module f386_lsq (
                                 sq_drain_fault_be        <= 1'b1;
                                 sq_drain_fault_vector_be <= (mem_rsp_in.resp == MEM_RESP_FAULT) ? EXC_PF : EXC_GP;
                                 sq_drain_fault_code_be   <= 32'd0;
+                                sq_drain_fault_addr_be   <= rsp_entry.addr;
+                                sq_drain_fault_pc_be     <= rsp_entry.pc;
                                 `ifndef SYNTHESIS
                                 $warning("LSQ-MO: fault resp %s on store addr=%08h",
                                          mem_rsp_in.resp.name(), rsp_entry.addr);
@@ -884,7 +914,8 @@ module f386_lsq (
                             addr:        issue_load ? ld_wait_addr : sq_addr[sq_drain_ptr],
                             size:        issue_load ? ld_wait_size : sq_size[sq_drain_ptr],
                             is_signed:   issue_load ? ld_wait_signed : 1'b0,
-                            is_coalesced: issue_store && coalesce_hit
+                            is_coalesced: issue_store && coalesce_hit,
+                            pc:          issue_store ? sq_pc[sq_drain_ptr] : 32'd0
                         };
                         pend_valid[pend_wr_ptr] <= 1'b1;
                         pend_wr_ptr <= pend_wr_ptr + PEND_ID_W'(1);

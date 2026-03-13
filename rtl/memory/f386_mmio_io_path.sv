@@ -42,6 +42,7 @@ module f386_mmio_io_path (
     output logic [7:0]   ld_cdb_exc_vector,    // P3.EXC.a
     output logic [31:0]  ld_cdb_exc_code,
     output logic         ld_cdb_exc_has_error,
+    output logic [31:0]  ld_cdb_exc_fault_addr,
 
     // --- Downstream: split-phase memory interface ---
     output logic         mem_req_valid,
@@ -212,9 +213,10 @@ module f386_mmio_io_path (
     assign ld_cdb_data        = lat_fault ? 32'hDEAD_BEEF : extracted;
     assign ld_cdb_lq_idx      = lat_lq_idx;
     assign ld_cdb_fault       = lat_fault;
-    assign ld_cdb_exc_vector   = lat_fault ? (lat_fault_is_pf ? EXC_PF : EXC_GP) : 8'd0;
-    assign ld_cdb_exc_code     = 32'd0;
-    assign ld_cdb_exc_has_error = lat_fault;
+    assign ld_cdb_exc_vector     = lat_fault ? (lat_fault_is_pf ? EXC_PF : EXC_GP) : 8'd0;
+    assign ld_cdb_exc_code       = 32'd0;
+    assign ld_cdb_exc_has_error  = lat_fault;
+    assign ld_cdb_exc_fault_addr = lat_fault ? lat_addr : 32'd0;
 
     // =========================================================
     // Assertions (simulation only)

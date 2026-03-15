@@ -614,44 +614,64 @@ module f386_emu (
     );
 
     // =====================================================================
-    //  VGA (Text Mode Only)
+    //  VGA / ETX Display Engine (feature-gated replacement)
     // =====================================================================
-    // VGA framebuffer memory-mapped access (0xB8000-0xBFFFF)
-    // Currently stubbed — will be driven by memory controller for CPU VRAM access
-    logic [15:0] fb_addr;
-    logic [7:0]  fb_wdata, fb_rdata;
-    logic        fb_wr, fb_rd, fb_cs;
+    generate if (CONF_ENABLE_ETX) begin : gen_etx
+        f386_etx_engine etx_inst (
+            .clk        (cpu_clk),
+            .rst_n      (combined_rst_n),
+            .pixel_clk  (pixel_clk),
+            .io_addr    (periph_io_addr),
+            .io_wdata   (periph_io_wdata),
+            .io_rdata   (vga_rdata),
+            .io_wr      (periph_io_wr),
+            .io_rd      (periph_io_rd),
+            .io_cs      (vga_cs),
+            .vga_r      (VGA_R),
+            .vga_g      (VGA_G),
+            .vga_b      (VGA_B),
+            .vga_hs     (VGA_HS),
+            .vga_vs     (VGA_VS),
+            .vga_de     (VGA_DE)
+        );
+    end else begin : gen_legacy_vga
+        // VGA framebuffer memory-mapped access (0xB8000-0xBFFFF)
+        // Currently stubbed — will be driven by memory controller for CPU VRAM access
+        logic [15:0] fb_addr;
+        logic [7:0]  fb_wdata, fb_rdata;
+        logic        fb_wr, fb_rd, fb_cs;
 
-    assign fb_addr  = 16'd0;
-    assign fb_wdata = 8'd0;
-    assign fb_wr    = 1'b0;
-    assign fb_rd    = 1'b0;
-    assign fb_cs    = 1'b0;
+        assign fb_addr  = 16'd0;
+        assign fb_wdata = 8'd0;
+        assign fb_wr    = 1'b0;
+        assign fb_rd    = 1'b0;
+        assign fb_cs    = 1'b0;
 
-    f386_vga vga (
-        .clk        (cpu_clk),
-        .rst_n      (combined_rst_n),
-        .pixel_clk  (pixel_clk),
-        .io_addr    (periph_io_addr),
-        .io_wdata   (periph_io_wdata),
-        .io_rdata   (vga_rdata),
-        .io_wr      (periph_io_wr),
-        .io_rd      (periph_io_rd),
-        .io_cs      (vga_cs),
-        .fb_addr    (fb_addr),
-        .fb_wdata   (fb_wdata),
-        .fb_rdata   (fb_rdata),
-        .fb_wr      (fb_wr),
-        .fb_rd      (fb_rd),
-        .fb_cs      (fb_cs),
-        .vga_hsync  (VGA_HS),
-        .vga_vsync  (VGA_VS),
-        .vga_r      (VGA_R),
-        .vga_g      (VGA_G),
-        .vga_b      (VGA_B),
-        .vga_de     (VGA_DE),
-        .vga_vblank ()
-    );
+        f386_vga vga (
+            .clk        (cpu_clk),
+            .rst_n      (combined_rst_n),
+            .pixel_clk  (pixel_clk),
+            .io_addr    (periph_io_addr),
+            .io_wdata   (periph_io_wdata),
+            .io_rdata   (vga_rdata),
+            .io_wr      (periph_io_wr),
+            .io_rd      (periph_io_rd),
+            .io_cs      (vga_cs),
+            .fb_addr    (fb_addr),
+            .fb_wdata   (fb_wdata),
+            .fb_rdata   (fb_rdata),
+            .fb_wr      (fb_wr),
+            .fb_rd      (fb_rd),
+            .fb_cs      (fb_cs),
+            .vga_hsync  (VGA_HS),
+            .vga_vsync  (VGA_VS),
+            .vga_r      (VGA_R),
+            .vga_g      (VGA_G),
+            .vga_b      (VGA_B),
+            .vga_de     (VGA_DE),
+            .vga_vblank ()
+        );
+    end endgenerate;
 
     // =====================================================================
     //  RTC Stub

@@ -68,6 +68,13 @@ package f386_pkg;
     // --- P3.MDP: Memory Dependency Predictor ---
     localparam bit CONF_ENABLE_MEM_DEP_PRED = 1'b0;  // Memory ordering violation detection in LSQ
 
+    // --- ETX Display Engine ---
+`ifdef SYNTHESIS_ENABLE_ETX
+    localparam bit CONF_ENABLE_ETX = 1'b1;
+`else
+    localparam bit CONF_ENABLE_ETX = 1'b0;
+`endif
+
     // --- P2: Memory Integration Gates ---
 `ifdef SYNTHESIS_ENABLE_MEMORY
     localparam bit CONF_ENABLE_LSQ_MEMIF   = 1'b1;  // P2: LSQ split-phase wiring into core_top

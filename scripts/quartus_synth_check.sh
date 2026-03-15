@@ -41,6 +41,7 @@ Options:
   --host <host>        Backend host / IP address
   --pkg <path>         Override pkg file for sv2v (for temp-gated builds)
   --full               Run fitter + timing after synthesis
+  --etx                Enable ETX display engine gate (-DSYNTHESIS_ENABLE_ETX)
   --job-name <name>    Override generated local job directory name
   -h, --help           Show this help
 
@@ -79,6 +80,7 @@ DEFAULT_VM_HOST="192.168.64.4"
 BACKEND="${QUARTUS_BACKEND:-vm}"
 HOST="${QUARTUS_HOST:-}"
 FULL_COMPILE=0
+ENABLE_ETX=0
 JOB_NAME=""
 POSITIONAL_HOST=""
 PARALLEL="${QUARTUS_PARALLEL:-2}"
@@ -112,6 +114,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --full)
             FULL_COMPILE=1
+            shift
+            ;;
+        --etx)
+            ENABLE_ETX=1
             shift
             ;;
         --job-name)
@@ -220,7 +226,13 @@ info "Preparing Quartus job $JOB_ID (backend=$BACKEND, host=$HOST)"
 info "Running sv2v..."
 mapfile -t top_files < <(find rtl/top -maxdepth 1 -name '*.sv' ! -name 'f386_pkg.sv' | sort)
 
-if ! sv2v -DSYNTHESIS -DSYNTHESIS_ENABLE_MEMORY -I rtl/core \
+SV2V_DEFINES="-DSYNTHESIS -DSYNTHESIS_ENABLE_MEMORY"
+if [[ "$ENABLE_ETX" -eq 1 ]]; then
+    SV2V_DEFINES="$SV2V_DEFINES -DSYNTHESIS_ENABLE_ETX"
+    info "ETX display engine gate enabled"
+fi
+
+if ! sv2v $SV2V_DEFINES -I rtl/core \
     "$PKG_FILE" \
     rtl/primitives/*.sv \
     rtl/core/*.sv \

@@ -2,15 +2,16 @@
 #
 # fabi386 MiSTer project — full DE10-Nano build (produces .rbf)
 #
-# Layout modelled on AO486's ao486.qsf:
-#   - Top entity is `sys_top` (MiSTer framework)
+# Layout matches every other MiSTer core:
+#   - Top entity is `sys_top` (MiSTer framework, provided in sys/)
 #   - sys_top instantiates `emu` (fabi386 core, in rtl/top/f386_emu.sv)
-#   - Pin assignments + framework files come from rtl/sys/sys.tcl + sys.qip
-#   - fabi386 source files are listed in files.qip
+#   - Pin assignments + framework files come from sys/sys.tcl + sys.qip
+#   - fabi386 RTL is compiled via sv2v into build/f386_sv2v_full.v,
+#     then listed here as a VERILOG_FILE (same pattern as the fast
+#     resource-check flow, so Quartus 17 compatibility is preserved)
 #
-# Build with Quartus 21.1 Lite (the NAS/VM backend). SystemVerilog is
-# compiled natively — this QSF does NOT use sv2v. For fast sv2v-based
-# resource estimation, use f386_sv2v_fast.qsf instead.
+# Build via scripts/quartus_synth_check.sh --mister --full
+# (defines MISTER_FULL during sv2v so hps_io gets instantiated).
 #
 # --------------------------------------------------------------------------
 
@@ -18,8 +19,8 @@ set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE 5CSEBA6U23I7
 set_global_assignment -name TOP_LEVEL_ENTITY sys_top
 
-set_global_assignment -name ORIGINAL_QUARTUS_VERSION "21.1"
-set_global_assignment -name LAST_QUARTUS_VERSION "21.1.0 Lite Edition"
+set_global_assignment -name ORIGINAL_QUARTUS_VERSION "17.0"
+set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Lite Edition"
 
 # Produce the .rbf that the MiSTer menu loads
 set_global_assignment -name GENERATE_RBF_FILE ON
@@ -61,22 +62,18 @@ set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name FINAL_PLACEMENT_OPTIMIZATION ALWAYS
 set_global_assignment -name SEED 1
 
-# MiSTer framework macros
-# MISTER_FULL — activates the hps_io instantiation inside emu
-# (keyboard, OSD menu status, reset). Without it, emu ties HPS_BUS
-# high-Z and only the sv2v-based resource-estimation flow can build.
-set_global_assignment -name VERILOG_MACRO "MISTER_FULL=1"
+# fabi386 RTL (sv2v output — built with -DMISTER_FULL so emu instantiates hps_io)
+set_global_assignment -name VERILOG_FILE build/f386_sv2v_full.v
+set_global_assignment -name VERILOG_FILE rtl/core/f386_alu.v
+set_global_assignment -name VERILOG_FILE rtl/core/f386_fpu_spatial.v
+set_global_assignment -name VERILOG_FILE rtl/primitives/f386_bram_sdp.v
 
-# MISTER_FB / MISTER_FB_PALETTE are NOT enabled — fabi386 does not yet
-# drive the framebuffer path inside emu. Add when implementing FB support.
-# MISTER_DUAL_SDRAM NOT enabled — single SDRAM only.
-# MISTER_DEBUG_NOHDMI NOT enabled — never in release.
+# Timing constraints
+set_global_assignment -name SDC_FILE f386.sdc
 
 # MiSTer framework (pins + PLLs + scaler + OSD + audio)
-source rtl/sys/sys.tcl
-source rtl/sys/sys_analog.tcl
-
-# fabi386 source files
-source files.qip
+# sys.tcl adds sys/sys.qip which references framework files via qip_path.
+source sys/sys.tcl
+source sys/sys_analog.tcl
 
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top

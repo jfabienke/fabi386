@@ -42,6 +42,11 @@ Options:
   --pkg <path>         Override pkg file for sv2v (for temp-gated builds)
   --full               Run fitter + timing after synthesis
   --etx                Enable ETX display engine gate (-DSYNTHESIS_ENABLE_ETX)
+  --mister             Full MiSTer build: uses f386_mister.qsf, defines
+                       MISTER_FULL so hps_io is instantiated, ships sys/
+                       to the backend, and runs the full flow (map → fit
+                       → asm → sta) to produce output_files/f386_mister.rbf.
+                       Implies --full.
   --job-name <name>    Override generated local job directory name
   -h, --help           Show this help
 
@@ -73,7 +78,8 @@ extract_summary_value() {
     ' "$file"
 }
 
-PROJECT="${QUARTUS_PROJECT:-f386_sv2v_fast}"
+PROJECT_DEFAULT="f386_sv2v_fast"
+PROJECT="${QUARTUS_PROJECT:-}"
 BUILD_ROOT="build/quartus_jobs"
 HISTORY_LOG="docs/synthesis_history.csv"
 DEFAULT_VM_HOST="192.168.64.4"
@@ -81,6 +87,7 @@ BACKEND="${QUARTUS_BACKEND:-vm}"
 HOST="${QUARTUS_HOST:-}"
 FULL_COMPILE=0
 ENABLE_ETX=0
+MISTER_BUILD=0
 JOB_NAME=""
 POSITIONAL_HOST=""
 PARALLEL="${QUARTUS_PARALLEL:-2}"
@@ -118,6 +125,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --etx)
             ENABLE_ETX=1
+            shift
+            ;;
+        --mister)
+            MISTER_BUILD=1
+            FULL_COMPILE=1
             shift
             ;;
         --job-name)
@@ -231,6 +243,12 @@ if [[ "$ENABLE_ETX" -eq 1 ]]; then
     SV2V_DEFINES="$SV2V_DEFINES -DSYNTHESIS_ENABLE_ETX"
     info "ETX display engine gate enabled"
 fi
+if [[ "$MISTER_BUILD" -eq 1 ]]; then
+    SV2V_DEFINES="$SV2V_DEFINES -DMISTER_FULL"
+    PROJECT="${PROJECT:-f386_mister}"
+    info "MiSTer full build: MISTER_FULL defined, project=$PROJECT, flow=map/fit/asm/sta"
+fi
+PROJECT="${PROJECT:-$PROJECT_DEFAULT}"
 
 if ! sv2v $SV2V_DEFINES -I rtl/core \
     "$PKG_FILE" \
@@ -252,6 +270,12 @@ cp rtl/primitives/f386_bram_sdp.v "$LOCAL_JOB_DIR/rtl/primitives/"
 cp f386.sdc "$LOCAL_JOB_DIR/"
 cp "${PROJECT}.qsf" "$LOCAL_JOB_DIR/"
 cp "${PROJECT}.qpf" "$LOCAL_JOB_DIR/"
+
+# MiSTer builds ship the full framework (sys/) verbatim
+if [[ "$MISTER_BUILD" -eq 1 ]]; then
+    info "Copying MiSTer framework (sys/) into job dir..."
+    cp -R sys "$LOCAL_JOB_DIR/"
+fi
 
 LINE_COUNT=$(wc -l < "$SV2V_OUTPUT")
 ok "sv2v produced $LINE_COUNT lines → $SV2V_OUTPUT"
@@ -276,6 +300,7 @@ export QUARTUS_PROJECT="$PROJECT"
 export QUARTUS_LOCAL_JOB_DIR="$LOCAL_JOB_DIR"
 export QUARTUS_LOCAL_LOG="$LOCAL_LOG"
 export QUARTUS_FULL_COMPILE="$FULL_COMPILE"
+export QUARTUS_MISTER_BUILD="$MISTER_BUILD"
 export QUARTUS_JOB_ID="$JOB_ID"
 export QUARTUS_PARALLEL="$PARALLEL"
 
@@ -294,12 +319,22 @@ fi
 END=$(date +%s)
 ELAPSED=$((END - START))
 
-MAP_RPT="$LOCAL_JOB_DIR/${PROJECT}.map.rpt"
-FIT_RPT="$LOCAL_JOB_DIR/${PROJECT}.fit.rpt"
-STA_RPT="$LOCAL_JOB_DIR/${PROJECT}.sta.rpt"
+# Reports may land at project root (sv2v_fast flow) or under output_files/
+# (MiSTer flow with PROJECT_OUTPUT_DIRECTORY). Use whichever exists.
+find_report() {
+    local name="$1"
+    if   [[ -f "$LOCAL_JOB_DIR/${PROJECT}.${name}"              ]]; then
+        echo "$LOCAL_JOB_DIR/${PROJECT}.${name}"
+    elif [[ -f "$LOCAL_JOB_DIR/output_files/${PROJECT}.${name}" ]]; then
+        echo "$LOCAL_JOB_DIR/output_files/${PROJECT}.${name}"
+    fi
+}
+MAP_RPT=$(find_report map.rpt)
+FIT_RPT=$(find_report fit.rpt)
+STA_RPT=$(find_report sta.rpt)
 
-if [[ ! -f "$MAP_RPT" ]]; then
-    fail "Missing map report: $MAP_RPT"
+if [[ -z "$MAP_RPT" ]]; then
+    fail "Missing map report (looked in project root and output_files/)"
     info "Job directory: $LOCAL_JOB_DIR"
     info "Backend log:   $LOCAL_LOG"
     exit 1

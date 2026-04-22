@@ -1,0 +1,8 @@
+# Quartus Project File for fabi386 MiSTer build (produces .rbf)
+
+QUARTUS_VERSION = "17.0"
+DATE = "2026-04-22"
+
+# Revisions
+
+PROJECT_REVISION = "f386_mister"

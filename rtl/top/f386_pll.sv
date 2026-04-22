@@ -41,9 +41,13 @@ module f386_pll (
         .reference_clock_frequency ("50.0 MHz"),
         .operation_mode            ("direct"),
         .number_of_clocks          (3),
-        .output_clock_frequency0   ("33.333333 MHz"),
-        .output_clock_frequency1   ("25.175000 MHz"),
-        .output_clock_frequency2   ("100.000000 MHz"),
+        // Integer Hz values — Quartus 17 fitter rejects non-achievable
+        // fractional MHz specifications. 25170068 Hz is the nearest
+        // realizable value to 25.175 MHz from a 50 MHz reference
+        // (VGA spec tolerance is wide enough to accept this).
+        .output_clock_frequency0   ("33333333 Hz"),
+        .output_clock_frequency1   ("25170068 Hz"),
+        .output_clock_frequency2   ("100000000 Hz"),
         .phase_shift0              ("0 ps"),
         .phase_shift1              ("0 ps"),
         .phase_shift2              ("0 ps"),

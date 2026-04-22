@@ -26,6 +26,8 @@ require_env QUARTUS_FULL_COMPILE
 require_env QUARTUS_JOB_ID
 require_env QUARTUS_PARALLEL
 
+MISTER_BUILD="${QUARTUS_MISTER_BUILD:-0}"
+
 NAS_USER="${QUARTUS_NAS_USER:-admin}"
 NAS_REMOTE_ROOT="${QUARTUS_NAS_REMOTE_ROOT:-/share/CACHEDEV1_DATA/quartus/projects/fabi386_jobs}"
 NAS_DOCKER="${QUARTUS_NAS_DOCKER:-/share/CACHEDEV1_DATA/.qpkg/container-station/bin/system-docker}"
@@ -107,14 +109,22 @@ if [[ "$QUARTUS_FULL_COMPILE" == "1" ]]; then
     info "Running quartus_fit in NAS container..."
     run_container "export PATH=$NAS_QUARTUS_BIN:\$PATH; cd $CONTAINER_WORKDIR; quartus_fit --parallel=$PARALLEL $QUARTUS_PROJECT -c $QUARTUS_PROJECT" >> "$QUARTUS_LOCAL_LOG" 2>&1
 
+    if [[ "$MISTER_BUILD" == "1" ]]; then
+        info "Running quartus_asm in NAS container (produces .sof/.rbf)..."
+        run_container "export PATH=$NAS_QUARTUS_BIN:\$PATH; cd $CONTAINER_WORKDIR; quartus_asm $QUARTUS_PROJECT -c $QUARTUS_PROJECT" >> "$QUARTUS_LOCAL_LOG" 2>&1
+    fi
+
     info "Running quartus_sta in NAS container..."
     run_container "export PATH=$NAS_QUARTUS_BIN:\$PATH; cd $CONTAINER_WORKDIR; quartus_sta $QUARTUS_PROJECT -c $QUARTUS_PROJECT" >> "$QUARTUS_LOCAL_LOG" 2>&1
 fi
 
 info "Fetching Quartus reports from NAS..."
-fetch_if_exists "${QUARTUS_PROJECT}.map.rpt"
-fetch_if_exists "${QUARTUS_PROJECT}.fit.rpt"
-fetch_if_exists "${QUARTUS_PROJECT}.sta.rpt"
+# Reports live at project root or under output_files/ depending on QSF
+# PROJECT_OUTPUT_DIRECTORY setting. Try both; only one will exist.
+for rpt in map.rpt fit.rpt sta.rpt asm.rpt fit.summary map.summary; do
+    fetch_if_exists "${QUARTUS_PROJECT}.${rpt}"
+    fetch_if_exists "output_files/${QUARTUS_PROJECT}.${rpt}"
+done
 fetch_if_exists "output_files/${QUARTUS_PROJECT}.sof"
 fetch_if_exists "output_files/${QUARTUS_PROJECT}.rbf"
 

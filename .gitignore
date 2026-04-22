@@ -46,3 +46,4 @@ reference/
 # Claude Code
 .claude/
 __pycache__/
+asm/diagnostic.bin

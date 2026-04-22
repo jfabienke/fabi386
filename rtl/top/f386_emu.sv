@@ -381,11 +381,24 @@ module emu (
     );
 
     // =====================================================================
-    //  Memory Controller (DDRAM Bridge)
+    //  Memory Controller (DDRAM Bridge) + BIOS ROM intercept
     // =====================================================================
     // Page walker memory port (driven by core_top — tied off when TLB gate OFF)
     logic [31:0] pt_addr, pt_wdata, pt_rdata;
     logic        pt_req, pt_wr, pt_ack;
+
+    // Intermediate DDRAM bus between L2/mem_ctrl and the f386_ddram_bios_mux.
+    // The mux forwards most traffic to the real MiSTer DDRAM_* pins but
+    // short-circuits reads in 0xFC000..0xFFFFF to the BIOS ROM.
+    logic [28:0] l2_ddram_addr;
+    logic [7:0]  l2_ddram_burstcnt;
+    logic [63:0] l2_ddram_din;
+    logic [7:0]  l2_ddram_be;
+    logic        l2_ddram_we;
+    logic        l2_ddram_rd;
+    logic [63:0] l2_ddram_dout;
+    logic        l2_ddram_dout_ready;
+    logic        l2_ddram_busy;
 
     generate
     if (CONF_ENABLE_MEM_FABRIC) begin : gen_l2_sp
@@ -427,15 +440,15 @@ module emu (
 
             .a20_gate        (a20_gate),
 
-            .ddram_addr      (DDRAM_ADDR),
-            .ddram_burstcnt  (DDRAM_BURSTCNT),
-            .ddram_din       (DDRAM_DIN),
-            .ddram_be        (DDRAM_BE),
-            .ddram_we        (DDRAM_WE),
-            .ddram_rd        (DDRAM_RD),
-            .ddram_dout      (DDRAM_DOUT),
-            .ddram_dout_ready(DDRAM_DOUT_READY),
-            .ddram_busy      (DDRAM_BUSY)
+            .ddram_addr      (l2_ddram_addr),
+            .ddram_burstcnt  (l2_ddram_burstcnt),
+            .ddram_din       (l2_ddram_din),
+            .ddram_be        (l2_ddram_be),
+            .ddram_we        (l2_ddram_we),
+            .ddram_rd        (l2_ddram_rd),
+            .ddram_dout      (l2_ddram_dout),
+            .ddram_dout_ready(l2_ddram_dout_ready),
+            .ddram_busy      (l2_ddram_busy)
         );
 
     end else if (CONF_ENABLE_L2_CACHE) begin : gen_l2_cache
@@ -469,15 +482,15 @@ module emu (
 
             .a20_gate        (a20_gate),
 
-            .ddram_addr      (DDRAM_ADDR),
-            .ddram_burstcnt  (DDRAM_BURSTCNT),
-            .ddram_din       (DDRAM_DIN),
-            .ddram_be        (DDRAM_BE),
-            .ddram_we        (DDRAM_WE),
-            .ddram_rd        (DDRAM_RD),
-            .ddram_dout      (DDRAM_DOUT),
-            .ddram_dout_ready(DDRAM_DOUT_READY),
-            .ddram_busy      (DDRAM_BUSY)
+            .ddram_addr      (l2_ddram_addr),
+            .ddram_burstcnt  (l2_ddram_burstcnt),
+            .ddram_din       (l2_ddram_din),
+            .ddram_be        (l2_ddram_be),
+            .ddram_we        (l2_ddram_we),
+            .ddram_rd        (l2_ddram_rd),
+            .ddram_dout      (l2_ddram_dout),
+            .ddram_dout_ready(l2_ddram_dout_ready),
+            .ddram_busy      (l2_ddram_busy)
         );
 
     end else begin : gen_mem_ctrl
@@ -511,19 +524,65 @@ module emu (
 
             .a20_gate        (a20_gate),
 
-            .ddram_addr      (DDRAM_ADDR),
-            .ddram_burstcnt  (DDRAM_BURSTCNT),
-            .ddram_din       (DDRAM_DIN),
-            .ddram_be        (DDRAM_BE),
-            .ddram_we        (DDRAM_WE),
-            .ddram_rd        (DDRAM_RD),
-            .ddram_dout      (DDRAM_DOUT),
-            .ddram_dout_ready(DDRAM_DOUT_READY),
-            .ddram_busy      (DDRAM_BUSY)
+            .ddram_addr      (l2_ddram_addr),
+            .ddram_burstcnt  (l2_ddram_burstcnt),
+            .ddram_din       (l2_ddram_din),
+            .ddram_be        (l2_ddram_be),
+            .ddram_we        (l2_ddram_we),
+            .ddram_rd        (l2_ddram_rd),
+            .ddram_dout      (l2_ddram_dout),
+            .ddram_dout_ready(l2_ddram_dout_ready),
+            .ddram_busy      (l2_ddram_busy)
         );
 
     end
     endgenerate
+
+    // =====================================================================
+    //  Diagnostics BIOS ROM (16 KB at 0xFC000..0xFFFFF) + DDRAM/ROM mux
+    // =====================================================================
+    // The ROM is populated at elaboration time from asm/diagnostic.hex
+    // (see asm/diagnostic.asm). The mux intercepts L2 reads in the BIOS
+    // region and forwards everything else to the real DDRAM pins.
+    logic [10:0] bios_rom_rd_addr;
+    logic [63:0] bios_rom_rd_data;
+
+    f386_bios_rom bios_rom (
+        .clk     (cpu_clk),
+        .rd_addr (bios_rom_rd_addr),
+        .rd_data (bios_rom_rd_data)
+    );
+
+    f386_ddram_bios_mux ddram_mux (
+        .clk                 (cpu_clk),
+        .rst_n               (combined_rst_n),
+
+        // L2-facing (intermediate wires driven by the L2/mem_ctrl instances)
+        .l2_ddram_addr       (l2_ddram_addr),
+        .l2_ddram_burstcnt   (l2_ddram_burstcnt),
+        .l2_ddram_din        (l2_ddram_din),
+        .l2_ddram_be         (l2_ddram_be),
+        .l2_ddram_we         (l2_ddram_we),
+        .l2_ddram_rd         (l2_ddram_rd),
+        .l2_ddram_dout       (l2_ddram_dout),
+        .l2_ddram_dout_ready (l2_ddram_dout_ready),
+        .l2_ddram_busy       (l2_ddram_busy),
+
+        // Top-level MiSTer DDRAM pins
+        .ddram_addr          (DDRAM_ADDR),
+        .ddram_burstcnt      (DDRAM_BURSTCNT),
+        .ddram_din           (DDRAM_DIN),
+        .ddram_be            (DDRAM_BE),
+        .ddram_we            (DDRAM_WE),
+        .ddram_rd            (DDRAM_RD),
+        .ddram_dout          (DDRAM_DOUT),
+        .ddram_dout_ready    (DDRAM_DOUT_READY),
+        .ddram_busy          (DDRAM_BUSY),
+
+        // BIOS ROM port
+        .bios_rd_addr        (bios_rom_rd_addr),
+        .bios_rd_data        (bios_rom_rd_data)
+    );
 
     // =====================================================================
     //  I/O Bus
@@ -804,7 +863,18 @@ module emu (
     //  MiSTer framework tie-offs
     // =====================================================================
     // LEDs / buttons
-    assign LED_USER  = 1'b0;
+    // LED_USER: driven by CPU writes to I/O port 0x378 bit 0 (diagnostics
+    // "alive" heartbeat from the BIOS ROM). Snooped from the peripheral
+    // I/O bus — no changes to f386_iobus needed since periph_io_wr is
+    // broadcast to every peripheral anyway.
+    logic diag_led_state;
+    always_ff @(posedge cpu_clk or negedge combined_rst_n) begin
+        if (!combined_rst_n)
+            diag_led_state <= 1'b0;
+        else if (periph_io_wr && periph_io_addr == 16'h0378)
+            diag_led_state <= periph_io_wdata[0];
+    end
+    assign LED_USER = diag_led_state;
     assign LED_POWER = 2'b00;      // let sys control power LED
     assign LED_DISK  = 2'b00;      // no disk activity signal yet
     assign BUTTONS   = 2'b00;

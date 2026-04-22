@@ -271,6 +271,16 @@ cp f386.sdc "$LOCAL_JOB_DIR/"
 cp "${PROJECT}.qsf" "$LOCAL_JOB_DIR/"
 cp "${PROJECT}.qpf" "$LOCAL_JOB_DIR/"
 
+# Ship the diagnostics ROM hex image — $readmemh reads this at Quartus
+# elaboration time (path is relative to the Quartus working dir).
+if [[ -f asm/diagnostic.hex ]]; then
+    mkdir -p "$LOCAL_JOB_DIR/asm"
+    cp asm/diagnostic.hex "$LOCAL_JOB_DIR/asm/"
+else
+    fail "asm/diagnostic.hex not found — run: nasm -f bin -o asm/diagnostic.bin asm/diagnostic.asm && python3 asm/bin_to_hex.py asm/diagnostic.bin asm/diagnostic.hex"
+    exit 1
+fi
+
 # MiSTer builds ship the full framework (sys/) verbatim
 if [[ "$MISTER_BUILD" -eq 1 ]]; then
     info "Copying MiSTer framework (sys/) into job dir..."

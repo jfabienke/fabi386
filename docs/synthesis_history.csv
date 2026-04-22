@@ -11,3 +11,4 @@ date,phase,alms,regs,dsp,block_mem_bits,elapsed_sec,notes
 2026-03-15,,27619,18393,10,1,256,410,206,quartus_synth_check:nas:ETX_ENABLED (replaces VGA)
 2026-03-15,,27236,17515,9,1,122,944,220,quartus_synth_check:nas:ETX_BASELINE
 2026-04-22,,27215,17515,9,1,122,944,221,quartus_synth_check:nas
+2026-04-22,,27500,17515,9,1,122,944,304,quartus_synth_check:nas

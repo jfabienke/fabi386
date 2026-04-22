@@ -149,8 +149,10 @@ module emu (
     end
 
     // Combined reset: PLL lock + user reset button + PS/2 0xFE command
+    // + async RESET from sys_top + OSD "Reset" menu entry (status[0]).
     logic sys_reset_req;
-    wire  combined_rst_n = rst_n && !sys_reset_req;
+    logic osd_reset_req;  // driven later from status[0]
+    wire  combined_rst_n = rst_n && !sys_reset_req && !RESET && !osd_reset_req;
 
     // =====================================================================
     //  HPS I/O (MiSTer Framework Interface)
@@ -181,48 +183,70 @@ module emu (
     // Accent for gamma bus
     logic [21:0] gamma_bus;
 
-    // NOTE: hps_io is a MiSTer framework module — it must be copied from
-    // the sys/ directory of the MiSTer template. It is NOT part of fabi386.
-    // Uncomment and configure once integrating with the real framework.
-    /*
+    // =====================================================================
+    //  hps_io instantiation (MiSTer framework link)
+    // =====================================================================
+    // Gated by MISTER_FULL. When unset (sv2v resource-check flow, no
+    // rtl/sys/ files in the source list), HPS_BUS stays high-Z and the
+    // framework outputs are held at safe defaults.
+    //
+    // CONF_STR comes from rtl/top/f386_conf_str.sv:
+    //   status[0] = "R[0],Reset;"
+    //   status[1] = A20 override
+    //   status[2] = CPU speed
+    //
+    // Only the subset of hps_io signals actually used by fabi386 is
+    // connected. Joysticks, paddles, spinners, ADC, SD image loading,
+    // UART, gamma, and scaler overrides are left defaulted — add them
+    // as features are brought up.
+`ifdef MISTER_FULL
+    wire [31:0] gamma_bus_unused;
+
     hps_io #(
         .CONF_STR(CONF_STR),
+        .CONF_STR_BRAM(0),
         .PS2DIV(2000),
+        .PS2WE(1),
         .WIDE(0)
     ) hps_io_inst (
-        .clk_sys       (cpu_clk),
-        .HPS_BUS       (),         // wired by MiSTer framework
-        .conf_str      (),
-        .status        (status),
-        .buttons       (buttons),
-        .forced_scandoubler(forced_scandoubler),
-        .direct_video  (direct_video),
-        .gamma_bus     (gamma_bus),
-        .ps2_kbd_led_use(3'd0),
-        .ps2_kbd_led_status(3'd0),
-        .ps2_key       (ps2_kbd_hps),
-        .ps2_mouse     (ps2_mouse_hps),
-        .img_mounted   (img_mounted),
-        .img_size      (img_size),
-        .img_readonly  (img_readonly),
-        .sd_lba        ({sd_lba}),
-        .sd_rd         (sd_rd),
-        .sd_wr         (sd_wr),
-        .sd_ack        (sd_ack),
-        .sd_buff_addr  (sd_buff_addr),
-        .sd_buff_dout  (sd_buff_dout),
-        .sd_buff_din   ({sd_buff_din}),
-        .sd_buff_wr    (sd_buff_wr)
-    );
-    */
+        .clk_sys            (cpu_clk),
+        .HPS_BUS            (HPS_BUS),
 
-    // Placeholder signals until hps_io is instantiated
-    assign status = 32'd0;
-    assign buttons = 2'd0;
-    assign ps2_kbd_hps = 11'd0;
-    assign ps2_kbd_hps_stb = 1'b0;
-    assign ps2_mouse_hps = 25'd0;
+        .buttons            (buttons),
+        .status             (status),
+        .forced_scandoubler (forced_scandoubler),
+        .direct_video       (direct_video),
+
+        // ps2_key: [10]=toggle/stb, [9]=pressed, [8]=extended, [7:0]=scan
+        .ps2_key            (ps2_kbd_hps),
+        .ps2_mouse          (ps2_mouse_hps),
+
+        .gamma_bus          (gamma_bus)
+    );
+    assign ps2_kbd_hps_stb   = 1'b0;
     assign ps2_mouse_hps_stb = 1'b0;
+    assign img_mounted       = 1'b0;
+    assign img_size          = 64'd0;
+    assign img_readonly      = 32'd0;
+`else
+    // Non-MiSTer resource-check flow: tie everything off.
+    assign HPS_BUS           = 49'bz;
+    assign status            = 32'd0;
+    assign buttons           = 2'd0;
+    assign forced_scandoubler = 1'b0;
+    assign direct_video      = 1'b0;
+    assign gamma_bus         = 22'd0;
+    assign ps2_kbd_hps       = 11'd0;
+    assign ps2_kbd_hps_stb   = 1'b0;
+    assign ps2_mouse_hps     = 25'd0;
+    assign ps2_mouse_hps_stb = 1'b0;
+    assign img_mounted       = 1'b0;
+    assign img_size          = 64'd0;
+    assign img_readonly      = 32'd0;
+`endif
+
+    // OSD reset request (status[0], toggled by "R[0],Reset;" menu entry)
+    assign osd_reset_req = status[0];
 
     // =====================================================================
     //  A20 Gate
@@ -619,13 +643,39 @@ module emu (
     logic ps2_sys_reset;
 
     // HPS keyboard/mouse byte injection (ready/valid handshake)
-    // Stub: no data until hps_io is wired
     logic [7:0] hps_kbd_data, hps_mouse_data;
     logic       hps_kbd_valid, hps_mouse_valid;
     logic       hps_kbd_ready, hps_mouse_ready;
 
-    assign hps_kbd_data    = 8'd0;
-    assign hps_kbd_valid   = 1'b0;
+    // ---------------------------------------------------------------------
+    //  ps2_key → byte adapter
+    // ---------------------------------------------------------------------
+    // hps_io delivers decoded key events on ps2_kbd_hps[10:0]:
+    //   [10] toggle (changes once per event), [9] pressed, [8] extended,
+    //   [7:0] scancode.
+    // f386_ps2 wants raw PS/2 bytes via ready/valid. First-pass adapter
+    // emits the scancode byte on every event and relies on downstream
+    // handling — extended-prefix (0xE0) and break-prefix (0xF0) are
+    // NOT emitted yet; that will come in a follow-up when we verify
+    // what DOS actually needs.
+    logic ps2_key_toggle_r;
+    always_ff @(posedge cpu_clk or negedge combined_rst_n) begin
+        if (!combined_rst_n) begin
+            ps2_key_toggle_r <= 1'b0;
+            hps_kbd_data     <= 8'd0;
+            hps_kbd_valid    <= 1'b0;
+        end else begin
+            if (hps_kbd_valid && hps_kbd_ready)
+                hps_kbd_valid <= 1'b0;           // byte consumed
+            if ((ps2_kbd_hps[10] != ps2_key_toggle_r) && !hps_kbd_valid) begin
+                ps2_key_toggle_r <= ps2_kbd_hps[10];
+                hps_kbd_data     <= ps2_kbd_hps[7:0];
+                hps_kbd_valid    <= 1'b1;
+            end
+        end
+    end
+
+    // Mouse pass-through not implemented yet
     assign hps_mouse_data  = 8'd0;
     assign hps_mouse_valid = 1'b0;
 
@@ -782,8 +832,8 @@ module emu (
     // User I/O port unused
     assign USER_OUT = 7'h7F;       // open-drain: high => read mode
 
-    // HPS bus not yet consumed (no hps_io instance) — leave high-Z
-    assign HPS_BUS = 49'bz;
+    // HPS_BUS driven above: by hps_io when MISTER_FULL is defined,
+    // otherwise tied high-Z inside the ifdef guard.
 
     // ADC bus high-Z
     assign ADC_BUS = 4'bzzzz;

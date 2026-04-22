@@ -62,6 +62,11 @@ set_global_assignment -name FINAL_PLACEMENT_OPTIMIZATION ALWAYS
 set_global_assignment -name SEED 1
 
 # MiSTer framework macros
+# MISTER_FULL — activates the hps_io instantiation inside emu
+# (keyboard, OSD menu status, reset). Without it, emu ties HPS_BUS
+# high-Z and only the sv2v-based resource-estimation flow can build.
+set_global_assignment -name VERILOG_MACRO "MISTER_FULL=1"
+
 # MISTER_FB / MISTER_FB_PALETTE are NOT enabled — fabi386 does not yet
 # drive the framebuffer path inside emu. Add when implementing FB support.
 # MISTER_DUAL_SDRAM NOT enabled — single SDRAM only.

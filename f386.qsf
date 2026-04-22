@@ -5,7 +5,7 @@
 
 set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE 5CSEBA6U23I7
-set_global_assignment -name TOP_LEVEL_ENTITY f386_emu
+set_global_assignment -name TOP_LEVEL_ENTITY emu
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION "21.1"
 set_global_assignment -name PROJECT_CREATION_TIME_DATE "00:00:00  January 01, 2024"
 set_global_assignment -name LAST_QUARTUS_VERSION "21.1.0 Lite Edition"

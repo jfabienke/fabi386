@@ -1,44 +1,40 @@
 /*
- * fabi386: MiSTer Top-Level EMU Module
- * ---------------------------------------
- * This is the top-level module instantiated by the MiSTer sys/emu.v
- * framework. It wires together the CPU core, peripherals, memory
- * controller, and video output for the DE10-Nano FPGA.
+ * fabi386: MiSTer emu Top-Level Module
+ * -------------------------------------
+ * Module name `emu` is mandated by the MiSTer sys_top framework
+ * (rtl/sys/sys_top.v instantiates `emu` by name). Kept in file
+ * `f386_emu.sv` for repo history continuity.
  *
- * Architecture:
- *   ┌────────────────────────────────────────────────┐
- *   │  f386_emu                                      │
- *   │                                                │
- *   │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
- *   │  │ OoO Core │←→│ Mem Ctrl │←→│  DDRAM (HPS) │  │
- *   │  └────┬─────┘  └──────────┘  └──────────────┘  │
- *   │       │                                        │
- *   │  ┌────┴──────────────────────────────────┐     │
- *   │  │  I/O Bus                              │     │
- *   │  ├──────┬──────┬──────┬──────┬────┬──────┤     │
- *   │  │ PIC  │ PIT  │ PS/2 │ VGA  │RTC │ DMA  │     │
- *   │  └──────┴──────┴──────┴──────┴────┴──────┘     │
- *   │                         │                      │
- *   │               Video Out → VGA/HDMI             │
- *   └────────────────────────────────────────────────┘
+ * Wires together the CPU core, peripherals, memory controller,
+ * and video output for the DE10-Nano FPGA. Unused MiSTer framework
+ * signals (SDRAM, UART, ADC, HDMI hints) are tied off at the
+ * bottom of this module; enable them as features are added.
  *
- * Reference: ao486_MiSTer ao486.sv
+ * Reference: reference/ao486_MiSTer/ao486.sv
  */
 
 import f386_pkg::*;
 import f386_conf_str_pkg::*;
 
-module f386_emu (
-    // --- MiSTer Framework Signals ---
+module emu (
+    // --- Master clock ---
     input  logic        CLK_50M,
 
-    // --- LED ---
-    output logic        LED_USER,
-    output logic        LED_HDD,
-    output logic        LED_POWER,
-    output logic [1:0]  BUTTONS,
+    // --- Async reset from sys_top ---
+    input  logic        RESET,
 
-    // --- VGA ---
+    // --- HPS bus (OSD, file loading, joystick/keyboard/mouse, RTC, status) ---
+    inout  logic [48:0] HPS_BUS,
+
+    // --- Video clocks ---
+    output logic        CLK_VIDEO,   // base video clock, usually == CLK_SYS
+    output logic        CE_PIXEL,    // pixel clock enable relative to CLK_VIDEO
+
+    // --- Video aspect ratio for HDMI scaler ---
+    output logic [12:0] VIDEO_ARX,
+    output logic [12:0] VIDEO_ARY,
+
+    // --- VGA output (to scaler / analog out) ---
     output logic [7:0]  VGA_R,
     output logic [7:0]  VGA_G,
     output logic [7:0]  VGA_B,
@@ -47,37 +43,78 @@ module f386_emu (
     output logic        VGA_DE,
     output logic        VGA_F1,
     output logic [1:0]  VGA_SL,
+    output logic        VGA_SCALER,
+    output logic        VGA_DISABLE,
 
-    // --- Pixel Clock Output ---
-    output logic        CE_PIXEL,
+    // --- HDMI scaler feedback ---
+    input  logic [11:0] HDMI_WIDTH,
+    input  logic [11:0] HDMI_HEIGHT,
+    output logic        HDMI_FREEZE,
+    output logic        HDMI_BLACKOUT,
+    output logic        HDMI_BOB_DEINT,
 
-    // --- DDRAM Interface ---
-    output logic [28:0] DDRAM_ADDR,   // 64-bit word address (512M × 8B = 4GB)
-    output logic [7:0]  DDRAM_BURSTCNT,
-    output logic [63:0] DDRAM_DIN,
-    output logic [7:0]  DDRAM_BE,
-    output logic        DDRAM_WE,
-    output logic        DDRAM_RD,
-    input  logic [63:0] DDRAM_DOUT,
-    input  logic        DDRAM_DOUT_READY,
-    input  logic        DDRAM_BUSY,
+    // --- LEDs and buttons ---
+    output logic        LED_USER,
+    output logic [1:0]  LED_POWER,
+    output logic [1:0]  LED_DISK,
+    output logic [1:0]  BUTTONS,
 
-    // --- SD Card ---
+    // --- Audio ---
+    input  logic        CLK_AUDIO,   // 24.576 MHz
+    output logic [15:0] AUDIO_L,
+    output logic [15:0] AUDIO_R,
+    output logic        AUDIO_S,     // 1 = signed samples
+    output logic [1:0]  AUDIO_MIX,   // 0=none 1=25% 2=50% 3=100% monaural
+
+    // --- ADC bus ---
+    inout  logic [3:0]  ADC_BUS,
+
+    // --- SD card (SPI) ---
     output logic        SD_SCK,
     output logic        SD_MOSI,
     input  logic        SD_MISO,
     output logic        SD_CS,
     input  logic        SD_CD,
 
-    // --- I/O Board ---
+    // --- DDR3 (via HPS) ---
+    output logic        DDRAM_CLK,
+    input  logic        DDRAM_BUSY,
+    output logic [7:0]  DDRAM_BURSTCNT,
+    output logic [28:0] DDRAM_ADDR,
+    input  logic [63:0] DDRAM_DOUT,
+    input  logic        DDRAM_DOUT_READY,
+    output logic        DDRAM_RD,
+    output logic [63:0] DDRAM_DIN,
+    output logic [7:0]  DDRAM_BE,
+    output logic        DDRAM_WE,
+
+    // --- SDRAM (daughter board) ---
+    output logic        SDRAM_CLK,
+    output logic        SDRAM_CKE,
+    output logic [12:0] SDRAM_A,
+    output logic [1:0]  SDRAM_BA,
+    inout  logic [15:0] SDRAM_DQ,
+    output logic        SDRAM_DQML,
+    output logic        SDRAM_DQMH,
+    output logic        SDRAM_nCS,
+    output logic        SDRAM_nCAS,
+    output logic        SDRAM_nRAS,
+    output logic        SDRAM_nWE,
+
+    // --- UART ---
+    input  logic        UART_CTS,
+    output logic        UART_RTS,
+    input  logic        UART_RXD,
+    output logic        UART_TXD,
+    output logic        UART_DTR,
+    input  logic        UART_DSR,
+
+    // --- User I/O port (open-drain) ---
     input  logic [6:0]  USER_IN,
     output logic [6:0]  USER_OUT,
 
-    // --- Audio ---
-    output logic [15:0] AUDIO_L,
-    output logic [15:0] AUDIO_R,
-    output logic        AUDIO_S,    // 1 = signed audio
-    output logic [1:0]  AUDIO_MIX   // 0 = no mix, 1 = 25%, 2 = 50%, 3 = 100% monaural
+    // --- OSD status ---
+    input  logic        OSD_STATUS
 );
 
     // =====================================================================
@@ -714,24 +751,66 @@ module f386_emu (
     assign AUDIO_MIX = 2'd0;   // No mix
 
     // =====================================================================
-    //  Miscellaneous Outputs
+    //  MiSTer framework tie-offs
     // =====================================================================
+    // LEDs / buttons
     assign LED_USER  = 1'b0;
-    assign LED_HDD   = 1'b0;
-    assign LED_POWER = 1'b1;
-    assign BUTTONS   = 2'd0;
-    assign VGA_F1    = 1'b0;
-    assign VGA_SL    = 2'd0;
-    assign CE_PIXEL  = 1'b1;
+    assign LED_POWER = 2'b00;      // let sys control power LED
+    assign LED_DISK  = 2'b00;      // no disk activity signal yet
+    assign BUTTONS   = 2'b00;
+
+    // VGA extras
+    assign VGA_F1      = 1'b0;     // no interlace
+    assign VGA_SL      = 2'b00;    // no scanlines
+    assign CE_PIXEL    = 1'b1;     // 1:1 (CLK_VIDEO == pixel rate)
+    assign CLK_VIDEO   = pixel_clk;
+    assign VIDEO_ARX   = 13'd4;    // 4:3 aspect
+    assign VIDEO_ARY   = 13'd3;
+    assign VGA_SCALER  = 1'b0;
+    assign VGA_DISABLE = 1'b0;
+
+    // HDMI hints unused
+    assign HDMI_FREEZE    = 1'b0;
+    assign HDMI_BLACKOUT  = 1'b0;
+    assign HDMI_BOB_DEINT = 1'b0;
 
     // SD card unused for now (disk I/O will go through HPS DDRAM)
     assign SD_SCK  = 1'b0;
     assign SD_MOSI = 1'b0;
     assign SD_CS   = 1'b1;
 
-    assign USER_OUT = 7'd0;
+    // User I/O port unused
+    assign USER_OUT = 7'h7F;       // open-drain: high => read mode
+
+    // HPS bus not yet consumed (no hps_io instance) — leave high-Z
+    assign HPS_BUS = 49'bz;
+
+    // ADC bus high-Z
+    assign ADC_BUS = 4'bzzzz;
+
+    // SDRAM daughterboard unused — drive to idle/high-Z
+    assign SDRAM_CLK  = 1'b0;
+    assign SDRAM_CKE  = 1'b0;
+    assign SDRAM_A    = 13'd0;
+    assign SDRAM_BA   = 2'd0;
+    assign SDRAM_DQ   = 16'bz;
+    assign SDRAM_DQML = 1'b1;
+    assign SDRAM_DQMH = 1'b1;
+    assign SDRAM_nCS  = 1'b1;      // chip deselect (idle)
+    assign SDRAM_nCAS = 1'b1;
+    assign SDRAM_nRAS = 1'b1;
+    assign SDRAM_nWE  = 1'b1;
+
+    // DDRAM clock follows CPU clock (L2/LSQ already drive DDRAM_* signals)
+    assign DDRAM_CLK  = cpu_clk;
+
+    // UART unused
+    assign UART_RTS = 1'b0;
+    assign UART_TXD = 1'b1;        // idle high
+    assign UART_DTR = 1'b0;
 
     // System reset request (from PS/2 controller command 0xFE)
+    // Combine with async RESET from sys_top once framework wiring lands.
     assign sys_reset_req = ps2_sys_reset;
 
 endmodule

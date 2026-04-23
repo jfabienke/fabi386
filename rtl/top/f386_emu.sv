@@ -926,10 +926,11 @@ module emu (
     // Debug: L2-to-DDRAM activity probes. These catch the case where the
     // CPU never reaches OUT because it's stuck somewhere upstream (e.g.,
     // L2 not fetching from BIOS, fetch unit stalled, decode hanging on a
-    // specific opcode). The mux's ifetch-eligible region is 0xFC000..
-    // 0xFFFFF, word addr bits [28:11] == 18'h3F.
+    // specific opcode). The mux's BIOS window is 0xC000..0xFFFF (where
+    // fabi386's reset vector at 0xFFF0 actually lands), word-addr bits
+    // [28:11] == 18'h3.
     wire l2_any_rd   = l2_ddram_rd;
-    wire l2_bios_rd  = l2_ddram_rd && (l2_ddram_addr[28:11] == 18'h0003F);
+    wire l2_bios_rd  = l2_ddram_rd && (l2_ddram_addr[28:11] == 18'h00003);
 
     // Sticky bits: set on first read, never cleared until reset.
     logic l2_any_rd_ever, l2_bios_rd_ever;

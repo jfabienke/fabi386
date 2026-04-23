@@ -58,10 +58,18 @@ module f386_ddram_bios_mux (
     input  logic [63:0] bios_rd_data
 );
 
-    // BIOS region check on the 29-bit word address. BIOS byte range
-    // 0xFC000..0xFFFFF = word indices 0x1F800..0x1FFFF. Bits [28:11] = 18'h3F.
+    // BIOS region check on the 29-bit word address.
+    //
+    // fabi386's CPU reset vector is `pc_current = 32'h0000_FFF0` — a LINEAR
+    // address at 0xFFF0 in low memory. (Not the canonical x86 0xFFFFFFF0
+    // or segmented 0xFFFF0 at the top of 1 MB.) So our BIOS ROM has to
+    // back addresses around 0xFFF0, not the traditional 0xFC000 region.
+    //
+    // ROM window: physical 0xC000..0xFFFF (16 KB).
+    //   byte  0xC000..0xFFFF  → word 0x1800..0x1FFF
+    //   In a 29-bit word addr, bits [28:11] == 18'h3.
     function automatic logic is_bios_word(input logic [28:0] waddr);
-        is_bios_word = (waddr[28:11] == 18'h0003F);
+        is_bios_word = (waddr[28:11] == 18'h00003);
     endfunction
 
     typedef enum logic [0:0] {

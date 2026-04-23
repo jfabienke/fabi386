@@ -1,79 +1,77 @@
 ; ============================================================================
-; fabi386 — diagnostics ROM
+; fabi386 — diagnostics ROM (microcode-free revision)
 ; ----------------------------------------------------------------------------
-; Minimal 16-bit real-mode diagnostic. Loaded at physical 0xFC000..0xFFFFF
-; (16 KB BIOS region). On x86 reset, CS=F000, IP=FFF0 → physical 0xFFFF0,
-; which is at offset 0x3FF0 in our image. That slot holds a far jump to
-; F000:C000 (main code at the start of the ROM).
+; Loaded at physical 0xFC000..0xFFFFF (16 KB BIOS region).
+; On x86 reset, CS=F000, IP=FFF0 → physical 0xFFFF0 = image offset 0x3FF0.
 ;
-; Address math:
-;   image offset 0x0000  ⇔  F000:C000  ⇔  physical 0xFC000
-;   image offset 0x3FF0  ⇔  F000:FFF0  ⇔  physical 0xFFFF0  (reset vector)
-;   image offset 0x3FFF  ⇔  F000:FFFF  ⇔  physical 0xFFFFF
+; First hardware test (diag_rom_01/02) showed LEDR[4] + LEDR[2]
+; blinking (bitstream alive, PLL locked, cpu_clk ticking) but LEDR[0]
+; dark (CPU-driven heartbeat never fires). The most likely cause is
+; that this ROM's reset vector originally used FAR JMP (opcode 0xEA),
+; which the fabi386 decoder handles only via microcode — and
+; CONF_ENABLE_MICROCODE is OFF in the default synthesis build.
 ;
-; With `ORG 0xC000` NASM makes the assembled label addresses match the
-; F000:XXXX offsets directly, which is what we want.
+; This revision uses only "basic" 486 instructions that do not require
+; microcode: MOV reg,imm — MOV reg,reg — OUT — INC reg — DEC reg —
+; Jcc — JMP rel16. No FAR JMP, no CLI/CLD/STI, no MOV Sreg, no stack
+; setup (no push/pop, no MOV SS: the instruction-prefix shadow of
+; MOV SS is itself microcoded on many cores).
+;
+; Observable output:
+;   - I/O port 0x378 bit 0 toggles at ~1 Hz → LED_USER on DE10-Nano
+;     (snooped in rtl/top/f386_emu.sv at periph_io_addr == 16'h0378).
+;
+; Layout inside the 16 KB image (origin F000:C000 → physical 0xFC000):
+;   0x0000..0x3EFF : 0xFF padding
+;   0x3F00         : main loop (256 bytes max; enough for the whole loop)
+;   0x3F00..0x3FEF : main code + internal pad
+;   0x3FF0         : reset vector — NEAR JMP to main (3 bytes, opcode 0xE9)
+;   0x3FFB..0x3FFE : "FABI" signature
+;   0x3FFF         : final 0xFF pad
 ;
 ; Build:
-;   nasm -f bin -o diagnostic.bin diagnostic.asm
-;   python3 asm/bin_to_hex.py diagnostic.bin diagnostic.hex
-;
-; Observable outputs:
-;   - I/O port 0x378 bit 0 → LED_USER on the DE10-Nano.
-;     Toggles at ~1 Hz so a steady heartbeat is visible.
+;   nasm -f bin -o asm/diagnostic.bin asm/diagnostic.asm
+;   python3 asm/bin_to_hex.py asm/diagnostic.bin asm/diagnostic.hex
 ; ============================================================================
 
 BITS 16
 ORG 0xC000
 
-; ============================================================================
-; main — first instruction the CPU runs after the reset-vector far jump
-; ============================================================================
+; -------- padding to image offset 0x3F00 (main code lands just before
+;          the reset vector so the reset-vector NEAR JMP can reach it)
+times 0x3F00 - ($ - $$) db 0xFF
+
+; ---- main — runs directly on reset after the near-jump from 0xFFFF0 ----
 main:
-    cli                      ; interrupts off
-    cld                      ; string ops count up
-
-    ; Stack somewhere sane: SS:SP = 0000:7C00 (below the BIOS area).
-    xor   ax, ax
-    mov   ss, ax
-    mov   sp, 0x7C00
-
-    mov   bl, 0               ; LED state
+    mov   dx, 0x0378        ; DX = I/O port address (kept in dx across loop)
+    mov   bl, 0              ; BL = LED state (bit 0 = LED_USER pattern)
 
 heartbeat:
-    ; Drive LED via I/O port 0x378 bit 0.
-    mov   al, bl
-    mov   dx, 0x0378
-    out   dx, al
+    mov   al, bl             ; AL ← BL
+    out   dx, al             ; port[0x378] ← AL
+    inc   bl                 ; BL++ (bit 0 toggles every iteration)
 
-    ; Flip bit 0 for next iteration.
-    xor   bl, 0x01
-
-    ; Delay loop ~½ second at ~33 MHz CPU. Two nested 16-bit counters
-    ; (0xFFFF × 0x00FF ≈ 16 M iterations, each ≈ 1 clock on a fast core
-    ; — loose approximation; will be refined after first-light).
+    ; Delay ~½ second at ~33 MHz: two nested 16-bit counters.
     mov   cx, 0xFFFF
-.delay_outer:
+.outer:
     mov   di, 0x00FF
-.delay_inner:
+.inner:
     dec   di
-    jnz   .delay_inner
+    jnz   .inner
     dec   cx
-    jnz   .delay_outer
+    jnz   .outer
 
-    jmp   heartbeat
+    jmp   heartbeat          ; NEAR JMP rel16 (opcode 0xE9)
 
-; ============================================================================
-; Pad to image offset 0x3FF0 (physical 0xFFFF0) — the x86 reset vector.
-; ============================================================================
+; -------- padding to image offset 0x3FF0 = physical 0xFFFF0 (reset vector)
 times 0x3FF0 - ($ - $$) db 0xFF
 
 reset_vector:
-    jmp   0xF000:0xC000      ; far jump to main (physical 0xFC000)
+    jmp   main               ; NEAR JMP back to 'main' (opcode 0xE9)
+                             ;   3 bytes: E9 <rel16>
+                             ; rel16 = main - (reset+3) = FF00 - FFF3 = -0xF3 = 0xFF0D
 
-; ============================================================================
-; Signature "FABI" at the end of the ROM (last 4 bytes, with 1 byte pad).
-; ============================================================================
+; -------- signature at the end of ROM
 times 0x3FFB - ($ - $$) db 0xFF
     db 'FABI'
-    db 0xFF                  ; pad to 0x4000 bytes total
+    db 0xFF                  ; final pad → 16 KB exactly

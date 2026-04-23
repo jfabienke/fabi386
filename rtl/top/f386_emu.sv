@@ -881,11 +881,17 @@ module emu (
         clk50_heartbeat <= clk50_heartbeat + 27'd1;
     end
 
-    // The cpu_clk counter tells us if the PLL locked and cpu_clk is ticking.
-    // No reset — we want this to run regardless of the CPU reset state.
+    // The cpu_clk counter is GATED by combined_rst_n: it only advances
+    // when the CPU is released from reset. If this LED blinks on hardware,
+    // we know both the PLL is locked AND combined_rst_n is deasserted —
+    // which pins "CPU can't be blinking LED_USER" down to decode/execute
+    // rather than a stuck-in-reset problem.
     logic [26:0] cpuclk_heartbeat;
-    always_ff @(posedge cpu_clk) begin
-        cpuclk_heartbeat <= cpuclk_heartbeat + 27'd1;
+    always_ff @(posedge cpu_clk or negedge combined_rst_n) begin
+        if (!combined_rst_n)
+            cpuclk_heartbeat <= 27'd0;
+        else
+            cpuclk_heartbeat <= cpuclk_heartbeat + 27'd1;
     end
 
     // CPU-driven heartbeat: BIOS ROM writes bit 0 of port 0x378.

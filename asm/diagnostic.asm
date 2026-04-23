@@ -34,14 +34,22 @@ times 0x3FC0 - ($ - $$) db 0x90
 ; multi-byte opcodes that need microcode.
 ; ============================================================================
 main:                          ; at image offset 0x3FC0 = physical 0xFFC0
-    mov   dx, 0x0378           ; BA 78 03
-    mov   bl, 0                ; B3 00
+    ; Walk through 64 KB of low memory writing one byte per cache line.
+    ; Every write goes CPU→LSQ→L2. L2 caches it dirty; once the cache
+    ; fills (128 KB / 32 B = 4096 lines) every subsequent write evicts
+    ; an older line, which fires l2_ddram_we — observable on LEDR[3].
+    ;
+    ; Registers: SI = walking address, BL = data byte.
+    ; Instructions used: all basic, all non-microcoded.
+
+    mov   si, 0                ; BE 00 00  — start address
+    mov   bl, 0xAA             ; B3 AA     — data pattern
 
 heartbeat:
-    mov   al, bl               ; 88 D8
-    out   dx, al               ; EE
-    inc   bl                   ; FE C3
-    jmp   heartbeat            ; short/near back to heartbeat — tight loop
+    mov   [cs:si], bl          ; 2E 88 1C  — write bl → [CS:SI]
+    add   si, 0x20             ; 83 C6 20  — advance one cache line (32 B)
+    inc   bl                   ; FE C3     — change data each iteration
+    jmp   heartbeat            ; EB xx     — loop
 
 ; Everything between end-of-main and the reset vector is NOP padding, so
 ; speculative fetch past the final JMP stays in safe territory.

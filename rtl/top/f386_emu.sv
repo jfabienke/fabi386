@@ -958,6 +958,34 @@ module emu (
     end
     wire bios_active = (bios_activity_extender != 20'd0);
 
+    // L2 write-back observable path.
+    //
+    // OUT is broken (microcode IO_WAIT never fires io_port_wr in this config),
+    // so the diag ROM can't use port 0x378 to signal liveness. But *memory*
+    // writes flow through LSQ → L2 → DDRAM just fine. When the ROM issues
+    // MOV [mem], reg, the store is cached dirty in L2 until the line evicts,
+    // at which point the mux sees an l2_ddram_we burst. Counting those
+    // gives us a visible "CPU is doing memory work" indicator.
+    //
+    // Sticky: set on the first wb, never cleared until reset.
+    logic l2_wb_ever;
+    always_ff @(posedge cpu_clk or negedge combined_rst_n) begin
+        if (!combined_rst_n)
+            l2_wb_ever <= 1'b0;
+        else if (l2_ddram_we)
+            l2_wb_ever <= 1'b1;
+    end
+
+    // Counter: bit[22] toggles every ~256K write beats, giving a slow
+    // visible blink once L2 starts evicting regularly.
+    logic [22:0] l2_wb_cnt;
+    always_ff @(posedge cpu_clk or negedge combined_rst_n) begin
+        if (!combined_rst_n)
+            l2_wb_cnt <= 23'd0;
+        else if (l2_ddram_we)
+            l2_wb_cnt <= l2_wb_cnt + 23'd1;
+    end
+
     // Any-I/O-write activity extender (~30 ms at ~33 MHz). Lets us
     // see "CPU is executing at least some OUT instruction" even if
     // it's not the 0x378 LED port we expected.
@@ -1014,14 +1042,18 @@ module emu (
     //   5 blinks, 3 OFF → CPU fetches but no OUT → decode/execute stuck
     //   3 blinks, 1 & 0 OFF → OUTs happen but not to our ports → decode bug
     //
+    // Updated layout — LED_DEBUG[3] and LED_DEBUG[1] now expose memory-write
+    // activity, since the OUT / console port paths both require the broken
+    // microcode IO path and stay dark. Memory writes (MOV [mem], reg) use
+    // the LSQ→L2→DDRAM path which does work.
     assign LED_DEBUG[7] = l2_bios_rd_ever;
     assign LED_DEBUG[6] = l2_any_rd_ever;
     assign LED_DEBUG[5] = bios_active;
     assign LED_DEBUG[4] = clk50_heartbeat[25];
-    assign LED_DEBUG[3] = any_iowr_active;
+    assign LED_DEBUG[3] = l2_wb_cnt[22];       // slow blink once L2 evicts
     assign LED_DEBUG[2] = cpuclk_heartbeat[24];
-    assign LED_DEBUG[1] = console_wr_active;
-    assign LED_DEBUG[0] = diag_led_state;
+    assign LED_DEBUG[1] = l2_wb_ever;          // sticky: ever wrote DDRAM
+    assign LED_DEBUG[0] = diag_led_state;      // legacy: CPU→port 0x378
 
     // Keep the legacy framework paths silent so LED[0/2/4] show exactly
     // what LED_DEBUG drives (sys_top OR's them together; zero is a no-op).

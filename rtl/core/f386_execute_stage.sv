@@ -247,8 +247,12 @@ module f386_execute_stage (
     logic [31:0] br_actual_target;
     logic [31:0] br_next_pc;
 
-    assign br_next_pc      = u_instr.pc + 32'd2;  // Minimum x86 branch size
-    assign br_actual_target = u_instr.pc + u_instr.imm_value;
+    // Correct x86 semantics: new EIP = current EIP + instruction length +
+    // signed relative displacement. Both fall-through PC (for not-taken) and
+    // the taken target use this. Using u_instr.insn_len keeps this in sync
+    // with decode's own branch-target calculation (f386_decode.sv:2560).
+    assign br_next_pc       = u_instr.pc + {28'h0, u_instr.insn_len};
+    assign br_actual_target = u_instr.pc + {28'h0, u_instr.insn_len} + u_instr.imm_value;
 
     // Branch condition evaluation from EFLAGS
     // opcode[3:0] encodes Jcc condition (matches x86 TTTNcc encoding)

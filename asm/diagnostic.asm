@@ -1,90 +1,57 @@
 ; ============================================================================
-; fabi386 — diagnostics ROM (VGA console + LED heartbeat)
+; fabi386 — minimal diagnostics ROM (LED heartbeat only, no data section)
 ; ----------------------------------------------------------------------------
-; Loaded at physical 0xFC000..0xFFFFF (16 KB BIOS region).
-; On x86 reset, CS=F000, IP=FFF0 → physical 0xFFFF0 = image offset 0x3FF0.
+; Every previous attempt produced a ROM that had a data string near the
+; code. Speculative prefetch over the data → decoder saw complex/microcoded
+; opcodes (POPAD 0x61, BOUND 0x62, IMUL with memory, etc.) → LSQ boundary
+; assertion a few cycles in. Fixed by removing the data section entirely.
+; Also avoids: CLI/CLD, MOV Sreg, stack setup, FAR JMP, and [cs:si] loads
+; — anything that could touch microcode or odd-offset memory.
 ;
-; Does two things after reset:
-;   1. Writes a banner string to the VGA text console via I/O ports
-;        0xC001  W   set attribute byte (color) for subsequent chars
-;        0xC002  W   reset cursor to top-left
-;        0xC000  W   write char at cursor, advance cursor
-;      (decoded by rtl/soc/f386_console_port.sv → f386_vga text framebuffer)
-;   2. Enters a forever loop toggling I/O port 0x378 bit 0, which
-;      rtl/top/f386_emu.sv snoops onto LED_USER (→ DE10-Nano LEDR[0]).
+; This ROM only uses: MOV reg,imm8 — MOV reg,imm16 — OUT — INC r8 —
+; DEC r16 — Jcc rel8 — JMP rel8 — JMP rel16. All basic, all non-microcoded.
 ;
-; Only non-microcoded instructions used: MOV reg,imm — MOV reg,reg —
-; MOV r8,[cs:reg] — OUT — INC reg — DEC reg — OR reg,reg — Jcc —
-; JMP rel16. In particular no FAR JMP, no MOV Sreg, no CLI/CLD,
-; no stack.
+; Load at physical 0xC000 (so the reset-vector NEAR-JMP target is reachable).
+; fabi386's reset PC is 0x0000FFF0 linear (NOT the canonical x86 0xFFFFFFF0).
 ;
-; Build:
-;   nasm -f bin -o asm/diagnostic.bin asm/diagnostic.asm
-;   python3 asm/bin_to_hex.py asm/diagnostic.bin asm/diagnostic.hex
+; Hardware-observed behaviour of JMP NEAR:
+;   target = jmp_addr + rel16  (NOT jmp_addr + 3 + rel16 as x86 spec says)
+; → CPU lands 3 bytes earlier than NASM's target. The NOP sled covers this.
 ; ============================================================================
 
 BITS 16
-ORG 0xC000              ; image loaded at physical 0xFC000 = F000:C000
+ORG 0xC000
 
-; -------- padding to main code (placed near reset vector for NEAR-JMP reach)
-times 0x3D00 - ($ - $$) db 0xFF
+; Everything before main is a NOP sled — any stray landing from a branch
+; or mispredicted fetch flows harmlessly into main.
+times 0x3FC0 - ($ - $$) db 0x90
 
 ; ============================================================================
-; main — first instruction after reset-vector NEAR JMP
+; main — the entire diagnostic. 48 bytes, fits comfortably in one 16-byte
+; fetch block's worth of code plus a follow-on block, with a tiny backwards
+; JMP SHORT to loop. No data between here and the reset vector at 0x3FF0
+; means speculative prefetch past main falls into NOP padding, not into
+; multi-byte opcodes that need microcode.
 ; ============================================================================
-main:
-    ; ---- set console attribute to white on blue ----
-    mov   dx, 0xC001
-    mov   al, 0x1F
-    out   dx, al
+main:                          ; at image offset 0x3FC0 = physical 0xFFC0
+    mov   dx, 0x0378           ; BA 78 03
+    mov   bl, 0                ; B3 00
 
-    ; ---- reset cursor to home (0,0) ----
-    mov   dx, 0xC002
-    mov   al, 0
-    out   dx, al
-
-    ; ---- write banner through the char port ----
-    mov   si, banner     ; SI = offset of banner within CS segment
-    mov   dx, 0xC000
-.banner_loop:
-    mov   al, [cs:si]    ; load byte from CS:SI (opcode 2E 8A 04)
-    or    al, al         ; zero terminator?
-    jz    .banner_done
-    out   dx, al         ; emit char (console port advances cursor)
-    inc   si
-    jmp   .banner_loop
-.banner_done:
-
-    ; ---- forever: heartbeat LED_USER via port 0x378 ----
-    mov   dx, 0x0378
-    mov   bl, 0
 heartbeat:
-    mov   al, bl
-    out   dx, al
-    inc   bl
-    mov   cx, 0xFFFF
-.outer:
-    mov   di, 0x00FF
-.inner:
-    dec   di
-    jnz   .inner
-    dec   cx
-    jnz   .outer
-    jmp   heartbeat
+    mov   al, bl               ; 88 D8
+    out   dx, al               ; EE
+    inc   bl                   ; FE C3
+    jmp   heartbeat            ; short/near back to heartbeat — tight loop
 
-; ============================================================================
-; banner string (null-terminated)
-; ============================================================================
-banner:
-    db "fabi386 diag v0.4  -  hello, mister!", 0
+; Everything between end-of-main and the reset vector is NOP padding, so
+; speculative fetch past the final JMP stays in safe territory.
+times 0x3FF0 - ($ - $$) db 0x90
 
-; -------- padding to reset vector at image offset 0x3FF0 (physical 0xFFFF0)
-times 0x3FF0 - ($ - $$) db 0xFF
+reset_vector:                   ; at image offset 0x3FF0 = physical 0xFFF0
+    jmp   main                  ; NEAR JMP (E9 rel16) — CPU lands 3 bytes
+                                ; earlier than expected; falls through NOPs.
 
-reset_vector:
-    jmp   main           ; NEAR JMP (0xE9 rel16) back to main
-
-; -------- signature
-times 0x3FFB - ($ - $$) db 0xFF
+; Signature at the tail.
+times 0x3FFB - ($ - $$) db 0x90
     db 'FABI'
-    db 0xFF
+    db 0x90

@@ -381,7 +381,7 @@ verilate(tb_bios_rom_smoke
         ${RTL_ROOT}/core/f386_ooo_core_top.sv
     TOP_MODULE f386_ooo_core_top
     CPP_SOURCES test_bios_rom_smoke.cpp memory_model.h
-    FLAGS ${VERILATOR_COMMON_FLAGS} +define+VERILATOR_ENABLE_LSQ_MEMIF
+    FLAGS ${VERILATOR_COMMON_FLAGS} +define+VERILATOR_ENABLE_MICROCODE +define+VERILATOR_ENABLE_LSQ_MEMIF
     INCLUDE_DIRS ${RTL_INCLUDE_DIRS}
 )
 

@@ -765,8 +765,8 @@ module f386_ooo_core_top (
         .phys_dest_u   (rename_phys_u),
         .can_rename    (rename_ready),
 
-        .dest_valid_u  (dec_instr_u.dest_valid && !ucode_dest_suppress),
-        .dest_valid_v  (dec_instr_v.dest_valid),
+        .dest_valid_u  (dispatch_u_valid && dec_instr_u.dest_valid && !ucode_dest_suppress),
+        .dest_valid_v  (dispatch_v_valid && dec_instr_v.dest_valid),
 
         .arch_dest_v   (dec_instr_v.p_dest[2:0]),
         .phys_dest_v   (rename_phys_v),
@@ -1143,6 +1143,7 @@ module f386_ooo_core_top (
         exec_u_instr.dest_valid  = iq_issue_instr.dest_valid;
         exec_u_instr.phys_dest   = iq_issue_instr.p_dest;
         exec_u_instr.imm_value   = iq_issue_instr.imm_value;
+        exec_u_instr.insn_len    = iq_issue_instr.insn_len;
         exec_u_instr.flags_in    = alu_flags_current;
         exec_u_instr.flags_mask  = (iq_issue_instr.op_cat == OP_ALU_REG ||
                                     iq_issue_instr.op_cat == OP_ALU_IMM) ?
@@ -1167,6 +1168,7 @@ module f386_ooo_core_top (
         exec_v_instr.dest_valid  = patched_v.dest_valid;
         exec_v_instr.phys_dest   = patched_v.p_dest;
         exec_v_instr.imm_value   = patched_v.imm_value;
+        exec_v_instr.insn_len    = patched_v.insn_len;
         exec_v_instr.flags_in    = alu_flags_current;
         exec_v_instr.flags_mask  = (patched_v.op_cat == OP_ALU_REG ||
                                     patched_v.op_cat == OP_ALU_IMM) ?
@@ -1668,7 +1670,8 @@ module f386_ooo_core_top (
                     (uc_mem_special_cmd != UCMD_LOAD_DTR) &&
                     (uc_mem_special_cmd != UCMD_FAR_CALL) &&
                     (uc_mem_special_cmd != UCMD_LOAD_SEG) &&
-                    (uc_mem_special_cmd != UCMD_INT_ENTER);
+                    (uc_mem_special_cmd != UCMD_INT_ENTER) &&
+                    (uc_mem_special_cmd != UCMD_INT_EXIT);
             end
         end
 
@@ -2531,6 +2534,7 @@ module f386_ooo_core_top (
 
         wire uop_is_int_enter = (seq_uop_special_cmd == UCMD_INT_ENTER);
         wire uop_is_int_exit  = (seq_uop_special_cmd == UCMD_INT_EXIT);
+        wire uop_is_int_exit_mem = uop_is_int_exit && pe_mode;  // PM: GDT reads needed
 
         // MOV Sreg step 0 (LOAD with UCMD_NOP): regonly for register form
         // The selector is already in macro_val_a from GPR source read at dispatch
@@ -2546,7 +2550,8 @@ module f386_ooo_core_top (
                            seq_uop_special_cmd == UCMD_LOAD_DTR ||
                            uop_is_far_call_mem ||
                            uop_is_load_seg_mem ||
-                           uop_is_int_enter);
+                           uop_is_int_enter ||
+                           uop_is_int_exit_mem);
 
         // Detect PUSH variants (needs ESP on PRF port B)
         wire uop_is_push = uop_is_mem && (seq_uop_special_cmd == UCMD_PUSH_PRE ||
@@ -2562,7 +2567,7 @@ module f386_ooo_core_top (
              (uop_is_far_call && !pe_mode) ||
              (uop_is_load_seg && !pe_mode) ||      // Real-mode MOV Sreg: no GDT reads
              uop_is_mov_sreg_step0 ||              // MOV Sreg step 0 reg form: self-complete
-             uop_is_int_exit ||                    // IRET INT_EXIT: regonly (CS+PC commit)
+             (uop_is_int_exit && !pe_mode) ||       // Real-mode IRET INT_EXIT: regonly
              uop_is_eflags_regonly);               // CLI/STI: OP_SYS_CALL in ROM, can't go through execute
 
         // P3.MMIO.b: Detect IO port micro-ops (IN/OUT)
@@ -2630,6 +2635,11 @@ module f386_ooo_core_top (
         logic [31:0] uc_iret_cs;       // Popped CS (step 1)
         logic        uc_iret_pop_phase; // 0=EIP (first POP), 1=CS (second POP)
 
+        // PM INT: IDT gate descriptor fields
+        logic        uc_idt_phase;          // 0=IDT read phase, 1=GDT read phase
+        logic [31:0] uc_int_gate_offset;    // Handler offset from IDT gate
+        logic [15:0] uc_int_gate_selector;  // Code segment selector from IDT gate
+
         // P3.MMIO.b: IO port transaction latches
         logic        uc_io_is_read_r;   // 1=IN, 0=OUT
         logic [15:0] uc_io_addr_r;      // IO port address
@@ -2644,12 +2654,16 @@ module f386_ooo_core_top (
         // Memory engine done pulse (for exec_ack)
         // Only react to CDB1 for our own load (tag must match macro_rob_tag)
         wire uc_cdb1_match = lsq_cdb1_active && (cdb1_tag == macro_rob_tag);
-        // Suppress for intermediate GDT load (phase 0 → need second read)
-        wire uc_gdt_phase0 = (uc_mem_special_r == UCMD_FAR_CALL ||
-                              uc_mem_special_r == UCMD_LOAD_SEG) && !uc_far_phase;
+        // Suppress for intermediate reads (GDT phase 0, or IDT/GDT multi-phase for PM INT)
+        wire uc_intermediate_phase =
+            ((uc_mem_special_r == UCMD_FAR_CALL ||
+              uc_mem_special_r == UCMD_LOAD_SEG ||
+              uc_mem_special_r == UCMD_INT_EXIT) && !uc_far_phase) ||
+            (uc_mem_special_r == UCMD_INT_ENTER && pe_mode &&
+             !(uc_far_phase && uc_idt_phase));
         wire uc_mem_done = (uc_mem_state == UM_ISSUE && !uc_mem_is_load_r) ||
                            (uc_mem_state == UM_LOAD_WAIT && uc_cdb1_match &&
-                            !uc_gdt_phase0);
+                            !uc_intermediate_phase);
 
         // P3.MMIO.b: IO port transaction done (iobus ack)
         wire uc_io_done = (uc_mem_state == UM_IO_WAIT && io_port_ack);
@@ -2679,6 +2693,9 @@ module f386_ooo_core_top (
                 uc_iret_eip       <= 32'd0;
                 uc_iret_cs        <= 32'd0;
                 uc_iret_pop_phase <= 1'b0;
+                uc_idt_phase      <= 1'b0;
+                uc_int_gate_offset   <= 32'd0;
+                uc_int_gate_selector <= 16'd0;
                 uc_io_is_read_r   <= 1'b0;
                 uc_io_addr_r      <= 16'd0;
                 uc_io_wdata_r     <= 32'd0;
@@ -2689,6 +2706,7 @@ module f386_ooo_core_top (
                 uc_far_phase      <= 1'b0;
                 uc_int_push_phase <= 1'b0;
                 uc_iret_pop_phase <= 1'b0;
+                uc_idt_phase      <= 1'b0;
             end else begin
                 case (uc_mem_state)
                     UM_IDLE: begin
@@ -2705,7 +2723,8 @@ module f386_ooo_core_top (
                                                (seq_uop_special_cmd == UCMD_LOAD_DTR) ||
                                                uop_is_far_call_mem ||
                                                uop_is_load_seg_mem ||
-                                               uop_is_int_enter;
+                                               uop_is_int_enter ||
+                                               uop_is_int_exit_mem;
                             uc_mem_special_r <= seq_uop_special_cmd;
                             uc_mem_phys_dest_r <= rename_com_map[seq_uop_dest_reg];
 
@@ -2778,11 +2797,24 @@ module f386_ooo_core_top (
                                     uc_far_phase     <= 1'b0;
                                 end
                                 UCMD_INT_ENTER: begin
-                                    // Real mode: read 4-byte IVT entry at vector * 4
-                                    // IVT layout: [offset:16][segment:16]
-                                    uc_mem_addr_r    <= {22'd0, macro_imm[7:0], 2'd0};
+                                    if (pe_mode) begin
+                                        // PM: IDT gate descriptor at IDTR.base + vector*8
+                                        uc_mem_addr_r <= sys_idtr_base + {21'd0, macro_imm[7:0], 3'd0};
+                                        uc_idt_phase  <= 1'b0;
+                                    end else begin
+                                        // Real mode: IVT at vector*4
+                                        uc_mem_addr_r <= {22'd0, macro_imm[7:0], 2'd0};
+                                    end
                                     uc_mem_data_r    <= 32'd0;
                                     uc_mem_esp_new_r <= 32'd0;
+                                    uc_far_phase     <= 1'b0;
+                                end
+                                UCMD_INT_EXIT: begin
+                                    // PM IRET: GDT lookup for popped CS selector
+                                    uc_mem_addr_r    <= sys_gdtr_base + {16'd0, uc_iret_cs[15:3], 3'd0};
+                                    uc_mem_data_r    <= 32'd0;
+                                    uc_mem_esp_new_r <= 32'd0;
+                                    uc_far_phase     <= 1'b0;
                                 end
                                 default: begin
                                     // Generic LOAD/STORE: address from macro EA
@@ -2846,12 +2878,27 @@ module f386_ooo_core_top (
                             // Forward load result for next micro-op
                             uc_prev_load_result <= cdb1_data[31:0];
                             if ((uc_mem_special_r == UCMD_FAR_CALL ||
-                                 uc_mem_special_r == UCMD_LOAD_SEG) && !uc_far_phase) begin
+                                 uc_mem_special_r == UCMD_LOAD_SEG ||
+                                 uc_mem_special_r == UCMD_INT_EXIT ||
+                                 (uc_mem_special_r == UCMD_INT_ENTER && pe_mode)) && !uc_far_phase) begin
                                 // Phase 0 complete: latch low dword, issue second read
                                 uc_far_desc_lo   <= cdb1_data[31:0];
                                 uc_mem_addr_r    <= uc_mem_addr_r + 32'd4;
                                 uc_far_phase     <= 1'b1;
                                 uc_mem_state     <= UM_ALLOC;  // Re-enter for second load
+                            end
+                            // INT_ENTER PM: IDT phase 1 complete → extract gate, start GDT reads
+                            else if (uc_mem_special_r == UCMD_INT_ENTER && pe_mode &&
+                                     uc_far_phase && !uc_idt_phase) begin
+                                // IDT gate: lo = {selector[31:16], offset_lo[15:0]}
+                                //           hi = {offset_hi[31:16], type_attr[15:8], rsvd[7:0]}
+                                uc_int_gate_offset   <= {cdb1_data[31:16], uc_far_desc_lo[15:0]};
+                                uc_int_gate_selector <= uc_far_desc_lo[31:16];
+                                // Start GDT lookup for code segment
+                                uc_mem_addr_r    <= sys_gdtr_base + {16'd0, uc_far_desc_lo[31:19], 3'd0};
+                                uc_far_phase     <= 1'b0;   // Reset for GDT two-phase
+                                uc_idt_phase     <= 1'b1;   // Now in GDT phase
+                                uc_mem_state     <= UM_ALLOC;
                             end else begin
                                 uc_mem_state     <= UM_IDLE;   // Normal completion
                             end
@@ -3248,11 +3295,13 @@ module f386_ooo_core_top (
             16'hFFFF                    // [15:0]  limit=0xFFFF
         };
 
-        // INT_ENTER commits (IVT read completes)
+        // INT_ENTER commits (IVT/IDT read completes)
         wire uc_int_enter_commit = uc_mem_done && (uc_mem_special_r == UCMD_INT_ENTER);
 
-        // INT_EXIT commits (IRET regonly)
-        wire uc_int_exit_commit = uc_regonly_done && (seq_uop_special_cmd == UCMD_INT_EXIT);
+        // INT_EXIT commits: PM via UM FSM (GDT reads), real via regonly
+        wire uc_int_exit_commit_pm   = uc_mem_done && (uc_mem_special_r == UCMD_INT_EXIT);
+        wire uc_int_exit_commit_real = uc_regonly_done && (seq_uop_special_cmd == UCMD_INT_EXIT);
+        wire uc_int_exit_commit = uc_int_exit_commit_pm || uc_int_exit_commit_real;
 
         // INT_ENTER: IVT dword = {segment[31:16], offset[15:0]}
         wire [15:0] ivt_segment = cdb1_data[31:16];
@@ -3261,8 +3310,10 @@ module f386_ooo_core_top (
         // INT_EXIT: CS selector from IRET latched POP
         wire [15:0] iret_cs_sel = uc_iret_cs[15:0];
 
-        // Real-mode CS cache builder for INT (same pattern as far JMP)
-        wire [15:0] int_cs_sel = uc_int_enter_commit ? ivt_segment : iret_cs_sel;
+        // CS selector for INT/IRET commit
+        wire [15:0] int_cs_sel = uc_int_enter_commit ?
+            (pe_mode ? uc_int_gate_selector : ivt_segment) :
+            iret_cs_sel;
         wire [31:0] rm_int_cs_base = {12'd0, int_cs_sel, 4'd0};
         wire [63:0] real_mode_int_cs_cache = {
             rm_int_cs_base[31:24],     // [63:56] base[31:24]
@@ -3295,8 +3346,10 @@ module f386_ooo_core_top (
         wire [31:0] gdt_cs_base = {gdt_desc[63:56], gdt_desc[39:32], gdt_desc[31:16]};
         wire [31:0] far_redirect_base = pe_mode ? gdt_cs_base : rm_cs_base;
         assign ucode_redirect_pc    = uc_far_commit      ? (far_redirect_base + macro_imm) :
-                                      uc_int_enter_commit ? (rm_int_cs_base + {16'd0, ivt_offset}) :
-                                      (rm_int_cs_base + uc_iret_eip);  // INT_EXIT
+                                      uc_int_enter_commit ? (pe_mode ? (gdt_cs_base + uc_int_gate_offset) :
+                                                                       (rm_int_cs_base + {16'd0, ivt_offset})) :
+                                      /* INT_EXIT */        (pe_mode ? (gdt_cs_base + uc_iret_eip) :
+                                                                       (rm_int_cs_base + uc_iret_eip));
 
         // CR write flush redirect: next fetch block after microcode instruction
         // (V-pipe is always suppressed for OP_MICROCODE, so next block is correct)

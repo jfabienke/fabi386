@@ -2712,6 +2712,7 @@ module f386_decode (
             instr_u.is_rep      <= (pd_u.pref_rep != 2'b00);
             instr_u.is_repne    <= (pd_u.pref_rep == 2'b01);
             instr_u.is_32bit    <= pd_u.eff_op32;
+            instr_u.insn_len    <= pd_u.insn_len;
             instr_u_valid       <= !pd_u.is_prefix && !pd_u.invalid;
 
             // U-pipe branch target + indirect flag
@@ -2774,6 +2775,7 @@ module f386_decode (
             instr_v.is_rep      <= (pd_v.pref_rep != 2'b00);
             instr_v.is_repne    <= (pd_v.pref_rep == 2'b01);
             instr_v.is_32bit    <= pd_v.eff_op32;
+            instr_v.insn_len    <= pd_v.insn_len;
             instr_v_valid       <= v_eligible;
 
             // V-pipe branch target + indirect flag

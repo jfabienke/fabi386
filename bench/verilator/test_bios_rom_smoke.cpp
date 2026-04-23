@@ -176,6 +176,20 @@ public:
         return top_->rootp->f386_ooo_core_top__DOT__pc_current;
     }
 
+    void print_probe(int idx) const {
+        printf("    [%3d] pc=0x%08X  fetch=%d/0x%08X  mem=%d/%s/0x%08X be=%02X  "
+               "io_wr=%d/0x%04X=0x%02X  ret=%lu  ios=%lu  ios_378=%lu\n",
+               idx, pc(),
+               (int)top_->fetch_req, (uint32_t)top_->fetch_addr,
+               (int)top_->mem_req, top_->mem_wr ? "W" : "R",
+               (uint32_t)top_->mem_addr, (int)top_->mem_byte_en,
+               (int)top_->io_port_wr, (int)top_->io_port_addr,
+               (int)top_->io_port_wdata,
+               (unsigned long)retired_,
+               (unsigned long)io_writes_,
+               (unsigned long)io_0x378_writes_);
+    }
+
     void print_io_log(size_t max = 16) const {
         size_t n = std::min(io_wr_log_.size(), max);
         printf("  io write log (%zu events, showing %zu):\n",
@@ -284,6 +298,15 @@ int main(int argc, char** argv) {
 
     tb.reset();
     printf("  reset done, starting fetch…\n\n");
+
+    // Early trace: show first 200 cycles in detail so we can see where
+    // the CPU hits the LSQ boundary assertion (or whatever goes wrong).
+    printf("  === early trace (first 30 cycles) ===\n");
+    for (int i = 0; i < 30; i++) {
+        tb.tick();
+        tb.print_probe(i);
+    }
+    printf("  === end early trace ===\n\n");
 
     const uint64_t status_every = 200'000;
     uint64_t last_status = 0;

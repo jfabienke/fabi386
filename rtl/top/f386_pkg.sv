@@ -265,6 +265,11 @@ package f386_pkg;
         logic           dest_valid;   // Instruction writes phys_dest
         phys_reg_t      phys_dest;    // Physical destination for CDB writeback
         logic [31:0]    imm_value;    // Immediate / branch displacement
+        logic [3:0]     insn_len;     // x86 instruction length in bytes (1..15);
+                                       // needed in execute to compute branch
+                                       // target as pc + insn_len + imm_value
+                                       // (the decoder has the right formula but
+                                       // the mispredict-recovery path does not).
         logic [5:0]     flags_in;     // Incoming EFLAGS {OF,SF,ZF,AF,PF,CF}
         logic [5:0]     flags_mask;   // Per-flag write mask (BOOM/80x86 pattern)
         logic           pred_taken;   // Branch prediction: taken?
@@ -310,6 +315,8 @@ package f386_pkg;
         logic           is_rep;             // REP/REPE prefix present
         logic           is_repne;           // REPNE prefix (F2)
         logic           is_32bit;           // 32-bit operand size
+        logic [3:0]     insn_len;           // Encoded instruction length (for branch
+                                             // target = pc + insn_len + imm_value).
     } ooo_instr_t;
 
     // Per-pipe decoded output (trimmed for cache storage)

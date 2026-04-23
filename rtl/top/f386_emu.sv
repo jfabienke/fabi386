@@ -860,13 +860,35 @@ module emu (
     assign AUDIO_MIX = 2'd0;   // No mix
 
     // =====================================================================
-    //  MiSTer framework tie-offs
+    //  Diagnostic LED heartbeats (3-level liveness check)
     // =====================================================================
-    // LEDs / buttons
-    // LED_USER: driven by CPU writes to I/O port 0x378 bit 0 (diagnostics
-    // "alive" heartbeat from the BIOS ROM). Snooped from the peripheral
-    // I/O bus — no changes to f386_iobus needed since periph_io_wr is
-    // broadcast to every peripheral anyway.
+    // sys_top routes these three signals to the DE10-Nano onboard LED
+    // array (LEDR[0], LEDR[4], LEDR[2] respectively). Each LED proves
+    // liveness at a different layer — if the CPU LED (LED_USER) isn't
+    // blinking, we can still see whether the 50 MHz input clock and the
+    // PLL-derived cpu_clk are running.
+    //
+    //   LED_USER       ← CPU heartbeat via I/O port 0x378 (full chain)
+    //   LED_POWER[0]   ← 50 MHz counter bit 25 (~0.75 Hz, input clock only)
+    //   LED_DISK[0]    ← cpu_clk counter bit 24 (~1 Hz, depends on PLL)
+    //   [1] bit on both = "manual control, ignore system status"
+    //
+    // The 50 MHz counter uses CLK_50M directly so it's independent of the
+    // PLL and combined_rst_n. If this LED doesn't blink, the bitstream
+    // isn't running at all.
+    logic [26:0] clk50_heartbeat;
+    always_ff @(posedge CLK_50M) begin
+        clk50_heartbeat <= clk50_heartbeat + 27'd1;
+    end
+
+    // The cpu_clk counter tells us if the PLL locked and cpu_clk is ticking.
+    // No reset — we want this to run regardless of the CPU reset state.
+    logic [26:0] cpuclk_heartbeat;
+    always_ff @(posedge cpu_clk) begin
+        cpuclk_heartbeat <= cpuclk_heartbeat + 27'd1;
+    end
+
+    // CPU-driven heartbeat: BIOS ROM writes bit 0 of port 0x378.
     logic diag_led_state;
     always_ff @(posedge cpu_clk or negedge combined_rst_n) begin
         if (!combined_rst_n)
@@ -874,9 +896,10 @@ module emu (
         else if (periph_io_wr && periph_io_addr == 16'h0378)
             diag_led_state <= periph_io_wdata[0];
     end
-    assign LED_USER = diag_led_state;
-    assign LED_POWER = 2'b00;      // let sys control power LED
-    assign LED_DISK  = 2'b00;      // no disk activity signal yet
+
+    assign LED_USER  = diag_led_state;                        // LEDR[0]
+    assign LED_POWER = {1'b1, clk50_heartbeat[25]};           // LEDR[4]
+    assign LED_DISK  = {1'b1, cpuclk_heartbeat[24]};          // LEDR[2]
     assign BUTTONS   = 2'b00;
 
     // VGA extras

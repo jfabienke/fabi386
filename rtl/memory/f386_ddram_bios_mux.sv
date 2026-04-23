@@ -1,26 +1,30 @@
 /*
- * fabi386: DDRAM ↔ BIOS ROM mux
- * ------------------------------
- * Sits between the L2 cache's DDRAM-facing port and the top-level
- * MiSTer DDRAM pins. Reads to the BIOS region (byte addresses
- * 0xFC000..0xFFFFF → word addresses 0x1F800..0x1FFFF in the 29-bit
- * ddram_addr space) are served from a synchronous BRAM ROM instead
- * of going out to DDRAM. Writes to the same region are silently
- * absorbed (the ROM is read-only).
+ * fabi386: DDRAM ↔ BIOS ROM mux (burst-aware)
+ * --------------------------------------------
+ * Sits between f386_l2_cache_sp's DDRAM-facing port and the top-level
+ * MiSTer DDRAM pins. Reads to the BIOS region (byte 0xFC000..0xFFFFF,
+ * i.e. 29-bit word addresses 0x1F800..0x1FFFF) are served from a
+ * synchronous BRAM ROM; writes to the same region are silently absorbed.
  *
- * Everything outside the BIOS region is passed through unchanged.
+ * The L2 cache issues cache-line fills with burstcnt=4 (4 × 64-bit words
+ * = 32-byte line). This mux honours that: one `l2_ddram_rd` pulse with
+ * burstcnt=N produces N consecutive `l2_ddram_dout_ready` pulses, each
+ * delivering the next 64-bit word from the ROM.
  *
- * L2 side protocol (the part that matters for the intercept):
- *   - ddram_rd pulses for one cycle when L2 wants a 64-bit word
- *   - ddram_busy is monitored by L2 to throttle further requests
- *   - ddram_dout + ddram_dout_ready deliver the response
+ * Timing model (matches MiSTer DDRAM):
+ *   cycle 0        : L2 asserts rd, addr=A, burstcnt=N. bios_rd_addr
+ *                    is driven combinationally from L2's live addr; BRAM
+ *                    latches address A at this edge.
+ *   cycle 1        : BRAM output reflects mem[A]. Mux drives dout=mem[A]
+ *                    with ready=1. rom_rd_addr_r advances to A+1.
+ *   cycle 2..N     : mux drives dout=mem[A+i] with ready=1 every cycle.
+ *   cycle N+1      : burst complete, back to IDLE.
  *
- * Intercept path timing:
- *   cycle N   : L2 asserts ddram_rd with BIOS addr → mux latches, issues
- *               bios_rd_addr, drives busy=1
- *   cycle N+1 : BRAM has clocked out bios_rd_data → mux forwards as
- *               l2_ddram_dout with l2_ddram_dout_ready=1 (one cycle)
- *   cycle N+2 : mux returns to idle, busy=0
+ *  l2_ddram_busy is asserted for the entire active window so L2 does not
+ *  issue a second request on top of the first.
+ *
+ * Everything outside the BIOS region passes through unchanged to the
+ * real DDRAM pins.
  */
 
 module f386_ddram_bios_mux (
@@ -55,62 +59,68 @@ module f386_ddram_bios_mux (
 );
 
     // BIOS region check on the 29-bit word address. BIOS byte range
-    // 0xFC000..0xFFFFF in bytes = word indices 0x1F800..0x1FFFF.
-    // In 29 bits: bits [28:11] = 18'h3F, bits [10:0] = word offset.
+    // 0xFC000..0xFFFFF = word indices 0x1F800..0x1FFFF. Bits [28:11] = 18'h3F.
     function automatic logic is_bios_word(input logic [28:0] waddr);
         is_bios_word = (waddr[28:11] == 18'h0003F);
     endfunction
 
-    typedef enum logic [1:0] {
-        IDLE       = 2'd0,
-        ROM_ISSUE  = 2'd1,  // bios_rd_addr just latched, BRAM clocking
-        ROM_RESPOND = 2'd2  // drive l2_ddram_dout + ready this cycle
-    } rom_state_t;
+    typedef enum logic [0:0] {
+        IDLE    = 1'b0,
+        DELIVER = 1'b1    // consecutive ready pulses driving each beat
+    } state_t;
 
-    rom_state_t rom_state;
-    logic [63:0] rom_data_q;
+    state_t     state;
+    logic [10:0] rom_rd_addr_r;    // next ROM index to fetch
+    logic [3:0]  beats_left;        // beats still to drive as ready
 
-    // ---- BIOS intercept FSM ----
+    wire bios_hit = is_bios_word(l2_ddram_addr);
+
+    // In IDLE, bios_rd_addr tracks L2's live request address so the BRAM
+    // latches the first beat's index on the same cycle L2 issues rd.
+    // In DELIVER, bios_rd_addr comes from the advancing registered index.
+    assign bios_rd_addr = (state == IDLE) ? l2_ddram_addr[10:0] : rom_rd_addr_r;
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rom_state   <= IDLE;
-            rom_data_q  <= 64'd0;
+            state          <= IDLE;
+            rom_rd_addr_r  <= 11'd0;
+            beats_left     <= 4'd0;
         end else begin
-            case (rom_state)
+            case (state)
                 IDLE: begin
-                    if (l2_ddram_rd && is_bios_word(l2_ddram_addr))
-                        rom_state <= ROM_ISSUE;
+                    if (l2_ddram_rd && bios_hit) begin
+                        // Next BRAM index for the second beat (if any).
+                        rom_rd_addr_r <= l2_ddram_addr[10:0] + 11'd1;
+                        // DDRAM convention: burstcnt=1 is one beat; 0 is
+                        // illegal but treat as 1 defensively.
+                        beats_left <= (l2_ddram_burstcnt == 8'd0)
+                                    ? 4'd1
+                                    : l2_ddram_burstcnt[3:0];
+                        state <= DELIVER;
+                    end
                 end
-                ROM_ISSUE: begin
-                    // bios_rd_data valid now (BRAM synchronous read)
-                    rom_data_q <= bios_rd_data;
-                    rom_state  <= ROM_RESPOND;
+
+                DELIVER: begin
+                    // The BRAM data for rom_rd_addr_r (latched last cycle
+                    // from IDLE or previous DELIVER) is valid this cycle.
+                    // We drive dout_ready combinationally below; here we
+                    // advance state.
+                    if (beats_left == 4'd1) begin
+                        state <= IDLE;
+                    end else begin
+                        rom_rd_addr_r <= rom_rd_addr_r + 11'd1;
+                    end
+                    beats_left <= beats_left - 4'd1;
                 end
-                ROM_RESPOND: begin
-                    rom_state <= IDLE;
-                end
-                default: rom_state <= IDLE;
+
+                default: state <= IDLE;
             endcase
         end
     end
 
-    // ROM read address — registered at the moment L2 asserts rd, then held
-    // stable while the BRAM clocks out. Using the live l2_ddram_addr works
-    // too because L2 tends to hold address until it sees ddram_busy deassert,
-    // but capturing it explicitly is safer.
-    logic [10:0] bios_rd_addr_q;
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            bios_rd_addr_q <= 11'd0;
-        else if (l2_ddram_rd && is_bios_word(l2_ddram_addr) && rom_state == IDLE)
-            bios_rd_addr_q <= l2_ddram_addr[10:0];
-    end
-    assign bios_rd_addr = bios_rd_addr_q;
-
     // ---- Downstream (real DDRAM) passthrough ----
-    // Suppress rd/we when L2 is targeting the BIOS region — we handle those.
-    wire bios_hit = is_bios_word(l2_ddram_addr);
-
+    // Suppress rd/we to DDRAM when the access falls in the BIOS range —
+    // we serve those internally.
     assign ddram_addr     = l2_ddram_addr;
     assign ddram_burstcnt = l2_ddram_burstcnt;
     assign ddram_din      = l2_ddram_din;
@@ -119,14 +129,10 @@ module f386_ddram_bios_mux (
     assign ddram_rd       = l2_ddram_rd && !bios_hit;
 
     // ---- Upstream (L2-facing) response muxing ----
-    // Forward DDRAM responses unchanged when not serving from ROM.
-    // When in ROM_RESPOND, drive dout from the latched ROM data with a
-    // one-cycle ready pulse.
-    assign l2_ddram_dout       = (rom_state == ROM_RESPOND) ? rom_data_q : ddram_dout;
-    assign l2_ddram_dout_ready = (rom_state == ROM_RESPOND) ? 1'b1       : ddram_dout_ready;
+    wire delivering_now = (state == DELIVER);
 
-    // Mark busy while the ROM access is in flight so L2 doesn't issue
-    // a second request on top of the first.
-    assign l2_ddram_busy = ddram_busy || (rom_state != IDLE);
+    assign l2_ddram_dout       = delivering_now ? bios_rd_data     : ddram_dout;
+    assign l2_ddram_dout_ready = delivering_now ? 1'b1             : ddram_dout_ready;
+    assign l2_ddram_busy       = ddram_busy || delivering_now || (l2_ddram_rd && bios_hit);
 
 endmodule

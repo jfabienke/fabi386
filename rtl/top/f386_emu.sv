@@ -781,17 +781,32 @@ module emu (
             .vga_de     (VGA_DE)
         );
     end else begin : gen_legacy_vga
-        // VGA framebuffer memory-mapped access (0xB8000-0xBFFFF)
-        // Currently stubbed — will be driven by memory controller for CPU VRAM access
+        // VGA framebuffer access is driven by f386_console_port, which
+        // snoops the peripheral I/O bus for writes to 0xC000..0xC002 and
+        // translates them into character/attribute writes into the VGA
+        // module's internal 4 KB text framebuffer.
+        //
+        // This exists because writing to the standard VGA framebuffer at
+        // 0xB8000 requires MOV Sreg (microcoded, off in this build) to
+        // set ES, so the CPU can't use the usual `mov es, 0xB800; mov
+        // [es:di], al` pattern. OUT to an I/O port avoids the microcode
+        // requirement entirely.
         logic [15:0] fb_addr;
         logic [7:0]  fb_wdata, fb_rdata;
         logic        fb_wr, fb_rd, fb_cs;
 
-        assign fb_addr  = 16'd0;
-        assign fb_wdata = 8'd0;
-        assign fb_wr    = 1'b0;
-        assign fb_rd    = 1'b0;
-        assign fb_cs    = 1'b0;
+        f386_console_port console_port (
+            .clk      (cpu_clk),
+            .rst_n    (combined_rst_n),
+            .io_addr  (periph_io_addr),
+            .io_wdata (periph_io_wdata),
+            .io_wr    (periph_io_wr),
+            .fb_addr  (fb_addr),
+            .fb_wdata (fb_wdata),
+            .fb_wr    (fb_wr),
+            .fb_cs    (fb_cs)
+        );
+        assign fb_rd = 1'b0;  // console port is write-only for now
 
         f386_vga vga (
             .clk        (cpu_clk),

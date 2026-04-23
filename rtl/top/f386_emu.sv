@@ -59,6 +59,11 @@ module emu (
     output logic [1:0]  LED_DISK,
     output logic [1:0]  BUTTONS,
 
+    // --- Full-array LED debug bus (fabi386 diagnostic extension) ---
+    // OR'd by sys_top into the DE10-Nano onboard LED[7:0] array. Lets the
+    // core drive all 8 LEDs independently for layered status display.
+    output logic [7:0]  LED_DEBUG,
+
     // --- Audio ---
     input  logic        CLK_AUDIO,   // 24.576 MHz
     output logic [15:0] AUDIO_L,
@@ -952,21 +957,76 @@ module emu (
     end
     wire bios_active = (bios_activity_extender != 20'd0);
 
-    // LED composition:
-    //   LEDR[0] — CPU out-port heartbeat OR'd with "L2 is fetching BIOS".
-    //     Off           → no CPU OUT, no L2 fetches → fetch/decode path dead
-    //     Solid on      → L2 continuously fetching (CPU in a cache-miss loop)
-    //     Blink pattern → CPU reaching OUT, toggling the heartbeat
-    //   LEDR[2] — cpu_clk counter, reset-gated (PLL locked + reset released)
-    //   LEDR[4] — 50 MHz counter (bitstream alive)
-    //   LEDR[6] — sys_top led_locked (framework PLL locked)
+    // Any-I/O-write activity extender (~30 ms at ~33 MHz). Lets us
+    // see "CPU is executing at least some OUT instruction" even if
+    // it's not the 0x378 LED port we expected.
+    logic [19:0] any_iowr_extender;
+    always_ff @(posedge cpu_clk or negedge combined_rst_n) begin
+        if (!combined_rst_n)
+            any_iowr_extender <= 20'd0;
+        else if (periph_io_wr)
+            any_iowr_extender <= 20'hFFFFF;
+        else if (any_iowr_extender != 20'd0)
+            any_iowr_extender <= any_iowr_extender - 20'd1;
+    end
+    wire any_iowr_active = (any_iowr_extender != 20'd0);
+
+    // Console-port write activity extender (ports 0xC000..0xC003).
+    // Separates "CPU writing to console" from "CPU writing to LED port".
+    logic [19:0] console_wr_extender;
+    wire         console_port_hit = periph_io_wr && (periph_io_addr[15:2] == 14'h3000);
+    always_ff @(posedge cpu_clk or negedge combined_rst_n) begin
+        if (!combined_rst_n)
+            console_wr_extender <= 20'd0;
+        else if (console_port_hit)
+            console_wr_extender <= 20'hFFFFF;
+        else if (console_wr_extender != 20'd0)
+            console_wr_extender <= console_wr_extender - 20'd1;
+    end
+    wire console_wr_active = (console_wr_extender != 20'd0);
+
+    // =====================================================================
+    //  Full 8-LED status display (DE10-Nano LEDR[7:0])
+    // =====================================================================
     //
-    //   LEDR[5] (sys_top drives to 0 normally) — cannot expose directly.
-    //   Future: route l2_any_rd_ever and l2_bios_rd_ever onto an external
-    //   debug header once we add one.
-    assign LED_USER  = diag_led_state | bios_active;          // LEDR[0]
-    assign LED_POWER = {1'b1, clk50_heartbeat[25]};           // LEDR[4]
-    assign LED_DISK  = {1'b1, cpuclk_heartbeat[24]};          // LEDR[2]
+    //   Reading top (LED[7]) to bottom (LED[0], nearest KEY[0]):
+    //
+    //   LEDR[7]  L2 has fetched from BIOS region at some point (sticky)
+    //   LEDR[6]  L2 has issued ANY DDRAM read at some point (sticky)
+    //   LEDR[5]  L2 actively fetching BIOS (30 ms activity extender)
+    //   LEDR[4]  50 MHz bitstream heartbeat (~1.5 Hz; no reset, no PLL)
+    //   LEDR[3]  CPU executing any OUT (30 ms activity extender)
+    //   LEDR[2]  cpu_clk heartbeat, reset-gated (PLL locked + rst released)
+    //   LEDR[1]  CPU writing to console ports 0xC000..0xC003 (extender)
+    //   LEDR[0]  CPU toggling port 0x378 bit 0 (original LED heartbeat)
+    //
+    // Legend on a fully-working system:
+    //   4 & 2    steady blinking — clocks/PLL OK
+    //   6 & 7    ON (sticky) — L2 did reach the BIOS fetch path
+    //   5        ON or blinking — L2 currently fetching BIOS
+    //   3 & 1    ON/blinking — CPU is doing I/O writes
+    //   0        blinking — CPU's LED heartbeat from the ROM
+    //
+    // Reading failure modes:
+    //   6 OFF    → L2 never issued ANY ddram read → fetch unit stuck
+    //   7 OFF but 6 ON → L2 fetches but NEVER from BIOS → addr decode?
+    //   5 blinks, 3 OFF → CPU fetches but no OUT → decode/execute stuck
+    //   3 blinks, 1 & 0 OFF → OUTs happen but not to our ports → decode bug
+    //
+    assign LED_DEBUG[7] = l2_bios_rd_ever;
+    assign LED_DEBUG[6] = l2_any_rd_ever;
+    assign LED_DEBUG[5] = bios_active;
+    assign LED_DEBUG[4] = clk50_heartbeat[25];
+    assign LED_DEBUG[3] = any_iowr_active;
+    assign LED_DEBUG[2] = cpuclk_heartbeat[24];
+    assign LED_DEBUG[1] = console_wr_active;
+    assign LED_DEBUG[0] = diag_led_state;
+
+    // Keep the legacy framework paths silent so LED[0/2/4] show exactly
+    // what LED_DEBUG drives (sys_top OR's them together; zero is a no-op).
+    assign LED_USER  = 1'b0;
+    assign LED_POWER = 2'b00;
+    assign LED_DISK  = 2'b00;
     assign BUTTONS   = 2'b00;
 
     // VGA extras

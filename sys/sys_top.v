@@ -153,8 +153,16 @@ wire led_d =  led_disk[1]  ? ~led_disk[0]  : ~(led_disk[0] | gp_out[29]);
 wire led_u = ~led_user;
 wire led_locked;
 
+// fabi386 diagnostic addition: 8-bit debug vector from emu, OR'd into
+// the final LED array. Lets the core drive all 8 onboard LEDs directly
+// for status/debug display. Upstream framework behaviour (led_p/led_d/
+// led_u on bits [4]/[2]/[0], led_locked on [6]) is preserved — an OFF
+// led_debug is a no-op.
+wire [7:0] led_debug;
+
 //LEDs on de10-nano board
-assign LED = (led_overtake & led_state) | (~led_overtake & {1'b0,led_locked,1'b0, ~led_p, 1'b0, ~led_d, 1'b0, ~led_u});
+assign LED = (led_overtake & led_state) |
+             ((~led_overtake) & ({1'b0,led_locked,1'b0,~led_p,1'b0,~led_d,1'b0,~led_u} | led_debug));
 
 wire [2:0] mcp_btn;
 wire       mcp_sdcd;
@@ -1799,6 +1807,7 @@ emu emu
 	.LED_USER(led_user),
 	.LED_POWER(led_power),
 	.LED_DISK(led_disk),
+	.LED_DEBUG(led_debug),     // fabi386 diagnostic addition
 
 	.CLK_AUDIO(clk_audio),
 	.AUDIO_L(audio_l),

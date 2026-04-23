@@ -918,7 +918,53 @@ module emu (
             diag_led_state <= periph_io_wdata[0];
     end
 
-    assign LED_USER  = diag_led_state;                        // LEDR[0]
+    // Debug: L2-to-DDRAM activity probes. These catch the case where the
+    // CPU never reaches OUT because it's stuck somewhere upstream (e.g.,
+    // L2 not fetching from BIOS, fetch unit stalled, decode hanging on a
+    // specific opcode). The mux's ifetch-eligible region is 0xFC000..
+    // 0xFFFFF, word addr bits [28:11] == 18'h3F.
+    wire l2_any_rd   = l2_ddram_rd;
+    wire l2_bios_rd  = l2_ddram_rd && (l2_ddram_addr[28:11] == 18'h0003F);
+
+    // Sticky bits: set on first read, never cleared until reset.
+    logic l2_any_rd_ever, l2_bios_rd_ever;
+    always_ff @(posedge cpu_clk or negedge combined_rst_n) begin
+        if (!combined_rst_n) begin
+            l2_any_rd_ever  <= 1'b0;
+            l2_bios_rd_ever <= 1'b0;
+        end else begin
+            if (l2_any_rd)  l2_any_rd_ever  <= 1'b1;
+            if (l2_bios_rd) l2_bios_rd_ever <= 1'b1;
+        end
+    end
+
+    // Activity monostable: ~30 ms on-time per BIOS read, retriggered by
+    // subsequent reads. Lets slow-eye readers see "L2 is actively fetching
+    // ROM" as steady-on vs. "fetched once long ago" as the sticky bit.
+    logic [19:0] bios_activity_extender;
+    always_ff @(posedge cpu_clk or negedge combined_rst_n) begin
+        if (!combined_rst_n)
+            bios_activity_extender <= 20'd0;
+        else if (l2_bios_rd)
+            bios_activity_extender <= 20'hFFFFF;
+        else if (bios_activity_extender != 20'd0)
+            bios_activity_extender <= bios_activity_extender - 20'd1;
+    end
+    wire bios_active = (bios_activity_extender != 20'd0);
+
+    // LED composition:
+    //   LEDR[0] — CPU out-port heartbeat OR'd with "L2 is fetching BIOS".
+    //     Off           → no CPU OUT, no L2 fetches → fetch/decode path dead
+    //     Solid on      → L2 continuously fetching (CPU in a cache-miss loop)
+    //     Blink pattern → CPU reaching OUT, toggling the heartbeat
+    //   LEDR[2] — cpu_clk counter, reset-gated (PLL locked + reset released)
+    //   LEDR[4] — 50 MHz counter (bitstream alive)
+    //   LEDR[6] — sys_top led_locked (framework PLL locked)
+    //
+    //   LEDR[5] (sys_top drives to 0 normally) — cannot expose directly.
+    //   Future: route l2_any_rd_ever and l2_bios_rd_ever onto an external
+    //   debug header once we add one.
+    assign LED_USER  = diag_led_state | bios_active;          // LEDR[0]
     assign LED_POWER = {1'b1, clk50_heartbeat[25]};           // LEDR[4]
     assign LED_DISK  = {1'b1, cpuclk_heartbeat[24]};          // LEDR[2]
     assign BUTTONS   = 2'b00;
